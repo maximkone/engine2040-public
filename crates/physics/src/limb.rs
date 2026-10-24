@@ -2,8 +2,8 @@
 //! times density, velocity inherited from the parent bone plus the blade
 //! impulse, equal-and-opposite recoil handed back for the stump servo.
 //!
-//! Consumer: the arena match step spawns one [`LimbSpawn`] per cut event
-//! (see `engine_combat::Cut`) and steps the [`LimbPool`] once per tick; the
+//! Consumer: the arena match step spawns one `LimbSpawn` per cut event
+//! (see `engine_combat::Cut`) and steps the `LimbPool` once per tick; the
 //! debris ledger frees the debris the spawn report asks for; the snapshot
 //! bytes join the rollback snapshot. Data owner: `engine-physics`. Units:
 //! positions in micrometers, velocities in mm/s, angles in micro-radians,
@@ -11,9 +11,9 @@
 //! in fixed 60 Hz ticks. Determinism scope: integer math only (no float, so
 //! no NaN and no platform drift); spawns in a batch run in canonical
 //! (swing, victim, joint) order; eviction picks by spawn id; the hash is
-//! FNV-1a over the snapshot bytes. Errors: [`LimbError`] for bad specs,
+//! FNV-1a over the snapshot bytes. Errors: `LimbError` for bad specs,
 //! caps and snapshot bytes; nothing panics on user data. Budget: spawn and
-//! step touch at most [`MAX_LIMBS`] bodies, no allocation after
+//! step touch at most `MAX_LIMBS` bodies, no allocation after
 //! construction (the pool is pre-sized), so a 64-fighter siege costs a few
 //! microseconds per tick.
 
@@ -51,7 +51,7 @@ const TURN_URAD: i32 = 6_283_185;
 /// Why a limb request was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LimbError {
-    /// Body cap zero or past [`MAX_LIMBS`].
+    /// Body cap zero or past `MAX_LIMBS`.
     BadCap(usize),
     /// Volume or density is zero or past its bound.
     BadVolume,

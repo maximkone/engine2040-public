@@ -1,10 +1,10 @@
 //! gait: a procedural walk cycle that drives the powered ragdoll's servo pose.
 //!
-//! Consumer: the arena locomotion loop advances [`GaitCycle`] from the wanted
-//! speed and turn, reads [`GaitCycle::pose`], feeds it to
-//! [`PoweredRagdoll::set_animated`](super::powered::PoweredRagdoll::set_animated)
-//! and lets [`balance`](super::balance) bias it through
-//! [`GaitCycle::set_bias`]. The legs carry the body: the root travel is derived
+//! Consumer: the arena locomotion loop advances `GaitCycle` from the wanted
+//! speed and turn, reads `GaitCycle::pose`, feeds it to
+//! `PoweredRagdoll::set_animated`
+//! and lets `balance` bias it through
+//! `GaitCycle::set_bias`. The legs carry the body: the root travel is derived
 //! from the planted foot's own backward move, so a shove, a slope or a step
 //! changes the contacts instead of swapping a clip. Owner: this module owns the
 //! phase, the stand blend, the planted-foot travel, the recovery step and the
@@ -13,7 +13,7 @@
 //! const Q15 sine table, an integer index plus a linear interpolation); the
 //! pose's float work is `+ - * /` and one `sqrt` per quaternion, so one input
 //! sequence hashes one way. No libm and no allocation on the tick path
-//! ([`GaitCycle::pose_into`] reuses caller buffers).
+//! (`GaitCycle::pose_into` reuses caller buffers).
 #![forbid(unsafe_code)]
 
 use super::balance::CaptureBias;

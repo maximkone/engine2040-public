@@ -1,19 +1,19 @@
 //! balance: center-of-mass balance core plus stagger, stumble and fall.
 //!
 //! Consumer: the arena hit pipeline observes bone centers plus masses every
-//! tick and feeds each landed shove through [`BalanceState`]; on a staggered
-//! verdict the rapier-gated [`BalanceState::strike`] frees the struck subtree
+//! tick and feeds each landed shove through `BalanceState`; on a staggered
+//! verdict the rapier-gated `BalanceState::strike` frees the struck subtree
 //! on the powered ragdoll servo, while heavier blows escalate through
-//! [`BalanceState::strike_gait`] into a stumble gait, a full-body fall, an
+//! `BalanceState::strike_gait` into a stumble gait, a full-body fall, an
 //! arm-catch and the powered-ragdoll 60-tick get-up. Owner: this module owns
-//! [`BalanceState`], [`BalanceParams`], [`BalanceVerdict`], [`GaitVerdict`],
-//! [`GaitPhase`] and [`BalanceError`]. Units: meters,
+//! `BalanceState`, `BalanceParams`, `BalanceVerdict`, `GaitVerdict`,
+//! `GaitPhase` and `BalanceError`. Units: meters,
 //! kilograms, Q8 impulse units where 256 reads unity, ticks at 60 Hz.
 //! Determinism: stable bone order with `+ - * /` and comparisons only, no
 //! clock and no order-dependent maps; one event sequence hashes one way.
 //! The gait phase plus its countdowns hash with the stagger core; servo pose
-//! reads (`bone_poses`, `blend_weight`) never do. Errors: [`BalanceError`]
-//! (plus [`ServoError`] with the servo feature),
+//! reads (`bone_poses`, `blend_weight`) never do. Errors: `BalanceError`
+//! (plus `ServoError` with the servo feature),
 //! never a panic on caller data. Budget: the tick path writes caller-owned
 //! buffers plus the state struct only and allocates nothing; staggering and
 //! heavier strikes take one mask buffer each at event rate, never per tick.
@@ -35,7 +35,7 @@ pub const STUMBLE_TICKS: u32 = 45;
 pub const FALL_PRONE_TICKS: u32 = 30;
 /// Catch window, ticks at 60 Hz: the arms track the animated reach-out while
 /// the body stays down; on expiry the caller starts the powered-ragdoll get-up through
-/// [`BalanceState::rise`], which blends back within 60 ticks.
+/// `BalanceState::rise`, which blends back within 60 ticks.
 pub const CATCH_TICKS: u32 = 15;
 /// Stumble offset above the stagger threshold, Q8 impulse units: with the
 /// default tuning the third of five evenly spaced shove strengths is the
@@ -92,7 +92,7 @@ pub enum BalanceVerdict {
 }
 
 /// Impact verdict: the blow's own level, from a light touch to a fall. This
-/// reports what the blow warrants, while [`GaitPhase`] tracks what the
+/// reports what the blow warrants, while `GaitPhase` tracks what the
 /// fighter is doing: impacts never downgrade an in-flight fall, so the two
 /// agree except while a heavier phase is still running its course.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,10 +187,10 @@ pub const MM_PER_CREDIT_TICK: u32 = 40;
 
 /// Capture-point servo bias: integer planar error plus the three servo
 /// target shifts the presentation servo adds. Owner: this module builds it
-/// in [`servo_bias_targets`]; [`BalanceState::strike_gait_biased`] reads it
+/// in [`servo_bias_targets`]; `BalanceState::strike_gait_biased` reads it
 /// through [`BalanceState::capture_bias`] on every landed blow. Units:
 /// millimetres for the error, Q8 units for the shifts. Determinism: integer
-/// math only, no allocation, and the bias never enters [`BalanceState`]'s
+/// math only, no allocation, and the bias never enters `BalanceState`'s
 /// hash, so the same shove sequence hashes one way with or without a read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureBias {
@@ -284,7 +284,7 @@ pub fn biased_recovery_ticks(verdict: GaitVerdict, bias: &CaptureBias) -> u32 {
 /// Gait phase: what the fighter's body is doing. Stagger has no phase (the
 /// staggered flag covers it); stumble, fall and catch each own a countdown
 /// in [`BalanceState::step`]. Getting up belongs to the servo
-/// ([`RagdollMode::GettingUp`](super::powered::RagdollMode) under the rapier
+/// (`RagdollMode::GettingUp` under the rapier
 /// feature); the balance side only raises [`BalanceState::getup_due`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GaitPhase {
@@ -568,7 +568,7 @@ impl BalanceState {
     }
 
     /// Whether the catch window expired and the powered-ragdoll get-up is due. Consumed
-    /// by [`BalanceState::rise`], cleared by any fresh stumble or fall.
+    /// by `BalanceState::rise`, cleared by any fresh stumble or fall.
     pub fn getup_due(&self) -> bool {
         self.getup_due
     }
@@ -707,7 +707,7 @@ impl BalanceState {
     /// Whether the stance is legal: no open stagger window and no running
     /// gait phase. A raised get-up flag still counts as legal — the fall
     /// already closed and only the caller's rise through
-    /// [`BalanceState::rise`] remains.
+    /// `BalanceState::rise` remains.
     pub fn stance_legal(&self) -> bool {
         !self.staggered && self.gait == GaitPhase::Steady
     }
@@ -823,7 +823,7 @@ impl BalanceState {
         }
     }
 
-    /// Landed-blow entry with capture bias: runs [`BalanceState::strike_gait`]
+    /// Landed-blow entry with capture bias: runs `BalanceState::strike_gait`
     /// for the servo treatment, then reads [`BalanceState::capture_bias`] for
     /// the same blow so every landed hit returns its ankle/hip/stance target
     /// shifts beside the verdict. Read-only after the strike: the bias never
@@ -983,7 +983,7 @@ pub fn center_of_mass(positions: &[[f32; 3]], masses: &[f32]) -> Result<[f32; 3]
 /// Center of mass in integer millimetres: each meter component scales by
 /// 1000 and rounds half away from zero, so platform float drift under half
 /// a millimetre hashes equal while a real 1 mm move hashes different.
-/// Quantization runs on integer bit math through [`meters_to_mm`], so no
+/// Quantization runs on integer bit math through `meters_to_mm`, so no
 /// float-to-int cast lowering can split the hash between CPUs; non-finite
 /// inputs (unreachable after validation) map to one sentinel so the hash
 /// stays total. Pure, no allocation; servo math untouched.

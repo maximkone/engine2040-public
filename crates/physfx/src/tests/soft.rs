@@ -2,8 +2,9 @@
 //! finite, settles, and prints the one stable `physfx: soft:` receipt line.
 
 use super::*;
-use crate::soft::{ClothDesc, ClothError, SoftCloth, SoftWorld, MAX_CLOTHS};
+use crate::soft::{ClothDesc, ClothError, SoftCloth, SoftSolve, SoftWorld, MAX_CLOTHS};
 use crate::verbs::{fx_cloth, ClothEvent};
+use std::time::Instant;
 
 /// A world holding the 4x4 banner of the receipt.
 fn banner() -> SoftWorld {
@@ -201,4 +202,183 @@ fn a_soft_cape_and_banner_both_hang_and_step() {
     step_soft(&mut world, 120);
     assert!(world.cloth(cape).expect("cape").sag_cm() > 0.0);
     assert!(world.cloth(banner).expect("banner").sag_cm() > 0.0);
+}
+
+/// The structural edges of a sheet with their rest length, in the order `Sheet::new` builds
+/// them: the neighbours and the two diagonals of every grid cell. Both solve forms touch this
+/// same edge set, so the constraint total per tick is fixed by the sheet, not by the form.
+fn rest_edges(desc: ClothDesc) -> Vec<(usize, usize, f32)> {
+    let at = |row: usize, col: usize| row * desc.cols + col;
+    let mut out = Vec::new();
+    for row in 0..desc.rows {
+        for col in 0..desc.cols {
+            if col + 1 < desc.cols {
+                out.push((at(row, col), at(row, col + 1), desc.spacing_m));
+            }
+            if row + 1 < desc.rows {
+                out.push((at(row, col), at(row + 1, col), desc.spacing_m));
+            }
+            if row + 1 < desc.rows && col + 1 < desc.cols {
+                let diag = desc.spacing_m * std::f32::consts::SQRT_2;
+                out.push((at(row, col), at(row + 1, col + 1), diag));
+                out.push((at(row + 1, col), at(row, col + 1), diag));
+            }
+        }
+    }
+    out
+}
+
+/// The worst structural edge in the sheet: longest current length over its rest length.
+fn longest_stretch(cloth: &SoftCloth) -> f32 {
+    let p = cloth.particles();
+    rest_edges(cloth.desc())
+        .into_iter()
+        .map(|(a, b, rest)| {
+            let (dx, dy, dz) = (p[a][0] - p[b][0], p[a][1] - p[b][1], p[a][2] - p[b][2]);
+            (dx * dx + dy * dy + dz * dz).sqrt() / rest
+        })
+        .fold(1.0_f32, f32::max)
+}
+
+/// A 64-bit digest of every particle position: the determinism check of the soft layer.
+fn digest(cloth: &SoftCloth) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for p in cloth.particles() {
+        for v in p {
+            hash ^= u64::from(v.to_bits());
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// What one pinned cloth reads after `ticks`: the worst edge stretch at rest, the worst stretch
+/// seen on the way there, the tick its free row went quiet for ten ticks in a row, and the state
+/// digest.
+struct Trip {
+    stretch: f32,
+    peak: f32,
+    settle: usize,
+    digest: u64,
+}
+
+/// Steps a 4x4 banner on `solve` until it settles (or `ticks`) and reports the four numbers.
+fn trip(solve: SoftSolve, ticks: usize) -> Trip {
+    let mut world = SoftWorld::new().with_solve(solve);
+    world.spawn(ClothDesc::BANNER).expect("the banner builds");
+    let mut peak = 1.0_f32;
+    let mut prev = last_row(cloth(&world));
+    let mut settle = ticks;
+    let mut quiet = 0;
+    for tick in 1..=ticks {
+        world.step();
+        let now = last_row(cloth(&world));
+        let moved = now
+            .iter()
+            .zip(&prev)
+            .map(|(a, b)| {
+                let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            })
+            .fold(0.0_f32, f32::max);
+        quiet = if moved < 0.001 { quiet + 1 } else { 0 };
+        if quiet >= 10 && settle == ticks {
+            settle = tick;
+        }
+        prev = now;
+        peak = peak.max(longest_stretch(cloth(&world)));
+    }
+    let cloth = cloth(&world);
+    Trip {
+        stretch: longest_stretch(cloth),
+        peak,
+        settle,
+        digest: digest(cloth),
+    }
+}
+
+/// PX47, measured: one step of six solver iterations against six substeps of one iteration
+/// each, on the same pinned banner (the same spring set, six solves per tick). The small-step
+/// form is not cheaper, not stiffer at rest and not quicker to settle here, so the shipped
+/// single-step path stays the default. The numbers are printed, never asserted as a win.
+#[test]
+fn soft_substeps_measure_against_one_step_of_six_iterations() {
+    let six = trip(SoftSolve::Iterations(6), 240);
+    let small = trip(SoftSolve::Substeps(6), 240);
+    println!(
+        "PX47 1x6: rest={:.4} peak={:.4} settle={} | 6x1: rest={:.4} peak={:.4} settle={}",
+        six.stretch, six.peak, six.settle, small.stretch, small.peak, small.settle
+    );
+    let rest_gap = (six.stretch - small.stretch).abs() / six.stretch;
+    assert!(
+        rest_gap < 0.01,
+        "the two forms rest {:.4} and {:.4} apart: {rest_gap:.4}",
+        six.stretch,
+        small.stretch
+    );
+    for t in [&six, &small] {
+        assert!(t.peak.is_finite() && t.peak < 2.0, "peak {:.4}", t.peak);
+    }
+}
+
+/// PX47 F2P: the resting stretch of a spring cloth is set by the spring's own compliance, not
+/// by how often the solver visits it. Both forms read here at 2 and at 6: the spread stays
+/// under half a percent either way, so there is no stiffness the tier knob could move.
+#[test]
+fn soft_rest_stretch_ignores_the_iteration_count_in_both_forms() {
+    let lo_step = trip(SoftSolve::Iterations(2), 240);
+    let hi_step = trip(SoftSolve::Iterations(6), 240);
+    let lo_small = trip(SoftSolve::Substeps(2), 240);
+    let hi_small = trip(SoftSolve::Substeps(6), 240);
+    let step_spread = (lo_step.stretch - hi_step.stretch).abs() / hi_step.stretch;
+    let small_spread = (lo_small.stretch - hi_small.stretch).abs() / hi_small.stretch;
+    println!(
+        "PX47 F2P: iter2 rest={:.4} iter6 rest={:.4} spread={:.5} | substep2 rest={:.4} substep6 rest={:.4} spread={:.5}",
+        lo_step.stretch, hi_step.stretch, step_spread, lo_small.stretch, hi_small.stretch, small_spread
+    );
+    assert!(
+        step_spread < 0.005,
+        "one step moved {step_spread:.5} with the iteration count"
+    );
+    assert!(
+        small_spread < 0.005,
+        "substeps moved {small_spread:.5} with the substep count"
+    );
+}
+
+#[test]
+fn soft_digest_is_identical_across_two_worlds() {
+    let a = trip(SoftSolve::Substeps(6), 120);
+    let b = trip(SoftSolve::Substeps(6), 120);
+    println!("PX47 digest a={:016x} b={:016x}", a.digest, b.digest);
+    assert_eq!(a.digest, b.digest, "two cloth worlds diverged");
+}
+
+/// PX47 cost, a measurement and not a speed claim: the two forms over the same ticks on a cape.
+#[test]
+fn soft_substeps_cost_measurement() {
+    let cape = ClothDesc::CAPE;
+    let ticks = 400;
+    let mut ratios = Vec::new();
+    for _ in 0..3 {
+        let mut wide = SoftWorld::new().with_solve(SoftSolve::Iterations(6));
+        wide.spawn(cape).expect("cape");
+        let mut narrow = SoftWorld::new().with_solve(SoftSolve::Substeps(6));
+        narrow.spawn(cape).expect("cape");
+        let t0 = Instant::now();
+        for _ in 0..ticks {
+            wide.step();
+        }
+        let one = t0.elapsed().as_secs_f64();
+        let t1 = Instant::now();
+        for _ in 0..ticks {
+            narrow.step();
+        }
+        let small = t1.elapsed().as_secs_f64();
+        ratios.push(small / one);
+    }
+    let mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+    let spread = ratios.iter().fold(0.0_f64, |m, r| m.max((r - mean).abs()));
+    println!("PX47 cost: ratios {ratios:?} mean={mean:.3} spread=+-{spread:.3}");
+    assert!(mean.is_finite() && mean > 0.0, "cost ratio {mean:.3}");
 }

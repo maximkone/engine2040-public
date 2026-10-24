@@ -94,12 +94,13 @@ pub(super) fn frustum_planes_from_view_proj(view_proj: glam::Mat4) -> [[f32; 4];
     out
 }
 
-/// The live submit order: `rl32_submit_order` (pipeline groups adjacent,
+/// The CPU submit order: `rl32_submit_order` (pipeline groups adjacent,
 /// stable twice) then the tested sphere test per draw. Returns the kept
 /// indices and their count. A frame whose view-projection yields no finite
 /// planes keeps every draw instead of hiding geometry.
-/// Caller: `Presenter::stage_frame` and `stage_frame_with_camera`.
-pub(super) fn live_submit_order(
+/// Caller: `live_submit_order` below (the flag-off default and the GPU
+/// plan's fallback).
+pub(super) fn cpu_submit_order(
     list: &DrawList,
     bounds: &DrawBounds,
     view_proj: glam::Mat4,
@@ -123,6 +124,154 @@ pub(super) fn live_submit_order(
         }
     }
     (buf, kept)
+}
+
+/// Env flag for the GPU cull plan: `1` or `true` turns it on. Off (unset or
+/// any other value) is the CPU order above, byte for byte the default.
+pub(super) const GPU_CULL_ENV: &str = "E2040_GPU_CULL";
+
+/// The flag as a bool, from the raw env value. Named so a test reads the
+/// parse without touching the process environment.
+pub(super) fn gpu_cull_flag_value(value: Option<&str>) -> bool {
+    matches!(value, Some("1") | Some("true"))
+}
+
+/// Is the GPU cull plan asked for this frame? Read once per submit.
+pub(super) fn gpu_cull_requested() -> bool {
+    let raw = std::env::var(GPU_CULL_ENV).ok();
+    gpu_cull_flag_value(raw.as_deref())
+}
+
+/// One frame's GPU-rule cull plan: the same pipeline-grouped order plus the
+/// packed spheres the rule ran on, its per-draw flags and the five indirect
+/// args. These are the words `crate::gpu_cull::GpuCuller` writes on the
+/// device ([`cull_cpu_flags_into`], [`visible_count`], [`indirect_args_5`]),
+/// so the device pass and this plan run one rule.
+pub(super) struct GpuCullPlan {
+    /// Surviving draw indices, pipeline-grouped order.
+    pub(super) order: [usize; MAX_DRAWS_PER_FRAME],
+    /// Filled prefix of `order`.
+    pub(super) submitted: usize,
+    /// Packed `[x, y, z, radius]` in grouped order (the rule's input).
+    pub(super) spheres: [[f32; 4]; MAX_DRAWS_PER_FRAME],
+    /// 0/1 flag per grouped slot: 1 keeps the draw.
+    pub(super) flags: [u8; MAX_DRAWS_PER_FRAME],
+    /// Slots the rule ran on.
+    pub(super) packed: usize,
+    /// The 5-u32 indexed indirect args (`draw::indirect_args_5`).
+    pub(super) args: [u32; crate::gpu_cull::INDIRECT_WORDS],
+}
+
+impl GpuCullPlan {
+    /// Zeroed plan: no survivors, no flags.
+    pub(super) fn new() -> Self {
+        Self {
+            order: [0usize; MAX_DRAWS_PER_FRAME],
+            submitted: 0,
+            spheres: [[0.0; 4]; MAX_DRAWS_PER_FRAME],
+            flags: [0u8; MAX_DRAWS_PER_FRAME],
+            packed: 0,
+            args: [0u32; crate::gpu_cull::INDIRECT_WORDS],
+        }
+    }
+
+    /// Survivor ids in draw order, the CPU plan's own shape. Test-only: the
+    /// frame path draws `order[..submitted]` directly.
+    #[cfg(test)]
+    pub(super) fn survivors(&self) -> &[usize] {
+        &self.order[..self.submitted]
+    }
+
+    /// The words the device pass writes, in one byte image: packed spheres,
+    /// flags, then the five args. Same frame twice gives the same bytes.
+    /// Test-only until the indirect draw reads the block back.
+    #[cfg(test)]
+    pub(super) fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.packed * 17 + 20);
+        for sphere in &self.spheres[..self.packed] {
+            for value in sphere {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&self.flags[..self.packed]);
+        for word in self.args {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+}
+
+impl Default for GpuCullPlan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Build the GPU-rule plan for one frame. `None` means the plan refused the
+/// frame; the caller then takes the CPU order (the fallback) and no draw is
+/// lost. A skinned draw is kept, exactly as the CPU order keeps it: its
+/// static bound cannot describe its posed vertices.
+pub(super) fn gpu_submit_order(
+    list: &DrawList,
+    bounds: &DrawBounds,
+    view_proj: glam::Mat4,
+    plan: &mut GpuCullPlan,
+) -> Option<([usize; MAX_DRAWS_PER_FRAME], usize)> {
+    let planes = frustum_planes_from_view_proj(view_proj);
+    let mut sorted = [0usize; MAX_DRAWS_PER_FRAME];
+    let slots = rl32_submit_order(list, &mut sorted).len();
+    if slots == 0 {
+        return None;
+    }
+    for slot in 0..slots {
+        let draw = sorted[slot];
+        plan.spheres[slot] = bounds.spheres.get(draw).copied().unwrap_or([0.0; 4]);
+        plan.flags[slot] = 0;
+    }
+    let packed =
+        crate::draw::cull_cpu_flags_into(&plan.spheres[..slots], &planes, &mut plan.flags[..slots]);
+    if packed != slots {
+        return None;
+    }
+    for slot in 0..slots {
+        if !bounds.cullable.get(sorted[slot]).copied().unwrap_or(false) {
+            plan.flags[slot] = 1;
+        }
+    }
+    let count = crate::draw::visible_count(&plan.flags[..slots]);
+    plan.args = crate::draw::indirect_args_5(count);
+    plan.packed = slots;
+    plan.submitted = 0;
+    for slot in 0..slots {
+        if plan.flags[slot] == 1 {
+            plan.order[plan.submitted] = sorted[slot];
+            plan.submitted += 1;
+        }
+    }
+    // The args count and the survivor list must agree, or the plan is refused.
+    if u32::try_from(plan.submitted).ok() != Some(count) {
+        plan.submitted = 0;
+        return None;
+    }
+    Some((plan.order, plan.submitted))
+}
+
+/// The live submit order: the GPU-rule plan when [`GPU_CULL_ENV`] is set,
+/// else [`cpu_submit_order`]. Either way the order is the CPU one for every
+/// frame until the flag is on, and a refused plan falls back to it.
+/// Caller: `Presenter::stage_frame` and `stage_frame_with_camera`.
+pub(super) fn live_submit_order(
+    list: &DrawList,
+    bounds: &DrawBounds,
+    view_proj: glam::Mat4,
+) -> ([usize; MAX_DRAWS_PER_FRAME], usize) {
+    if gpu_cull_requested() {
+        let mut plan = GpuCullPlan::new();
+        if let Some(order) = gpu_submit_order(list, bounds, view_proj, &mut plan) {
+            return order;
+        }
+    }
+    cpu_submit_order(list, bounds, view_proj)
 }
 
 #[cfg(test)]
@@ -290,5 +439,135 @@ mod tests {
             cull.contains("sphere_visible_cpu"),
             "the live order calls the tested sphere test"
         );
+    }
+
+    // ---- OPT57: the GPU-rule plan against the CPU order ------------------
+
+    /// Five draws: one inside the frame, one far outside it, one skinned
+    /// draw whose static bound lies outside too (the CPU order keeps it),
+    /// and two more mixed.
+    fn fixture_bounds() -> DrawBounds {
+        let mut out = DrawBounds {
+            spheres: [[0.0; 4]; MAX_DRAWS_PER_FRAME],
+            cullable: [false; MAX_DRAWS_PER_FRAME],
+        };
+        out.spheres[0] = [0.0, 0.0, -20.0, 1.0];
+        out.cullable[0] = true;
+        out.spheres[1] = [4000.0, 4000.0, 4000.0, 1.0];
+        out.cullable[1] = true;
+        out.spheres[2] = [4000.0, 4000.0, 4000.0, 1.0];
+        out.cullable[2] = false; // skinned: the sphere rule never drops it
+        out.spheres[3] = [0.0, 0.0, -60.0, 2.0];
+        out.cullable[3] = true;
+        out.spheres[4] = [9000.0, 0.0, 0.0, 0.5];
+        out.cullable[4] = false;
+        out
+    }
+
+    fn fixture_list() -> DrawList {
+        let scene = crate::v1::default_scene(160, 120).expect("scene valid");
+        DrawList {
+            camera: scene.camera.clone(),
+            light: scene.light.clone(),
+            items: vec![
+                item(5, None),
+                item(2, Some(7)),
+                item(9, None),
+                item(1, Some(7)),
+                item(7, None),
+            ],
+        }
+    }
+
+    /// A fixture camera set: the default look, a turned camera, a high look,
+    /// and one pulled far back. Each builds its own view-projection.
+    fn fixture_cameras() -> Vec<glam::Mat4> {
+        let scene = crate::v1::default_scene(160, 120).expect("scene valid");
+        let base = scene.camera.clone();
+        let mut turned = base.clone();
+        turned.target = base.eye + glam::Vec3::new(0.0, 0.0, -30.0);
+        let mut high = base.clone();
+        high.eye = base.eye + glam::Vec3::new(0.0, 40.0, 0.0);
+        high.target = base.target;
+        let mut far = base.clone();
+        far.eye = base.eye * 8.0;
+        far.far = 900.0;
+        vec![
+            base.view_proj().expect("base camera builds"),
+            turned.view_proj().expect("turned camera builds"),
+            high.view_proj().expect("high camera builds"),
+            far.view_proj().expect("far camera builds"),
+        ]
+    }
+
+    #[test]
+    fn gpu_cull_plan_matches_cpu_plan_on_fixture_cameras() {
+        // Oracle first: the CPU order is the rule owner. The GPU plan runs
+        // the same rule over the packed spheres and must keep the same ids
+        // in the same order, on every fixture camera.
+        let list = fixture_list();
+        let bounds = fixture_bounds();
+        let mut rejected_any = false;
+        for (index, view_proj) in fixture_cameras().into_iter().enumerate() {
+            let (cpu_order, cpu_count) = cpu_submit_order(&list, &bounds, view_proj);
+            let mut plan = GpuCullPlan::new();
+            let (gpu_order, gpu_count) = gpu_submit_order(&list, &bounds, view_proj, &mut plan)
+                .unwrap_or_else(|| panic!("camera {index}: the plan describes the frame"));
+            assert_eq!(
+                cpu_order[..cpu_count],
+                gpu_order[..gpu_count],
+                "camera {index}: same survivors in the same order"
+            );
+            assert_eq!(
+                plan.survivors(),
+                &cpu_order[..cpu_count],
+                "camera {index}: the plan's own list matches the CPU order"
+            );
+            assert_eq!(
+                plan.args,
+                crate::draw::indirect_args_5(u32::try_from(cpu_count).expect("count fits u32")),
+                "camera {index}: the indirect args count the same draws"
+            );
+            assert_eq!(plan.packed, list.items.len(), "camera {index}: 5 slots");
+            rejected_any |= cpu_count < list.items.len();
+        }
+        assert!(rejected_any, "some fixture camera rejects a draw");
+    }
+
+    #[test]
+    fn gpu_cull_plan_bytes_are_identical_twice() {
+        // Same list plus the same camera gives the same words twice: the
+        // packed spheres, the flags and the args are one byte image.
+        let list = fixture_list();
+        let bounds = fixture_bounds();
+        let view_proj = fixture_cameras().remove(0);
+        let mut first = GpuCullPlan::new();
+        let mut second = GpuCullPlan::new();
+        assert!(
+            gpu_submit_order(&list, &bounds, view_proj, &mut first).is_some(),
+            "first plan describes the frame"
+        );
+        assert!(
+            gpu_submit_order(&list, &bounds, view_proj, &mut second).is_some(),
+            "second plan describes the frame"
+        );
+        assert_eq!(first.bytes(), second.bytes(), "plan words identical twice");
+        assert_eq!(
+            first.survivors(),
+            second.survivors(),
+            "order identical twice"
+        );
+    }
+
+    #[test]
+    fn gpu_cull_flag_is_opt_in_and_unset_means_cpu() {
+        // The flag is read from the env var, off unless it says 1 or true.
+        assert!(!gpu_cull_flag_value(None), "unset keeps the CPU order");
+        assert!(!gpu_cull_flag_value(Some("")), "empty keeps the CPU order");
+        assert!(!gpu_cull_flag_value(Some("0")), "0 keeps the CPU order");
+        assert!(!gpu_cull_flag_value(Some("off")), "off keeps the CPU order");
+        assert!(gpu_cull_flag_value(Some("1")), "1 asks for the plan");
+        assert!(gpu_cull_flag_value(Some("true")), "true asks for the plan");
+        assert_eq!(GPU_CULL_ENV, "E2040_GPU_CULL", "the flag names its env var");
     }
 }

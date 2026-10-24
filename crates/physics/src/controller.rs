@@ -1,6 +1,6 @@
 //! controller: Rapier-backed character controller.
 //!
-//! Kinematic capsule on top of the Rapier [`World`](super::rapier::World)
+//! Kinematic capsule on top of the Rapier [`World`]
 //! adapter: the inner world mirrors statics plus the resolved capsule
 //! translation, so the adapter's snapshot/restore and state hash cover the
 //! same bytes. The controller
@@ -10,7 +10,7 @@
 //! ceiling clamp and airborne gravity.
 //!
 //! Consumer: arena locomotion. Units: meters, seconds, Y-up.
-//! Errors: [`Error`](super::rapier::Error) from adapter validation; per-tick
+//! Errors: [`Error`] from adapter validation; per-tick
 //! input is sanitized (non-finite becomes zero) and never panics.
 //!
 //! Determinism scope (HASH-LAW tier note): fixed `dt` per call (canonical

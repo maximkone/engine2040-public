@@ -16,6 +16,7 @@
 use super::{ShellUi, Viewer};
 use crate::art_path::{ArtPath, ArtStep};
 use crate::graph_canvas::{Canvas, CanvasView, Link, PortKind};
+use crate::graph_eval::MaterialReport;
 use crate::perf_panel::{Band, Budget, PerfPanel, PerfSource};
 
 /// Node box width in canvas pixels.
@@ -53,6 +54,8 @@ pub struct Surfaces {
     pub perf_budget: Budget,
     /// The host's numbers, when it filled them.
     pub perf_source: Option<Box<dyn PerfSource>>,
+    /// Last `E` evaluation: the status row and the verdict.
+    pub material: Option<MaterialReport>,
 }
 
 impl Default for Surfaces {
@@ -69,6 +72,7 @@ impl Default for Surfaces {
             perf: PerfPanel::new(),
             perf_budget: Budget::new(u64::MAX, u64::MAX),
             perf_source: None,
+            material: None,
         }
     }
 }
@@ -90,6 +94,12 @@ impl ShellUi {
     /// Take the node id Enter handed over. The host binds the material.
     pub fn take_graph_pick(&mut self) -> Option<u32> {
         self.surfaces.graph_pick.take()
+    }
+
+    /// Take the last `E` evaluation: its status row and, when it baked, the
+    /// verdict. Nothing is written to a material here.
+    pub fn take_material_verdict(&mut self) -> Option<MaterialReport> {
+        self.surfaces.material.take()
     }
 
     /// The guided ladder as the host last set it.
@@ -249,7 +259,9 @@ impl Viewer<'_> {
     /// Graph tab: node boxes with titles and port dots, middle-drag pan, wheel
     /// zoom, click to select, drag to move on the 8 px grid, and a two-click
     /// link gesture that goes through [`Canvas::connect`]. A refusal is a toast
-    /// row; Enter hands the selected id to the host. Nothing is evaluated here.
+    /// row; Enter hands the selected id to the host, and `E` evaluates the
+    /// canvas through the material pack as one status row. Nothing is
+    /// evaluated or written on the draw path otherwise.
     pub(super) fn graph_tab(&mut self, ui: &mut egui::Ui) {
         let selected = self
             .surfaces
@@ -263,6 +275,9 @@ impl Viewer<'_> {
         ));
         if let Some(toast) = self.surfaces.toast.as_deref() {
             ui.colored_label(egui::Color32::YELLOW, toast);
+        }
+        if let Some(report) = self.surfaces.material.as_ref() {
+            ui.monospace(&report.line);
         }
         if let Some((id, port)) = self.surfaces.link {
             ui.weak(format!("linking from node {id} out {port}"));
@@ -288,6 +303,9 @@ impl Viewer<'_> {
             if let Some(id) = self.surfaces.pick {
                 self.surfaces.graph_pick = Some(id);
             }
+        }
+        if ui.input(|input| input.key_pressed(egui::Key::E)) {
+            self.surfaces.material = Some(MaterialReport::of(self.surfaces.graph.evaluate()));
         }
         self.graph_draw(&painter, rect);
         if let Some(pos) = response.interact_pointer_pos() {

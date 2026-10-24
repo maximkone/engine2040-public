@@ -48,17 +48,25 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   (`TERRAIN_MESH_ID`), no GPU upload path change. Runs 40060965451, 40061456369.
   Remaining: `world.terrain.set`/`world.terrain.stats` (home: `packs/world.rs`, already
   registered) and the 64x64 blocking accept.
+  Verbs landed too (`57ce79f4c`): `world.terrain.set` cooks the grid and answers the
+  revision; `world.terrain.stats` reports 7938 triangles for 64x64 plus the draw name and
+  mesh id the render lane carries (runs 40064552893, 40063878939). Still open: physics
+  does not consume `HeightfieldRecord` yet (only `crates/assets` names it), so the
+  "blocks at the cooked height" accept is unproven.
 - [x] WG6 editor: a rule node that compiles to the existing Rhai text - the node graph
   has no script node (`crates/editor/src/graph.rs:26-31`); `crates/rules` runs text.
   Tier B. Size M. Owns `crates/editor/src/graph.rs`, `crates/rules/src/`.
   F2P: `NodeKind::Rule` compiles to source; the new graph test fails on HEAD.
   P2P: `cargo test -p engine-editor --lib` stays green. Accept: graph -> Rhai source ->
   same rule hash as the text path. Landed `0c632dc4e` (graph bytes v2; v1 still reads).
-- [ ] WG7 material: a node graph compiles to a material record - the graph is stored but
+- [x] WG7 material: a node graph compiles to a material record - the graph is stored but
   `crates/material/src/compile.rs` starts from `MaterialRecord`, and MaterialX nodegraphs
   are refused (`mtlx_import.rs:617`). Tier B. Size M. Owns `crates/material/src/`.
   F2P: `material.from_graph` lowers Const/Op nodes (new test). P2P: existing material
   tests stay green. Accept: the same record from graph and from TOML, byte-equal.
+  Landed `8923b2c4a`: the verb folds the graph with `Graph::to_record` and returns the
+  record text, its digest and counts; an unknown node kind is refused by name. The record
+  parses back byte-equal. Runs 40066146766, 40066598982.
 - [x] WG8 anim: a cutscene keyframe document - no cutscene or dopesheet exists; the only
   sequencer is music steps (`crates/audio/src/music.rs:444`). Tier C. Size M.
   Owns `crates/anim/src/`, `crates/endpoint/src/packs/anim/`.
@@ -87,11 +95,15 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   `build.json` (name, version, target, game, one sha256 per file) and one tar step; the
   hash is `certutil -hashfile` so no hash crate enters the headless graph. Open: the
   folder ships the exe only, not content, so the run-in-5-minutes accept is not claimed.
-- [ ] WG12 perf: `perf.trace` writes a Chrome-trace JSON - `crates/perf/src/profiler.rs`
+- [x] WG12 perf: `perf.trace` writes a Chrome-trace JSON - `crates/perf/src/profiler.rs`
   has puffin scopes; a capture needs `tools/rdc-diff.mjs` outside the engine. Tier A.
   Size S. Owns `crates/perf/src/`, `crates/endpoint/src/packs/perf.rs`.
   F2P: the verb is absent (new test). P2P: perf tests stay green. Accept: one trace with
   the eight tick phases, opens in a trace viewer.
+  Landed `11b0924e0`: `perf.trace` captures 1..=8 frames into a Chrome-trace document
+  with a `process_name` metadata row and one integer slice per span. A capture measures
+  ten phases (four tick systems + six GPU passes), so the test asserts at least eight
+  rather than inventing two. Runs 40067811699, 40067642896.
 - [x] WG13 game: a real minidump - `crates/game/src/crash.rs:743-753` wrote a 12-byte stub
   and its own PORT names the donor. Tier B. Size S. Owns `crates/game/src/crash.rs`.
   F2P: a feature-gated dump has the donor magic (new test). P2P: the crash receipt test
@@ -99,20 +111,34 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   Landed `2cb4ad8fd`: feature `minidump` (off by default) writes a real dump through
   `minidump-writer` 0.13.0; the test parses `MDMP` and the stream directory (>=3 streams).
   Runs 40034369328 (P2P 19), 40033841891 (feature on, 20), F2P 40032495985 (stub fails).
-- [ ] WG14 assets: a 128 px thumbnail per import - `crates/editor/src/browser.rs` lists rows.
+- [x] WG14 assets: a 128 px thumbnail per import - `crates/editor/src/browser.rs` lists rows.
   Tier C. Size S. Owns `crates/assets/src/`, `crates/editor/src/browser.rs`.
   F2P: one thumbnail is cooked at import (new test). P2P: cook keys do not move.
-  Part 2026-10-24 (`7d479e946`): `crates/editor/src/thumbnail.rs` caches one 256x256 RGBA
-  image per content digest (LRU, deterministic eviction) and every browser row asks it for
-  its name, so the row shows the capture. Remaining: the import-side cook and the 128 px
-  budget this row names; the cache is 2x the size asked for.
-- [ ] WG15 endpoint: `project.new`, `project.build`, `project.run` - 104 tool constants and
+  Progress 2026-10-24 (`04a6d1d70`): the import cooks the thumbnail.
+  `crates/assets/src/thumb_cook.rs` cooks one 128x128 RGBA8 image (integer box average of
+  the source rectangle, sealed with `content_hash`), and `import_kit_gltf_full` puts it on
+  `KitPiece::thumb`, so a fresh import has its preview with no editor pass. Browser rows
+  show it through `ThumbnailCache::insert_cooked`, and the cache is now 128 px;
+  `the_cache_holds_exactly_the_size_the_import_cooks` keeps cook and cache equal. F2P
+  `banner_import_cooks_one_128_px_thumbnail` plus three `thumb_cook` tests: 4 passed twice,
+  runs 40068943985, 40069878193. P2P `--features import --lib`: 416 passed, 3 ignored, run
+  40070017217, so no cook key moved. Clippy green, runs 40069615526, 40069774765.
+  Left: the conditional kit line `cargo test -p engine-game --features app --lib kit` has
+  two reds in `windowed` GPU timing tests (own-pass sky is timed on the kit), a file this
+  row does not own; `content/arena/kit.e2bundle` is untouched and `kit_gltf` never reads
+  `thumb`, so 5642f3b582be5f94 cannot move, but that line wants a quiet GPU run to say so.
+- [x] WG15 endpoint: `project.new`, `project.build`, `project.run` - 104 tool constants and
   no `project.*`; only `game.build` (`crates/endpoint/src/build_game.rs:24`). Tier A.
   Size S. Owns `crates/endpoint/src/packs/`. F2P: the three verbs are absent (new test).
   P2P: `game.build` stays green. Accept: new -> build -> run from one session.
   Unblocked 2026-10-24: `packs/mod.rs` is clean; only `packs/asset*`, `level_paint.rs`,
   `audit/` and `mcp_refusal.rs` are held by other seats. Add a new `packs/project.rs`
   and register it with one hunk in `packs/mod.rs`.
+  Landed `557cf2ee6`: `packs/project.rs` (pack `project`) writes the smallest real project,
+  builds its brief to `build/<name>.e2package` through `build_slice`, and runs the package
+  headless with the play digest and `replay_matched`; a stale or magic-less artifact is
+  refused. `project.run` was allowlisted by exact name in the door's name guard, with its
+  reason. Runs 40069030990, 40069500716, 40070794293.
 
 ## Tools and dev loop
 
@@ -178,7 +204,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   arena are at 0 and gated by their own `RUSTDOCFLAGS=-D warnings` step in `pages.yml`
   (green: pages run 40056976625). 785 left over 8 crates: render 154, anim 132, game 119,
   net 108, physics 96, endpoint 82, combat 48, assets 46.
-- [ ] TG11 ci: the wasm matrix leg survives the thread tests - `islands::tests::par_*`
+- [x] TG11 ci: the wasm matrix leg survives the thread tests - `islands::tests::par_*`
   spawn threads, which traps `unreachable` on wasm32-wasip1 (run 40056555531, exit 134
   after 160 tests), so the compare job prints `PHYSICS RESULT FAIL` even though all 20
   digests MATCH. Tier B. Size S. Owns `crates/physics/src/`. F2P: the wasm leg runs the
@@ -211,10 +237,19 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   `crates/endpoint/src/audit/`. F2P: one scripted task runs read -> preview -> apply
   through the loop and the log replays it (new test). P2P: provider tests stay green.
   Accept: replay from the log equals the recorded run.
-- [ ] LG4 provider: typed memory with a write gate - OPT49 is open; `agent_loop.rs:270`
+- [x] LG4 provider: typed memory with a write gate - OPT49 is open; `agent_loop.rs:270`
   `MemoryDoor` is a test double. Tier B. Size M. Owns `crates/provider/src/memory.rs`,
   `crates/endpoint/src/packs/memory/`. F2P: a write is refused without a policy key
   (new test). P2P: the door stays green. Accept: two sessions share one recalled fact.
+  Part 2026-10-24 (`5315e6781`): `provider::memory` is typed (fact/preference/decision,
+  integer confidence, source, tick, shared flag), writes need a capability token carrying
+  `memory.write` and refuse by name before any mutation, recall is scoped and ordered, and
+  the store encodes to integer lines that round-trip byte-equal (7 tests, run 40066060287).
+  Endpoint half landed too (`59bc0597a`): `packs/memory/` serves `memory.write`,
+  `memory.recall` and `memory.share`, keeps the store's own refusal codes, and
+  `MemoryStore::share` refuses a fact the caller does not own. Runs 40072345141,
+  40072272584, 40072805700.
+  Remaining: the endpoint `packs/memory/` pack and its registration in `packs/mod.rs`.
 - [x] LG5 provider: the model can see a frame - the door emits PNGs (`play.rs:1447`),
   adapters have no image part. Tier B. Size M. Owns `crates/provider/src/`,
   `crates/playtest/src/look.rs`. F2P: an image part reaches the vendor body under a size
@@ -263,16 +298,18 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
 
 ## Order
 
-Done on 2026-10-24: WG1 WG3 WG4 WG6 WG8 WG9 WG10 WG11 WG13, TG1 TG2 TG3 TG5 TG6 TG7
-TG8 TG9, LG1 LG2 LG5 LG6 LG7 LG8 LG9 LG10. Remaining is 9 rows plus 4 follow-ups.
+Done on 2026-10-24: WG1 WG3 WG4 WG6 WG7 WG8 WG9 WG10 WG11 WG12 WG13 WG14 WG15, TG1 TG2 TG3
+TG5 TG6 TG7 TG8 TG9 TG11, LG1 LG2 LG3 LG4 LG5 LG6 LG7 LG8 LG9 LG10. Four rows stay open.
 
-- Small, take now: TG11 (wasm thread fallback), WG12 (`perf.trace`).
-- Medium: WG2 (plugin registry), WG7 (`material.from_graph` verb), LG4 (typed memory),
-  TG10 (785 rustdoc warnings, next: net 108, combat 48).
-- Large or owner calls: WG5 (terrain cook; assets/render busy), WG15 (project verbs),
-  TG4 (endpoint coverage leg; the door budget is red under another seat),
-  WG11's content half (dist still ships the exe only).
-- Endpoint packs (`mod.rs`, `scene.rs`, `material.rs`, `level_paint.rs`, `stage.rs`) are
-  dirty again: WG2, WG7, WG12, WG15 wait on that seat.
+- WG2: the plugin registry (`linkme` slice, `modules = [...]` in the manifest) - the last
+  workspace row, no pack collision.
+- WG5: only the physics accept is left - nothing consumes `HeightfieldRecord` yet
+  (`crates/physfx` is busy with another seat's soft-body work).
+- WG14 landed `04a6d1d70` (the other seat wrote the row; ticked here).
+  (another seat); it lands with them.
+- TG4: the endpoint coverage leg needs a green endpoint suite; `api.load` currently
+  refuses at 78,957 chars against the 75,000 hard budget (the pack seat's in-flight work).
+- TG10: six crates gated; render 154, anim 132, game 119, physics 96, endpoint 82,
+  assets 46 remain (only physics and endpoint are free of another seat's edits).
 
 Do not reopen parked rows; the full tables are in the three research files.

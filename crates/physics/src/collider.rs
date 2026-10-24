@@ -6,7 +6,7 @@
 //! this module reads them, so the physics lane never links the importer. Units:
 //! meters, Y up; one layer integer per collider ([`crate::layers`]).
 //! Determinism: the same bytes decode to the same shapes, no clock, no hashing.
-//! Errors: [`ColliderError`] names the first defect; a defective blob yields no
+//! Errors: `ColliderError` names the first defect; a defective blob yields no
 //! shapes at all, never a partial set. Budget: decode runs once at load.
 //!
 //! Wire format v1, little-endian:

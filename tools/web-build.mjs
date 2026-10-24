@@ -1,5 +1,6 @@
 // Build the browser shell into dist/web (WEB4).
 //   node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt] [--opt-ab]
+//   node tools/web-build.mjs --simd | --scalar
 //   node tools/web-build.mjs --size-sweep [z,s,3] [--commit <hash>]
 //   node tools/web-build.mjs --check-public <dir> [--allow-dir docs/] [--allow-file llms.txt]
 // cargo builds crates/web for wasm32-unknown-unknown with the size-tuned `web` profile (root
@@ -16,6 +17,9 @@
 // build.json keeps the table (wasmOptAb) and twiggy's top 20 items.
 // WEB10: the site is public (the mirror is public), so a bundle that holds a file nobody listed does not ship: build() refuses it
 // before it touches dist/web, and --check-public <dir> (the Pages workflow runs it on the assembled site) lists the strays and exits 1.
+// BG10: two arms of the same build. The shipped one (OPT61) compiles the module with wasm SIMD128 and lets wasm-opt use it;
+// --scalar builds the arm that came before it, so the two can be built from one tree and their replay digests compared.
+// The receipt (build.json and the printed line) names the flag each arm was built with, so a dist says how it was made.
 // Every step goes through `deps` (run a command, read and write files), so the test drives
 // the whole build with a fake toolchain.
 import { createHash } from "node:crypto";
@@ -42,9 +46,20 @@ export const HASH_HEX = 12;
 export const PIN_SCHEMA = 2;
 export const SIZE_LIMIT_BYTES = 8 * 1024 * 1024; // dist/web, before game content
 // Rust 1.97 emits bulk-memory, nontrapping float-to-int and sign-extension instructions (and, since 1.82, multivalue and
-// reference types); wasm-opt rejects a module that uses a feature it was not told about. All six ship in every browser
-// that has WebGPU, so enabling them lets the optimizer use them and nothing newer.
-export const WASM_OPT_FEATURES = ["--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-multivalue", "--enable-reference-types", "--enable-mutable-globals"];
+// reference types); wasm-opt rejects a module that uses a feature it was not told about. All of them plus SIMD ship in
+// every browser that has WebGPU, so enabling them lets the optimizer use them and nothing newer. SIMD is pre-approved
+// by docs/HASH-LAW.md, which records wasm32-wasip1-simd128 MATCH.
+export const WASM_OPT_FEATURES = ["--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-multivalue", "--enable-reference-types", "--enable-mutable-globals", "--enable-simd"];
+// The target-scoped flag that makes cargo build the module with wasm SIMD. It goes in the
+// per-target env var, never in RUSTFLAGS: host build scripts and proc macros must not see a
+// wasm feature they cannot use.
+export const SIMD_RUSTFLAGS = "-C target-feature=+simd128";
+// BG10: the two arms of the build. The SIMD arm (the shipped one, OPT61) turns the feature on
+// for cargo and lets wasm-opt use it; the scalar arm is the build that came before it, so the
+// two can be built from one tree and their replay digests compared. A scalar build simply does
+// not set the flag.
+export const wasmRustflagsEnv = (simd = true) => (simd ? { CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: SIMD_RUSTFLAGS } : {});
+export const wasmOptFeatures = (simd = true) => (simd ? WASM_OPT_FEATURES : WASM_OPT_FEATURES.filter((f) => f !== "--enable-simd"));
 export const WASM_OPT_FLAGS = ["-Oz", ...WASM_OPT_FEATURES];
 export const WASM_OPT_AB = ["-Oz", "-Os", "-O3"]; // the levels --opt-ab compares; the first wins a tie
 export const SWEEP_LEVELS = ["z", "s", "3"]; // the opt-levels --size-sweep builds; the first wins a tie
@@ -197,13 +212,15 @@ function toolInfo({ rootDir, commit }, deps) {
 
 // cargo, wasm-bindgen and (when installed) wasm-opt: leaves engine.js and engine_bg.wasm in `work`. `env` is extra cargo
 // environment (the sweep's opt-level); `ab` runs wasm-opt once per WASM_OPT_AB level and keeps the smallest module.
+// `simd` picks the arm: the SIMD one (the shipped build) or the scalar one it is compared against.
 // Returns { rawBytes (before wasm-opt), wasmOpt (its version or null), flags (what ran or null), ab (the table or null) }.
-function compile({ rootDir, hash, optimize, ab = false, env = {} }, work, deps) {
+function compile({ rootDir, hash, optimize, ab = false, env = {}, simd = true }, work, deps) {
   const { run, say } = deps;
   const step = stepOf(run);
   const level = env.CARGO_PROFILE_WEB_OPT_LEVEL;
-  say(`[web-build] cargo build --profile ${PROFILE} --target ${TARGET} (commit ${hash}${level ? `, opt-level ${level}` : ""})`);
-  step("cargo build", "cargo", cargoArgs(), { env: { ENGINE_WEB_COMMIT: hash, ...env }, cwd: rootDir });
+  const features = wasmOptFeatures(simd);
+  say(`[web-build] cargo build --profile ${PROFILE} --target ${TARGET} (commit ${hash}${level ? `, opt-level ${level}` : ""}, ${simd ? "simd128" : "scalar"})`);
+  step("cargo build", "cargo", cargoArgs(), { env: { ENGINE_WEB_COMMIT: hash, ...env, ...wasmRustflagsEnv(simd) }, cwd: rootDir });
   const built = builtWasmPath(rootDir);
   if (!existsSync(built)) throw new BuildError(`cargo reported success but ${built} does not exist`);
   say("[web-build] wasm-bindgen --target web");
@@ -219,13 +236,13 @@ function compile({ rootDir, hash, optimize, ab = false, env = {} }, work, deps) 
   }
   const wasmOpt = probe.out.trim();
   if (!ab) {
-    say(`[web-build] wasm-opt ${WASM_OPT_FLAGS.join(" ")}`);
-    step("wasm-opt", "wasm-opt", [wasmPath, "-o", wasmPath, ...WASM_OPT_FLAGS]);
-    return { rawBytes, wasmOpt, flags: WASM_OPT_FLAGS, ab: null };
+    say(`[web-build] wasm-opt ${["-Oz", ...features].join(" ")}`);
+    step("wasm-opt", "wasm-opt", [wasmPath, "-o", wasmPath, "-Oz", ...features]);
+    return { rawBytes, wasmOpt, flags: ["-Oz", ...features], ab: null };
   }
   const table = WASM_OPT_AB.map((flag) => {
     const file = `${wasmPath}.${flag}`;
-    step("wasm-opt", "wasm-opt", [wasmPath, "-o", file, flag, ...WASM_OPT_FEATURES]);
+    step("wasm-opt", "wasm-opt", [wasmPath, "-o", file, flag, ...features]);
     const bytes = deps.readBytes(file);
     say(`[wasm-opt-ab] ${flag} raw=${bytes.length} gzip=${gzipBytes(bytes)}`);
     return { flag, bytes: bytes.length, gzipBytes: gzipBytes(bytes), file };
@@ -234,16 +251,16 @@ function compile({ rootDir, hash, optimize, ab = false, env = {} }, work, deps) 
   cpSync(best.file, wasmPath);
   for (const t of table) rmSync(t.file, { force: true });
   say(`[wasm-opt-ab] smallest raw: ${best.flag}`);
-  return { rawBytes, wasmOpt, flags: [best.flag, ...WASM_OPT_FEATURES], ab: table.map(({ file, ...row }) => row) };
+  return { rawBytes, wasmOpt, flags: [best.flag, ...features], ab: table.map(({ file, ...row }) => row) };
 }
 
 // QW1: one full web build per opt-level; the printed table is the receipt. Nothing is written to dist/web.
-export function sizeSweep({ rootDir = root, commit = null, levels = SWEEP_LEVELS, optimize = true } = {}, deps = realDeps()) {
+export function sizeSweep({ rootDir = root, commit = null, levels = SWEEP_LEVELS, optimize = true, simd = true } = {}, deps = realDeps()) {
   const { hash } = toolInfo({ rootDir, commit }, deps);
   const rows = levels.map((level) => {
     const work = deps.tempDir();
     try {
-      const c = compile({ rootDir, hash, optimize, env: { CARGO_PROFILE_WEB_OPT_LEVEL: level } }, work, deps);
+      const c = compile({ rootDir, hash, optimize, env: { CARGO_PROFILE_WEB_OPT_LEVEL: level }, simd }, work, deps);
       const bytes = deps.readBytes(join(work, `${OUT_NAME}_bg.wasm`));
       const row = { level, preOptBytes: c.rawBytes, bytes: bytes.length, gzipBytes: gzipBytes(bytes), brotliBytes: brotliSize(bytes) };
       deps.say(`[size-sweep] opt-level=${level} raw=${row.bytes} pre-opt=${row.preOptBytes} gzip=${row.gzipBytes} brotli=${row.brotliBytes}`);
@@ -258,12 +275,13 @@ export function sizeSweep({ rootDir = root, commit = null, levels = SWEEP_LEVELS
 }
 
 // Build dist/web. Returns the build.json object. Throws BuildError when a step fails; `outDir` is then either untouched or gone, never half written.
-export function build({ rootDir = root, outDir = join(root, "dist", "web"), commit = null, optimize = true, ab = false } = {}, deps = realDeps()) {
+// `simd` picks the arm: the SIMD one (the shipped build) or the scalar one it is compared against.
+export function build({ rootDir = root, outDir = join(root, "dist", "web"), commit = null, optimize = true, ab = false, simd = true } = {}, deps = realDeps()) {
   const { run, say } = deps;
   const { cliVersion, hash, rustc } = toolInfo({ rootDir, commit }, deps);
   const work = deps.tempDir();
   try {
-    const c = compile({ rootDir, hash, optimize, ab }, work, deps);
+    const c = compile({ rootDir, hash, optimize, ab, simd }, work, deps);
 
     // The largest items of the shipped module (QW2): twiggy prints a header, TWIGGY_ITEMS rows and a remainder line.
     let twiggy = [];
@@ -390,6 +408,8 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
       limitBytes: SIZE_LIMIT_BYTES,
       underLimit: totalBytes < SIZE_LIMIT_BYTES,
       rawWasmBytes: c.rawBytes,
+      simd,
+      wasmRustflags: simd ? SIMD_RUSTFLAGS : "",
       tools: { rustc, wasmBindgen: cliVersion, wasmOpt: c.wasmOpt },
       wasmOptFlags: c.flags,
       wasmOptAb: c.ab,
@@ -402,7 +422,8 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
     say(
       `[web-build] dist/web ${totalBytes} bytes (limit ${SIZE_LIMIT_BYTES}); pin ${build}; wasm ${wasmName} ${files[wasmName].bytes} bytes, ${files[wasmName].gzipBytes} gzip; ` +
         `arena bundle ${kitName} ${files[kitName].bytes} gzip (${files[kitName].rawBytes} raw, tier 0 at ${files[kitName].firstBytes}); ` +
-        `rig ${rigName} ${files[rigName].bytes} gzip (${files[rigName].rawBytes} raw); first_bundle ${firstBundleBytes} bytes`,
+        `rig ${rigName} ${files[rigName].bytes} gzip (${files[rigName].rawBytes} raw); first_bundle ${firstBundleBytes} bytes; ` +
+        `wasm rustflags ${simd ? SIMD_RUSTFLAGS : "none (scalar)"}`,
     );
     if (!info.underLimit) {
       rmSync(outDir, { recursive: true, force: true }); // no half-shipped build over the limit
@@ -415,13 +436,15 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
 }
 
 export function parseArgs(argv) {
-  const o = { out: null, commit: null, optimize: true, ab: false, sweep: null, checkPublic: null, allowDirs: [], allowFiles: [], error: null };
+  const o = { out: null, commit: null, optimize: true, ab: false, sweep: null, checkPublic: null, allowDirs: [], allowFiles: [], simd: true, error: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--out") o.out = argv[++i] ?? null;
     else if (a === "--commit") o.commit = argv[++i] ?? null;
     else if (a === "--no-opt") o.optimize = false;
     else if (a === "--opt-ab") o.ab = true;
+    else if (a === "--simd") o.simd = true;
+    else if (a === "--scalar") o.simd = false;
     else if (a === "--check-public") o.checkPublic = argv[++i] ?? null;
     else if (a === "--allow-dir") o.allowDirs.push(argv[++i] ?? "");
     else if (a === "--allow-file") o.allowFiles.push(argv[++i] ?? "");
@@ -430,6 +453,7 @@ export function parseArgs(argv) {
   }
   if ((argv.includes("--out") && !o.out) || (argv.includes("--commit") && !o.commit)) o.error = "--out and --commit need a value";
   if ((argv.includes("--check-public") && !o.checkPublic) || o.allowDirs.includes("") || o.allowFiles.includes("")) o.error = "--check-public, --allow-dir and --allow-file need a value";
+  if (argv.includes("--simd") && argv.includes("--scalar")) o.error = "--simd and --scalar are two different builds; pick one";
   if (o.sweep && !o.sweep.every((l) => /^[0-3sz]$/.test(l))) o.error = "--size-sweep takes opt-levels from 0 1 2 3 s z, comma separated";
   return o;
 }
@@ -437,15 +461,15 @@ export function parseArgs(argv) {
 if (import.meta.main) {
   const a = parseArgs(process.argv.slice(2));
   if (a.error) {
-    console.error(`web-build: ${a.error}\nusage: node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt] [--opt-ab] | --size-sweep [z,s,3] | --check-public <dir> [--allow-dir d/] [--allow-file f]`);
+    console.error(`web-build: ${a.error}\nusage: node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt] [--opt-ab] [--simd | --scalar] | --size-sweep [z,s,3] | --check-public <dir> [--allow-dir d/] [--allow-file f]`);
     process.exit(2);
   }
   try {
     if (a.checkPublic) {
       checkPublic(resolve(a.checkPublic), { files: a.allowFiles, dirs: a.allowDirs });
       console.log(`web-build: ${a.checkPublic} holds only public files`);
-    } else if (a.sweep) sizeSweep({ commit: a.commit, levels: a.sweep, optimize: a.optimize });
-    else build({ outDir: a.out ? resolve(a.out) : join(root, "dist", "web"), commit: a.commit, optimize: a.optimize, ab: a.ab });
+    } else if (a.sweep) sizeSweep({ commit: a.commit, levels: a.sweep, optimize: a.optimize, simd: a.simd });
+    else build({ outDir: a.out ? resolve(a.out) : join(root, "dist", "web"), commit: a.commit, optimize: a.optimize, ab: a.ab, simd: a.simd });
   } catch (e) {
     if (!(e instanceof BuildError)) throw e;
     console.error(`web-build: ${e.message}`);

@@ -8,6 +8,8 @@ use crate::error::Error;
 pub enum Tier {
     /// Weak GPU, little RAM: a couple of ragdolls and a handful of shards.
     Potato,
+    /// A phone or tablet: one solver pass, a few ragdolls, no CCD.
+    Mobile,
     /// A browser tab: single thread, wasm speed.
     Web,
     /// The comfortable desktop tier: eight ragdolls plus a few hundred debris bodies.
@@ -50,7 +52,7 @@ pub struct Caps {
 
 impl Tier {
     /// Every tier, weakest first.
-    pub const ALL: [Tier; 4] = [Tier::Potato, Tier::Web, Tier::Comfort, Tier::High];
+    pub const ALL: [Tier; 5] = [Tier::Potato, Tier::Mobile, Tier::Web, Tier::Comfort, Tier::High];
 
     /// The cap table: every per-tier number lives in this one place. The values are the first
     /// cut; the physics ladder row (RZ8) tunes them from measured frame cost.
@@ -68,6 +70,19 @@ impl Tier {
                 impact_bodies: 3,
                 tethers: 2,
                 tether_nodes: 8,
+            },
+            Tier::Mobile => Caps {
+                bodies: 128,
+                ragdolls: 3,
+                contacts: 384,
+                statics: 96,
+                solver_iterations: 2,
+                ccd_substeps: 0,
+                soft_ccd_mm: 0,
+                blast_bodies: 36,
+                impact_bodies: 4,
+                tethers: 2,
+                tether_nodes: 10,
             },
             Tier::Web => Caps {
                 bodies: 192,
@@ -121,6 +136,7 @@ impl Tier {
     pub const fn tick_bar_us(self) -> u64 {
         match self {
             Tier::Potato => 400,
+            Tier::Mobile => 600,
             Tier::Web => 800,
             Tier::Comfort => 1_500,
             Tier::High => 2_000,

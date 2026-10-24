@@ -41,6 +41,7 @@ pub mod gemini;
 pub mod image;
 pub mod ladder;
 pub mod local;
+pub mod memory;
 pub mod mock;
 pub mod ollama;
 pub mod openai;

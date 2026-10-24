@@ -510,10 +510,12 @@ pub fn bone_role_for_name(name: &str) -> Result<BoneRole, AnimError> {
 /// Score one role map over the required roles. Returns per-mille coverage
 /// (`1000` equals `1.0`) when every required role is present. Refuses
 /// unknown source names, duplicate source bones and missing roles with
-/// typed errors. Determinism: stable nested loops plus integer math only.
+/// typed errors. A row tagged `method: "manual"` carries its role from the
+/// caller, so its source name may be one no table knows.
+/// Determinism: stable nested loops plus integer math only.
 pub fn bone_coverage(mappings: &[BoneMapping]) -> Result<u16, AnimError> {
     for (index, mapping) in mappings.iter().enumerate() {
-        if bone_role_for_name(mapping.source.as_str()).is_err() {
+        if mapping.method != "manual" && bone_role_for_name(mapping.source.as_str()).is_err() {
             return Err(AnimError::UnknownRole(index));
         }
     }
@@ -992,6 +994,32 @@ mod tests {
             method: "alias",
         });
         assert_eq!(bone_coverage(&map), Ok(1000));
+    }
+
+    #[test]
+    fn a_manual_row_scores_a_source_no_table_knows() {
+        assert_eq!(
+            bone_role_for_name("hips_custom"),
+            Err(AnimError::UnknownRole(0))
+        );
+        let mut map = full_role_map();
+        map.retain(|mapping| mapping.role != BoneRole::Pelvis);
+        map.push(BoneMapping {
+            source: "hips_custom".into(),
+            role: BoneRole::Pelvis,
+            confidence_permille: 1000,
+            method: "manual",
+        });
+        assert_eq!(bone_coverage(&map), Ok(FULL_COVERAGE_PERMILLE));
+        // The caller-named role only counts when the row says it is manual.
+        map.retain(|mapping| mapping.role != BoneRole::Pelvis);
+        map.push(BoneMapping {
+            source: "hips_custom".into(),
+            role: BoneRole::Pelvis,
+            confidence_permille: 1000,
+            method: "alias",
+        });
+        assert_eq!(bone_coverage(&map), Err(AnimError::UnknownRole(16)));
     }
 
     #[test]

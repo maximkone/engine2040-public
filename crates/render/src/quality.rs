@@ -7,12 +7,18 @@
 //! stores the table plus its hash and cut order. WEB8 adds the `Web` tier (a browser tab:
 //! single thread, wasm speed, WebGPU default limits), its pick from adapter limits and a
 //! `?tier=` query ([`choose_web_tier`]) and Babylon's degrade order ([`WEB_CUT_ORDER`]).
+//! BG8 adds the `Mobile` tier (a phone or tablet: one cascade, no AO, the device pixel
+//! ratio capped at 2), its pick from the device class and the adapter limits
+//! ([`choose_device_tier`]) and the device class hint ([`DeviceClass`]).
 
 /// Render quality tier, lowest to highest (the derived order is the declaration order).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Quality {
     /// Low tier: smallest scale, one cascade, tightest caps.
     Potato,
+    /// A phone or tablet (BG8): one cascade, no AO, tight caps, the device pixel ratio
+    /// capped at 2 so a 3x panel does not cost three times the pixels.
+    Mobile,
     /// A browser tab (WEB8): full scale (the ladder cuts it last), two cascades, half-res AO, no
     /// TAA, web-sized caps.
     Web,
@@ -24,8 +30,9 @@ pub enum Quality {
 
 impl Quality {
     /// Every tier, weakest first.
-    pub const ALL: [Quality; 4] = [
+    pub const ALL: [Quality; 5] = [
         Quality::Potato,
+        Quality::Mobile,
         Quality::Web,
         Quality::Comfort,
         Quality::High,
@@ -36,6 +43,7 @@ impl Quality {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Potato => "potato",
+            Self::Mobile => "mobile",
             Self::Web => "web",
             Self::Comfort => "comfort",
             Self::High => "high",
@@ -80,7 +88,8 @@ impl Gtao {
 /// (px), `gtao` (level), `bloom_half_res` (bool), `taa` (bool), `msaa` (x),
 /// `aniso` (x), `mip_bias_x100` (1/100), `stream_pool_mb` (MB),
 /// `particle_cap` (count), `decal_cap` (count), `crowd_cap` (cards), `physfx_bodies` (bodies),
-/// `physfx_ragdolls` (ragdolls), `physfx_contacts` (pairs), `texture_max_px` (px).
+/// `physfx_ragdolls` (ragdolls), `physfx_contacts` (pairs), `texture_max_px` (px),
+/// `dpr_cap` (device pixels per CSS pixel).
 ///
 /// The `physfx_*` caps mirror the physical layer's own table (`crates/physfx/src/caps.rs`,
 /// `Tier::caps`: bodies, ragdolls, contacts); render cannot depend on physfx, so the numbers
@@ -121,6 +130,11 @@ pub struct Knobs {
     pub physfx_contacts: u16,
     /// Largest texture edge kept resident; bigger textures load a smaller mip (px).
     pub texture_max_px: u16,
+    /// The largest device pixel ratio the tier renders at: how many device pixels
+    /// one CSS pixel gets (device pixels per CSS pixel). `1` on the potato tier
+    /// (no supersampling), `2` on every other tier: a 3x phone panel would cost
+    /// three times the pixels for no visible gain.
+    pub dpr_cap: u8,
     /// The look shaders' potato guard: true switches the fp32-only grazing
     /// clamp off and keeps the fp16 floors (bool). Presentation only, never
     /// hashed: it picks a shader constant, not a picture budget.
@@ -150,8 +164,10 @@ pub const fn knobs(q: Quality) -> Knobs {
             physfx_ragdolls: 2,
             physfx_contacts: 256,
             texture_max_px: 512,
+            dpr_cap: 1,
             look_potato_guard: true,
         },
+        Quality::Mobile => mobile_knobs(),
         Quality::Web => Knobs {
             render_scale_pct: 100,
             shadow_cascades: 2,
@@ -170,6 +186,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             physfx_ragdolls: 4,
             physfx_contacts: 512,
             texture_max_px: 1024,
+            dpr_cap: 2,
             look_potato_guard: false,
         },
         Quality::Comfort => Knobs {
@@ -190,6 +207,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             physfx_ragdolls: 8,
             physfx_contacts: 1024,
             texture_max_px: 2048,
+            dpr_cap: 2,
             look_potato_guard: false,
         },
         Quality::High => Knobs {
@@ -210,8 +228,36 @@ pub const fn knobs(q: Quality) -> Knobs {
             physfx_ragdolls: 16,
             physfx_contacts: 2048,
             texture_max_px: 4096,
+            dpr_cap: 2,
             look_potato_guard: false,
         },
+    }
+}
+
+/// The phone row (BG8). It lives beside the table so the tier match stays
+/// inside the function cap: one cascade, no AO, no TAA, the device pixel ratio
+/// capped at 2, and phone-sized caps under every desktop row.
+const fn mobile_knobs() -> Knobs {
+    Knobs {
+        render_scale_pct: 100,
+        shadow_cascades: 1,
+        shadow_map_px: 1024,
+        gtao: Gtao::Off,
+        bloom_half_res: false,
+        taa: false,
+        msaa: 0,
+        aniso: 1,
+        mip_bias_x100: 100,
+        stream_pool_mb: 250,
+        particle_cap: 1024,
+        decal_cap: 64,
+        crowd_cap: 1500,
+        physfx_bodies: 128,
+        physfx_ragdolls: 3,
+        physfx_contacts: 384,
+        texture_max_px: 1024,
+        dpr_cap: 2,
+        look_potato_guard: false,
     }
 }
 
@@ -236,6 +282,7 @@ pub fn unit(knob: &str) -> &'static str {
         "physfx_ragdolls" => "ragdolls",
         "physfx_contacts" => "pairs",
         "texture_max_px" => "px",
+        "dpr_cap" => "device px per CSS px",
         _ => "",
     }
 }
@@ -319,6 +366,68 @@ pub fn choose_web_tier(query: Option<&str>, max_texture_2d: u32) -> (Quality, &'
         return (Quality::Potato, "limits");
     }
     (Quality::Web, "default")
+}
+
+/// What the host says about the device it runs on. The hint comes from the
+/// platform (a phone build, a tablet, a desktop), never from the GPU: the
+/// adapter limits cut the tier down, the class says how far down it starts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeviceClass {
+    /// A phone: the tightest budget and the mobile tier.
+    Phone,
+    /// A tablet: the mobile tier on a bigger screen.
+    Tablet,
+    /// A desktop: the comfortable tier.
+    Desktop,
+}
+
+impl DeviceClass {
+    /// Every class, weakest device first.
+    pub const ALL: [DeviceClass; 3] = [DeviceClass::Phone, DeviceClass::Tablet, DeviceClass::Desktop];
+
+    /// Lowercase class name, as the startup line prints it in `device=<name>`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Phone => "phone",
+            Self::Tablet => "tablet",
+            Self::Desktop => "desktop",
+        }
+    }
+
+    /// The class named `name` (any letter case), `None` for anything else.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|c| c.name().eq_ignore_ascii_case(name.trim()))
+    }
+}
+
+/// Smallest `maxTextureDimension2D` a device must report to get the `Mobile`
+/// tier: the mobile row holds a 1024 px texture and a 1024 px shadow map, so
+/// an adapter under 2048 cannot hold it and drops to `Potato`.
+pub const MOBILE_MIN_TEXTURE_2D: u32 = 2048;
+
+/// The tier a device runs and why: `"phone"`, `"tablet"` or `"desktop"` for
+/// the class it is, `"limits"` when the adapter is too weak to hold the
+/// mobile row.
+///
+/// The class sets the ceiling and the limits only cut down (the web tier's
+/// rule): a phone gets [`Quality::Mobile`], a tablet the same row, a desktop
+/// [`Quality::Comfort`], and any adapter under [`MOBILE_MIN_TEXTURE_2D`]
+/// gets [`Quality::Potato`]. Pure: the host reads the class and the device
+/// limits and passes them.
+#[must_use]
+pub fn choose_device_tier(class: DeviceClass, max_texture_2d: u32) -> (Quality, &'static str) {
+    if max_texture_2d < MOBILE_MIN_TEXTURE_2D {
+        return (Quality::Potato, "limits");
+    }
+    match class {
+        DeviceClass::Phone => (Quality::Mobile, "phone"),
+        DeviceClass::Tablet => (Quality::Mobile, "tablet"),
+        DeviceClass::Desktop => (Quality::Comfort, "desktop"),
+    }
 }
 
 /// Adapter text fragments (lowercase) whose match sends the page to `Potato` with the reason
@@ -445,7 +554,7 @@ pub fn choose_web_tier_probed(
     (tier, why)
 }
 
-/// FNV-1a over the 17 hashed knob fields in struct order (bools as 0/1, gtao
+/// FNV-1a over the 18 hashed knob fields in struct order (bools as 0/1, gtao
 /// as its level byte, integers little-endian). Same tier twice gives the same
 /// hash; no map order involved. `look_potato_guard` stays out: it picks a
 /// shader constant, not a picture budget.
@@ -470,6 +579,7 @@ pub fn table_hash(q: Quality) -> u64 {
     h.write_u8(k.physfx_ragdolls);
     h.write_u16(k.physfx_contacts);
     h.write_u16(k.texture_max_px);
+    h.write_u8(k.dpr_cap);
     h.finish()
 }
 
@@ -488,6 +598,7 @@ mod tests {
     #[test]
     fn quality_monotone_tiers() {
         let p = knobs(Quality::Potato);
+        let m = knobs(Quality::Mobile);
         let c = knobs(Quality::Comfort);
         let h = knobs(Quality::High);
         assert_eq!(p.render_scale_pct, 67);
@@ -508,6 +619,26 @@ mod tests {
             (96, 2, 256)
         );
         assert_eq!(p.texture_max_px, 512);
+        assert_eq!(p.dpr_cap, 1);
+        assert_eq!(m.render_scale_pct, 100);
+        assert_eq!(m.shadow_cascades, 1);
+        assert_eq!(m.shadow_map_px, 1024);
+        assert_eq!(m.gtao, Gtao::Off);
+        assert!(!m.bloom_half_res);
+        assert!(!m.taa);
+        assert_eq!(m.msaa, 0);
+        assert_eq!(m.aniso, 1);
+        assert_eq!(m.mip_bias_x100, 100);
+        assert_eq!(m.stream_pool_mb, 250);
+        assert_eq!(m.particle_cap, 1024);
+        assert_eq!(m.decal_cap, 64);
+        assert_eq!(m.crowd_cap, 1500);
+        assert_eq!(
+            (m.physfx_bodies, m.physfx_ragdolls, m.physfx_contacts),
+            (128, 3, 384)
+        );
+        assert_eq!(m.texture_max_px, 1024);
+        assert_eq!(m.dpr_cap, 2);
         assert_eq!(c.render_scale_pct, 100);
         assert_eq!(c.shadow_cascades, 3);
         assert_eq!(c.shadow_map_px, 2048);
@@ -570,7 +701,7 @@ mod tests {
 
     /// Every cost knob in one list, as numbers, so the ordering test covers a knob by adding
     /// it here and nowhere else.
-    fn costs(k: &Knobs) -> [(&'static str, u64); 17] {
+    fn costs(k: &Knobs) -> [(&'static str, u64); 18] {
         [
             ("render_scale_pct", u64::from(k.render_scale_pct)),
             ("shadow_cascades", u64::from(k.shadow_cascades)),
@@ -589,6 +720,7 @@ mod tests {
             ("physfx_ragdolls", u64::from(k.physfx_ragdolls)),
             ("physfx_contacts", u64::from(k.physfx_contacts)),
             ("texture_max_px", u64::from(k.texture_max_px)),
+            ("dpr_cap", u64::from(k.dpr_cap)),
         ]
     }
 
@@ -633,6 +765,72 @@ mod tests {
             (192, 4, 512),
             "the physfx caps repeat crates/physfx/src/caps.rs Tier::Web"
         );
+    }
+
+    /// BG8: the mobile tier is picked from the device class and the adapter
+    /// limits. The class sets the ceiling, the limits only cut down.
+    #[test]
+    fn mobile_tier_is_picked_from_the_device_class_and_the_adapter_limits() {
+        assert_eq!(
+            choose_device_tier(DeviceClass::Phone, 4096),
+            (Quality::Mobile, "phone")
+        );
+        assert_eq!(
+            choose_device_tier(DeviceClass::Tablet, 4096),
+            (Quality::Mobile, "tablet")
+        );
+        assert_eq!(
+            choose_device_tier(DeviceClass::Desktop, 8192),
+            (Quality::Comfort, "desktop")
+        );
+        // A weak adapter drops the phone to the floor, whatever the class says.
+        assert_eq!(
+            choose_device_tier(DeviceClass::Phone, MOBILE_MIN_TEXTURE_2D - 1),
+            (Quality::Potato, "limits")
+        );
+        assert_eq!(
+            choose_device_tier(DeviceClass::Desktop, 0),
+            (Quality::Potato, "limits")
+        );
+        // The floor itself is the mobile tier's row.
+        assert_eq!(
+            choose_device_tier(DeviceClass::Phone, MOBILE_MIN_TEXTURE_2D),
+            (Quality::Mobile, "phone")
+        );
+        // The class hint round trips and a typo is nothing.
+        for class in DeviceClass::ALL {
+            assert_eq!(DeviceClass::from_name(class.name()), Some(class));
+            assert_eq!(DeviceClass::from_name(&class.name().to_uppercase()), Some(class));
+        }
+        assert_eq!(DeviceClass::from_name(" phone "), Some(DeviceClass::Phone));
+        assert_eq!(DeviceClass::from_name("watch"), None);
+        assert_eq!(DeviceClass::from_name(""), None);
+    }
+
+    /// BG8: every cap of the mobile row is under the desktop row, and the
+    /// mobile row is a real step: it caps the device pixel ratio at 2, shades
+    /// one cascade and runs no ambient occlusion.
+    #[test]
+    fn mobile_tier_stays_under_the_desktop_row_on_every_cap() {
+        let mobile = knobs(Quality::Mobile);
+        let desktop = knobs(Quality::Comfort);
+        let low_costs = costs(&mobile);
+        let high_costs = costs(&desktop);
+        for (low, high) in low_costs.iter().zip(high_costs.iter()) {
+            assert_eq!(low.0, high.0);
+            assert!(low.1 <= high.1, "{} is over the desktop row", low.0);
+        }
+        assert_eq!(mobile.dpr_cap, 2, "a 3x panel would cost three times the pixels");
+        assert_eq!(mobile.shadow_cascades, 1);
+        assert_eq!(mobile.gtao, Gtao::Off);
+        assert!(!gtao_runs(&mobile, true));
+        assert_eq!(mobile.texture_max_px, 1024);
+        assert_eq!(
+            (mobile.physfx_bodies, mobile.physfx_ragdolls, mobile.physfx_contacts),
+            (128, 3, 384)
+        );
+        assert_ne!(table_hash(Quality::Mobile), table_hash(Quality::Potato));
+        assert_ne!(table_hash(Quality::Mobile), table_hash(Quality::Web));
     }
 
     #[test]
@@ -723,6 +921,7 @@ mod tests {
             "physfx_ragdolls",
             "physfx_contacts",
             "texture_max_px",
+            "dpr_cap",
         ] {
             assert!(!unit(name).is_empty(), "unit missing for {name}");
         }
@@ -743,6 +942,7 @@ mod tests {
         assert_eq!(unit("physfx_ragdolls"), "ragdolls");
         assert_eq!(unit("physfx_contacts"), "pairs");
         assert_eq!(unit("texture_max_px"), "px");
+        assert_eq!(unit("dpr_cap"), "device px per CSS px");
         assert_eq!(unit("no_such_knob"), "");
         assert_eq!(unit(""), "");
     }
@@ -770,7 +970,7 @@ mod tests {
             .iter()
             .map(|q| shadow_edge_px(&knobs(*q), 16384))
             .collect();
-        assert_eq!(edges, [1024, 1024, 2048, 4096]);
+        assert_eq!(edges, [1024, 1024, 1024, 2048, 4096]);
         assert_eq!(shadow_edge_px(&knobs(Quality::High), 2048), 2048);
         assert_eq!(shadow_edge_px(&knobs(Quality::Web), 0), MIN_SHADOW_EDGE);
     }
@@ -781,7 +981,7 @@ mod tests {
             .iter()
             .map(|q| max_cascade_band(&knobs(*q)))
             .collect();
-        assert_eq!(caps, [0, 1, 2, 3]);
+        assert_eq!(caps, [0, 0, 1, 2, 3]);
         let mut none = knobs(Quality::Potato);
         none.shadow_cascades = 0;
         assert_eq!(
@@ -795,7 +995,8 @@ mod tests {
     fn quality_gtao_runs_only_when_the_tier_has_it_and_the_toggle_is_on() {
         for q in Quality::ALL {
             let k = knobs(q);
-            assert_eq!(gtao_runs(&k, true), q != Quality::Potato, "{q:?}");
+            let has_ao = q != Quality::Potato && q != Quality::Mobile;
+            assert_eq!(gtao_runs(&k, true), has_ao, "{q:?}");
             assert!(!gtao_runs(&k, false), "{q:?} with the toggle off");
         }
     }
@@ -806,14 +1007,14 @@ mod tests {
             .iter()
             .map(|q| particle_pool_slots(&knobs(*q)))
             .collect();
-        assert_eq!(particles, [512, 2048, 4096, 8192]);
+        assert_eq!(particles, [512, 1024, 2048, 4096, 8192]);
         let decals: Vec<usize> = Quality::ALL
             .iter()
             .map(|q| decal_pool_slots(&knobs(*q)))
             .collect();
         assert_eq!(
             decals,
-            [64, 128, 256, crate::decals::MAX_DECALS],
+            [64, 64, 128, 256, crate::decals::MAX_DECALS],
             "the high tier asks for 512 and the pool holds 256"
         );
     }
@@ -920,7 +1121,8 @@ mod tests {
 
     #[test]
     fn quality_tiers_order_from_potato_up() {
-        assert!(Quality::Potato < Quality::Web && Quality::Web < Quality::Comfort);
+        assert!(Quality::Potato < Quality::Mobile && Quality::Mobile < Quality::Web);
+        assert!(Quality::Web < Quality::Comfort);
         assert!(Quality::Comfort < Quality::High);
         assert!(Quality::ALL.windows(2).all(|w| w[0] < w[1]));
     }
@@ -982,6 +1184,7 @@ mod tests {
         for q in Quality::ALL {
             let name = match q {
                 Quality::Potato => "Potato",
+                Quality::Mobile => "Mobile",
                 Quality::Web => "Web",
                 Quality::Comfort => "Comfort",
                 Quality::High => "High",

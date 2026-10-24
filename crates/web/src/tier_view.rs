@@ -22,7 +22,7 @@ pub const SCALE_FLOOR_PCT: u32 = 50;
 /// The knobs of the chosen tier, as the page prints them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TierFacts {
-    /// `potato`, `web`, `comfort` or `high`.
+    /// `potato`, `mobile`, `web`, `comfort` or `high`.
     pub name: String,
     /// Why this tier: `query`, `limits`, `denylist`, `probe` or `default`.
     pub why: String,

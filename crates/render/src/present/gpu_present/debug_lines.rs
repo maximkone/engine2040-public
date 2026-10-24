@@ -12,9 +12,7 @@
 //! Callers: `present_frame_live` (window and twin) and
 //! `submit::render_offscreen_capture` (the arena and web captures).
 
-use super::live::LiveSink;
 use super::presenter::Presenter;
-use super::OUTPUT_FORMAT;
 use crate::debug_draw::{LineBatch, LineQuad, DEBUG_LINE_MAX_QUADS, DEBUG_LINE_WIDTH};
 use crate::overlay::{OverlayDraw, QuadVertex, VERTS_PER_QUAD};
 
@@ -31,19 +29,6 @@ impl Presenter {
     /// True when the after-blit line pass draws this frame.
     pub fn debug_lines_enabled(&self) -> bool {
         self.debug_line_on
-    }
-
-    /// Output format of the after-blit draws for this sink: the LDR twin or
-    /// the attached surface. Presentation only.
-    pub(super) fn live_overlay_format(&self, sink: LiveSink<'_>) -> wgpu::TextureFormat {
-        match sink {
-            LiveSink::Twin => OUTPUT_FORMAT,
-            LiveSink::Surface(_) => self
-                .surface_config
-                .as_ref()
-                .map(|config| config.format)
-                .unwrap_or(OUTPUT_FORMAT),
-        }
     }
 
     /// Draw the staged debug lines over the blit view: one draw for the whole

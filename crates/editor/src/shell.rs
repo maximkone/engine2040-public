@@ -1287,6 +1287,12 @@ impl Shell {
         self.templates.len()
     }
 
+    /// Record one activity row built elsewhere (the import pump), keeping its
+    /// own tick so a reimport orders with the edits around it.
+    pub fn record_activity(&mut self, activity: Activity) {
+        self.activity.push(activity);
+    }
+
     /// Bounded activity ring (human and agent edits), oldest first.
     pub fn activity(&self) -> &ActivityRing {
         &self.activity

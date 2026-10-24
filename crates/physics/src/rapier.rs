@@ -1092,7 +1092,7 @@ impl World {
     /// most [`islands::FIGHTER_SNAPSHOT_BYTES`] per fighter plus the header.
     ///
     /// A snapshot is a sync point: the world is rebuilt around the same body
-    /// states (see [`Self::reset_to`]), so the live run and a restore of these
+    /// states (see `Self::reset_to`), so the live run and a restore of these
     /// bytes step identically. Take snapshots at the same ticks on every peer.
     pub fn island_snapshot(&mut self, coupled: &[(usize, usize)]) -> Vec<u8> {
         let states = self.snapshot();

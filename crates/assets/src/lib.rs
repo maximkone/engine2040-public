@@ -183,6 +183,10 @@ pub use residency::{
 pub mod png_out;
 #[cfg(feature = "import")]
 pub mod texture;
+/// One 128 px RGBA8 thumbnail cooked beside an import: the asset browser's row
+/// preview, no separate editor-side pass.
+#[cfg(feature = "import")]
+pub mod thumb_cook;
 /// Traversal and finisher intake: edge markers plus sidecar audit over retarget cooks.
 #[cfg(feature = "import")]
 pub mod traversal_cook;
@@ -239,6 +243,10 @@ pub use skin_import::{
 pub use texture::{
     cook_texture, texture_content_id, MAX_MIPS, MAX_TEXTURE_BYTES, MAX_TEXTURE_DIM,
     MAX_TEXTURE_PIXELS,
+};
+#[cfg(feature = "import")]
+pub use thumb_cook::{
+    cook_thumbnail, cook_thumbnail_image, CookedThumb, ThumbError, THUMB_BYTES, THUMB_EDGE,
 };
 pub mod gltf;
 /// Generational handles plus load states over the stream queue.

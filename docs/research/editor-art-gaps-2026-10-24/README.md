@@ -308,16 +308,16 @@ door surface or crate API, not a plan. Commit short shas are on `master`.
 | E4 | `editor::thumbnail::ThumbnailCache`, `browser::rows_with_thumbs` (a miss is `—`) | `6fc36c796` |
 | E5 | `Panel::History`, `History::{rows_newest_first, activate, name, version}` | `6fc36c796`, `81a0ee23c` |
 | E6 | `editor::timeline` sheet (keys, easing, region) + `Panel::Timeline` | `79ff81cfe`, `f9244f27d` |
-| E7 | `editor::graph_canvas` typed ports + `Panel::Graph` | `f9244f27d`, `a4f75e839` |
+| E7 | `editor::graph_canvas` typed ports + `Panel::Graph`; `Graph::evaluate()` bakes the canvas through `engine-material` | `f9244f27d`, `a4f75e839`, `924676633` |
 | E8 | `view.compare` `region` + `ignore` rects | `6b8ef7df3`, `0fd6a37f2` |
 | E9 | `editor::console::ConsolePanel`, `editor::perf_panel` overlay | `81a0ee23c`, `a4f75e839` |
-| E10 | `editor::watch::{Watch, drop_report, ReimportReceipt}` | `6fc36c796`, `79ff81cfe` |
-| E11 | `render::post::lut` (`.cube` parse, trilinear, f16 table), chain tap, `LookPreset` | `af34a4894`, `57dc567fe`, `eca148329` |
+| E10 | `editor::watch::{Watch, drop_report, ReimportReceipt}`, `ImportPump` polled in the frame loop | `6fc36c796`, `79ff81cfe`, `dd1efe240` |
+| E11 | `render::post::lut` (`.cube` parse, trilinear, f16 table), chain tap, `LookPreset`, GPU 3D upload + display pass with a device oracle | `af34a4894`, `57dc567fe`, `eca148329`, `0146c57f5`, `22d23ebba` |
 | E12 | `view.frame` score, `stage.camera.*`, `stage.shot.*` | `dac09035d` |
 | E13 | `engine_ui::layout` solver + pins, `ui.layout.solve/resize` verbs | `f77a2f545`, `f6ea70eb4`, `6d56102d0` |
-| A1 | `material::graph` typed nodes, `material.graph.set/get`, `material.bake` 4 maps | `3127a6673`, `28ff4afbb` |
+| A1 | `material::graph` typed nodes, `material.graph.set/get`, `material.bake` 4 maps + 5 coverage maps, weathering strip, KTX2 | `3127a6673`, `28ff4afbb`, `ecb53b8a5` |
 | A2 | `geo.uv/lod/hull/bake` preview+apply, `UvScore` with texel-density spread | `9b1c12af8`, `be0066121` |
-| A3 | `render::buffers::DebugFrame` (normal, depth, albedo, id, digests), `lookup_id` | `57dc567fe` |
+| A3 | `render::buffers::DebugFrame` (normal, depth, albedo, id, digests), `lookup_id`, GPU `read_frame`, `fs_gbuffer` + `Presenter::debug_capture` with a device oracle | `57dc567fe`, `0146c57f5`, `69dbe9287`, `d95428859`, `afb8e7674` |
 | A4 | `anim::clip_rot` lane, socket, blob, bake/sample, `anim.rot.preview`, cook sidecar | `a6326d85f`, `733cbe75e`, `be0066121` |
 | A5 | TVER writer/paint, `world.terrain.*`, layers, `world.scatter`, `world.wfc` | `3ace33cb1`, `60e0639c7`, `6dc17a9a7` |
 | A6 | `fx.preset.list/preview/set/clear` with a deterministic emitter preview | `f48581da1` |
@@ -332,14 +332,16 @@ door surface or crate API, not a plan. Commit short shas are on `master`.
 | W7 | `History::name` / `version` named states | `6fc36c796` |
 | W8 | `editor::art_path` five-rung ladder + overlay | `f9244f27d`, `a4f75e839` |
 
-Still open after the wave, and why: live GPU readback for `DebugFrame` (the
-forward pass keeps no normal/albedo/id target yet); GPU upload and WGSL fetch for
-the LUT (CPU oracle and f16 table are ready); terrain render/nav integration
-(the data path is done); the `Watch` call site in the running editor loop; canvas
-evaluation in the editor (the material pack evaluates); a Perfetto trace; and one
+What still needs a caller, and why: the game loop has to call
+`Presenter::set_look` when the look changes (that crate is another lane); terrain
+has a draw path and a data path but no nav wiring; no Perfetto trace yet; and one
 honest mismatch to fix: `render` turns crowd cards at 45 m while `anim`'s far tier
 starts at 60 m, so `asset.impostor` reports the anim threshold and its warning
-names the render one.
+names the render one. One red gate is not ours and is written down in
+`docs/BLOCKERS.md` (2026-10-24T07:03Z): the capture twin's sky-off pair is not
+repeatable, which predates this wave (`2862f593a`, with the LUT and debug slices
+reverted), so "two captures of one list are equal" is not yet a promise the art
+loop can lean on.
 
 ## Reproduce
 

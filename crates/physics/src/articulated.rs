@@ -1,6 +1,6 @@
 //! articulated: winch, rope and load solved as one constraint graph (NS1).
 //!
-//! Consumer: none yet. A portcullis lift or a chariot trace builds one [`Graph`] from node, link
+//! Consumer: none yet. A portcullis lift or a chariot trace builds one `Graph` from node, link
 //! and winch definitions, steps it once per tick and reads the node positions back. Data owner:
 //! this module owns the solve; masses, rest lengths and winch targets come from the caller's
 //! tables. Units: integer millimeters on the wire, Q8 millimeters inside (positions and rest
@@ -8,7 +8,7 @@
 //! Determinism: integer `+ - * /` with `i128` intermediates and an integer square root, no float,
 //! no clock. Definitions may arrive in any order: nodes are sorted by id, links by their id pair
 //! and winches by their link, so the solve order is canonical and the same graph gives the same
-//! ticks and the same [`Graph::hash`] however it was assembled. Errors: [`GraphError`] at build
+//! ticks and the same `Graph::hash` however it was assembled. Errors: `GraphError` at build
 //! time, nothing at step time. Budget: `ITERATIONS * links` constraint solves per tick, no
 //! allocation after the build.
 //!
@@ -170,7 +170,7 @@ impl Graph {
     /// `(low id, high id)` and winches by the link they drive.
     ///
     /// # Errors
-    /// Any [`GraphError`].
+    /// Any `GraphError`.
     pub fn build(
         nodes: &[NodeDef],
         links: &[LinkDef],

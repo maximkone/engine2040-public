@@ -10,6 +10,7 @@
 //! Errors: [`CanvasError`]; a refused edit leaves the canvas untouched.
 
 use engine_core::hash_bytes;
+use engine_material::graph::{Output, Params};
 
 /// Most nodes one canvas holds.
 pub const MAX_NODES: usize = 64;
@@ -55,8 +56,9 @@ impl PortKind {
     }
 }
 
-/// One canvas node: a stable id, a pixel position and its typed ports.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One canvas node: a stable id, a pixel position, its typed ports and the
+/// material node it stands for.
+#[derive(Clone, Debug, PartialEq)]
 pub struct CanvasNode {
     /// Caller id; unique on the canvas.
     pub id: u32,
@@ -64,6 +66,11 @@ pub struct CanvasNode {
     pub x: i32,
     /// Top edge in canvas pixels.
     pub y: i32,
+    /// Material node kind name (`engine_material::graph::KINDS`), e.g.
+    /// `noise`. A name the pack does not know refuses at export.
+    pub kind: String,
+    /// The parameters the kind reads; defaults when untouched.
+    pub params: Params,
     /// Input port kinds, in port order.
     pub inputs: Vec<PortKind>,
     /// Output port kinds, in port order.
@@ -84,10 +91,13 @@ pub struct Link {
 }
 
 /// A bounded node canvas with validated links.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Canvas {
     nodes: Vec<CanvasNode>,
     links: Vec<Link>,
+    /// Which node drives each material output field; `None` until the host
+    /// binds one, and export refuses until then.
+    output: Option<Output>,
 }
 
 impl Canvas {
@@ -104,6 +114,17 @@ impl Canvas {
     /// Links in insertion order.
     pub fn links(&self) -> &[Link] {
         &self.links
+    }
+
+    /// Which node drives each material output field.
+    pub fn material_output(&self) -> Option<Output> {
+        self.output.clone()
+    }
+
+    /// Bind the material output block (the host's choice of fields); export
+    /// refuses while it is unset.
+    pub fn set_material_output(&mut self, output: Output) {
+        self.output = Some(output);
     }
 
     /// Add one node. A duplicate id, the [`MAX_NODES`] bound or a position
@@ -311,6 +332,32 @@ pub enum CanvasError {
         /// Y asked for.
         y: i32,
     },
+    /// The node's kind has no material node.
+    UnmappedNode {
+        /// Node id.
+        id: u32,
+        /// Kind name the node carries.
+        kind: String,
+        /// The legal kinds, comma separated.
+        hint: String,
+    },
+    /// The canvas has no material output block yet.
+    NoOutput,
+    /// The node input has no pack port (a kind that reads nothing there, or a
+    /// mask in a field slot).
+    UnmappedPort {
+        /// Node id.
+        id: u32,
+        /// Input port index.
+        port: u8,
+        /// What the pack reads there.
+        hint: String,
+    },
+    /// The material pack refused the exported text or the bake.
+    Material {
+        /// The pack's own message.
+        text: String,
+    },
 }
 
 impl std::fmt::Display for CanvasError {
@@ -347,6 +394,20 @@ impl std::fmt::Display for CanvasError {
                 f,
                 "node {id} at ({x}, {y}) leaves the {PAN_LIMIT_PX} px canvas; clamp the position"
             ),
+            Self::UnmappedNode { id, kind, hint } => write!(
+                f,
+                "node {id} kind {kind} has no material node; pick one of {hint}"
+            ),
+            Self::NoOutput => {
+                write!(
+                    f,
+                    "canvas has no material output; bind the color field first"
+                )
+            }
+            Self::UnmappedPort { id, port, hint } => {
+                write!(f, "node {id} input {port} has no material port; {hint}")
+            }
+            Self::Material { text } => write!(f, "material refused: {text}"),
         }
     }
 }
@@ -403,6 +464,8 @@ mod tests {
             id,
             x: 0,
             y: 0,
+            kind: "noise".to_owned(),
+            params: Params::default(),
             inputs,
             outputs,
         }

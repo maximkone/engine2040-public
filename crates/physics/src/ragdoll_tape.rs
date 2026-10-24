@@ -4,20 +4,20 @@
 //! detector rows, plus the `ragdoll_gap` acceptance test and the
 //! `tests/ragdoll_tape.rs` integration test. Data owner: this module owns
 //! the frozen fixture (two four-bone chains over a floor box), the seeded
-//! fall/clinch scripts and the [`TapeReport`] numbers. Units: meters,
-//! seconds, ticks at [`FIXED_DT`](super::rapier::FIXED_DT); hashes are
+//! fall/clinch scripts and the `TapeReport` numbers. Units: meters,
+//! seconds, ticks at `FIXED_DT`; hashes are
 //! `u64` FNV digests, allocations are heap-call counts.
 //!
 //! The tape is read-only on the tick: it only calls the public
-//! [`Ragdoll`](super::ragdoll::Ragdoll) API (`spawn`, `set_animated`,
+//! `Ragdoll` API (`spawn`, `set_animated`,
 //! `blend_to_ragdoll`, `apply_hit`, `step`, position/hash reads) and never
 //! touches simulation code, so the measurement itself cannot drift a hash
 //! (the `ragdoll_gap` test re-runs the tape through the plain stepper and
-//! demands the same digest). Determinism scope: same [`TapeConfig`] seed
-//! and counts give the identical [`TapeReport`] on every platform; per-fall
-//! streams split with [`Rng::fork`], the clinch stream with
-//! [`Rng::fork_named`]; the glue math is `+ - * /`, one `sqrt` per bone
-//! pair distance and integer hashing. Errors: [`TapeError`] is typed;
+//! demands the same digest). Determinism scope: same `TapeConfig` seed
+//! and counts give the identical `TapeReport` on every platform; per-fall
+//! streams split with `Rng::fork`, the clinch stream with
+//! `Rng::fork_named`; the glue math is `+ - * /`, one `sqrt` per bone
+//! pair distance and integer hashing. Errors: `TapeError` is typed;
 //! invalid configs and ragdoll failures return, never panic.
 //!
 //! Budget: the baseline runs 50 falls of 360 ticks plus a 660-tick clinch
@@ -264,7 +264,7 @@ impl StepSampler for Plain {
 }
 
 /// Run the tape with the plain stepper (no heap counting; the report's
-/// per-tick alloc fields read `0`). Errors: forwards [`TapeError`] from
+/// per-tick alloc fields read `0`). Errors: forwards `TapeError` from
 /// config validation or any ragdoll call.
 pub fn run_tape(config: &TapeConfig) -> Result<TapeReport, TapeError> {
     run_tape_with(config, &mut Plain)
@@ -273,7 +273,7 @@ pub fn run_tape(config: &TapeConfig) -> Result<TapeReport, TapeError> {
 /// Run the tape through `sampler`, folding its per-step heap costs into the
 /// report maxima. Same fixture and order as [`run_tape`], so the digest is
 /// identical for the same config (the measurement never perturbs the sim).
-/// Errors: forwards [`TapeError`] from config validation or any ragdoll call.
+/// Errors: forwards `TapeError` from config validation or any ragdoll call.
 pub fn run_tape_with<S: StepSampler>(
     config: &TapeConfig,
     sampler: &mut S,

@@ -50,9 +50,17 @@ pub mod graph;
 /// Material graph canvas (E7): integer node positions, typed ports, validated
 /// links and a pan/zoom view. The material pack owns evaluation.
 pub mod graph_canvas;
+/// Graph evaluation seam (E7): the canvas writes the canonical material graph
+/// text, the material pack parses and bakes it, and the four map digests come
+/// back as data. Std-only; no draw code and no file write.
+pub mod graph_eval;
 /// History panel: a cursor over [`History::rows_newest_first`] with the jump
 /// returned as data. Std-only; the dock paints its rows.
 pub mod history_panel;
+/// Import pump (E10): the drop handler's per-frame watch poll. The host owns the
+/// frame loop, supplies the tick and the accept verdict, and pushes the
+/// returned rows into the activity feed. Std-only; never imports a file.
+pub mod import_pump;
 /// Schema inspector over registry descriptors: override badging, batched
 /// command edits. Std-only; consumed by the dock panel (`shell_ui.rs`
 /// renders [`inspector::build_grid`]).

@@ -21,10 +21,12 @@
 //! the first to finish). A worker never dies from a job panic. Dropping the
 //! pool sets shutdown and joins every worker.
 //!
-//! Model check: `RUSTFLAGS="--cfg loom" cargo test -p engine-ecs --lib loom_pool`
-//! runs the scope protocol under [loom](https://docs.rs/loom), which tries
-//! every interleaving of the caller and the worker. A scope that returns
-//! before its last job ran fails it.
+//! Model check: `cargo test --locked -p engine-ecs --lib loom_pool --config
+//! .cargo/loom.toml` runs the scope protocol under [loom](https://docs.rs/loom),
+//! which tries every interleaving of the caller and the worker. A scope that
+//! returns before its last job ran fails it. CI runs that leg in
+//! `.github/workflows/loom.yml`, and the module holds a planted scope with the
+//! wait left out, so the leg has teeth: it must catch that one too.
 
 use std::any::Any;
 use std::cell::Cell;
@@ -618,6 +620,44 @@ mod loom_pool {
             });
             assert_eq!(ran.load(Ordering::SeqCst), 2);
         });
+    }
+
+    /// The planted missing wait: the real scope protocol with the wait left
+    /// out. The scope returns while its job is still open, so loom has to
+    /// find the interleaving where the job has not run yet. The model fails
+    /// there, and the test catches that failure and reports it, so the leg
+    /// stays green and the wait in `help_until_done` keeps its teeth.
+    #[test]
+    fn loom_pool_planted_missing_wait_is_caught() {
+        let caught = std::panic::catch_unwind(|| {
+            loom::model(|| {
+                let state = Arc::new(ScopeState {
+                    tally: Mutex::new(Tally {
+                        pending: 0,
+                        panic: None,
+                    }),
+                    done: Condvar::new(),
+                });
+                let ran = Arc::new(AtomicUsize::new(0));
+                // A job opens like a real one: the counter goes up first.
+                lock(&state.tally).pending += 1;
+                let counter = Arc::clone(&ran);
+                let job_state = Arc::clone(&state);
+                let worker = loom::thread::spawn(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    job_state.finish(0, Ok(()));
+                });
+                // The planted bug: the scope returns here. It never waits
+                // for the counter to reach zero.
+                let open = { lock(&state.tally).pending };
+                assert_eq!(open, 0, "the scope returned while a job was open");
+                worker.join().expect("the worker joins");
+            });
+        });
+        assert!(
+            caught.is_err(),
+            "loom must find the interleaving where the scope returns early"
+        );
     }
 }
 

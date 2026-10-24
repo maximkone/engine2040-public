@@ -46,6 +46,12 @@ pub const CAT_FRAME: &str = "frame";
 /// The category of a counter row.
 pub const CAT_COUNTER: &str = "counter";
 
+/// Category of the metadata event a viewer reads for the process name.
+pub const CAT_METADATA: &str = "metadata";
+
+/// Process name the trace metadata event carries.
+pub const PROCESS_NAME: &str = "engine2040";
+
 /// Name of the frame-mark span: one per captured frame.
 pub const SPAN_FRAME: &str = "frame";
 /// Name of the frame-time counter: one sample per captured frame.
@@ -244,14 +250,43 @@ impl TraceFile {
     /// `dur` and `cat`.
     #[must_use]
     pub fn to_json(&self) -> String {
+        self.json_with(None)
+    }
+
+    /// The file as Chrome Trace Event JSON with one `process_name` metadata
+    /// event in front, the row a viewer needs to label the process.
+    ///
+    /// Same rows, same order, same numbers as [`Self::to_json`]; only the
+    /// leading `ph: "M"` event is added.
+    #[must_use]
+    pub fn to_json_with_process(&self) -> String {
+        self.json_with(Some(PROCESS_NAME))
+    }
+
+    /// The document, with the process metadata row when one is named.
+    fn json_with(&self, process: Option<&str>) -> String {
         let mut out = String::with_capacity(64 + self.rows.len() * 96);
         out.push_str("{\"traceEvents\":[");
         let pid = TRACE_PID.to_string();
         let tid = TRACE_TID.to_string();
-        for (index, row) in self.rows.iter().enumerate() {
-            if index > 0 {
+        let mut first = true;
+        if let Some(name) = process {
+            out.push_str("{\"name\":\"process_name\",\"cat\":\"");
+            out.push_str(CAT_METADATA);
+            out.push_str("\",\"ph\":\"M\",\"pid\":");
+            out.push_str(&pid);
+            out.push_str(",\"tid\":");
+            out.push_str(&tid);
+            out.push_str(",\"args\":{\"name\":\"");
+            engine_core::json::escape_into(&mut out, name);
+            out.push_str("\"}}");
+            first = false;
+        }
+        for row in &self.rows {
+            if !first {
                 out.push(',');
             }
+            first = false;
             match row {
                 Row::Span {
                     name,

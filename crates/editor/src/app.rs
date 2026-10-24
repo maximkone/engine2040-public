@@ -44,6 +44,7 @@ use engine_scene::transform::{quat_normalized, quat_rotate, Transform};
 use crate::a2_session::encode_png_rgba8;
 use crate::commands::Document;
 use crate::durable::write_atomic;
+use crate::import_pump::ImportPump;
 use crate::instant::RoundInput;
 use crate::play::{ChildPlay, PlayEntrypoint};
 use crate::play_in::PlayInSession;
@@ -52,6 +53,7 @@ use crate::shell::Shell;
 use crate::shell_ui::ShellUi;
 use crate::spine_inspect::spine_registry;
 use crate::viewport_image::{ViewportImage, MAX_VIEWPORT_TEX};
+use crate::watch::WatchError;
 
 /// Ctrl+S saves the open project (W8 keyboard flow).
 const SHORTCUT_SAVE: egui::KeyboardShortcut =
@@ -78,7 +80,7 @@ pub const DEFAULT_WIDTH: u32 = 1280;
 /// Default window height in pixels.
 pub const DEFAULT_HEIGHT: u32 = 800;
 /// CLI help printed for `--help`.
-pub const HELP: &str = "e2040-editor [--project PATH] [--arena-bin PROG] [--arena-arg ARG]... [--width PX] [--height PX] [--snapshot PATH] [--exit-frames N]";
+pub const HELP: &str = "e2040-editor [--project PATH] [--arena-bin PROG] [--arena-arg ARG]... [--width PX] [--height PX] [--snapshot PATH] [--exit-frames N] [--import-dir DIR]";
 
 // ---------------------------------------------------------------------------
 // Errors: typed, with a recovery action. Nothing here panics.
@@ -285,6 +287,9 @@ pub struct EditorConfig {
     pub snapshot: Option<PathBuf>,
     /// Exit after this many frames (Xvfb smoke); None runs until closed.
     pub exit_frames: Option<u64>,
+    /// Folder the drop handler watches (`--import-dir`). Every file in it is
+    /// polled once per frame; None watches nothing.
+    pub import_dir: Option<PathBuf>,
 }
 
 impl EditorConfig {
@@ -297,6 +302,7 @@ impl EditorConfig {
             height: DEFAULT_HEIGHT,
             snapshot: None,
             exit_frames: None,
+            import_dir: None,
         }
     }
 
@@ -357,6 +363,9 @@ pub fn parse_args(args: &[String]) -> Result<EditorConfig, EditorAppError> {
             }
             "--exit-frames" => {
                 config.exit_frames = Some(take_number(&mut iter, "--exit-frames")?);
+            }
+            "--import-dir" => {
+                config.import_dir = Some(PathBuf::from(take_value(&mut iter, "--import-dir")?));
             }
             "--help" => {
                 return Err(EditorAppError::BadArgs(HELP.to_string()));
@@ -793,6 +802,8 @@ pub struct EditorApp {
     /// Spine tick already painted in the inspector (skip idle frames).
     spine_shown: Option<u32>,
     status: String,
+    /// Drop handler: one watch poll per frame, rows into the activity feed.
+    import: ImportPump,
     frames: u64,
 }
 
@@ -814,6 +825,15 @@ impl EditorApp {
         let dock = ShellUi::new(&shell);
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
+        let mut import = ImportPump::new(Box::new(|path: &Path| path.exists()));
+        if let Some(dir) = config.import_dir.as_deref() {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    // An unreadable entry is skipped: it reports nothing either way.
+                    let _ = import.watch(&entry.path());
+                }
+            }
+        }
         Ok(Self {
             config,
             shell,
@@ -834,8 +854,29 @@ impl EditorApp {
             spine_registry: spine_registry().ok(),
             spine_shown: None,
             status,
+            import,
             frames: 0,
         })
+    }
+
+    /// Watch one dropped file (`Ok(false)` when already watched). The editor
+    /// never imports it: a change only records an activity row.
+    pub fn watch_import(&mut self, path: &Path) -> Result<bool, WatchError> {
+        self.import.watch(path)
+    }
+
+    /// Replace the host's accept verdict for a dropped file. The host runs the
+    /// intake; the editor only labels the row, so a refusal imports nothing.
+    pub fn set_import_check(&mut self, check: Box<dyn Fn(&Path) -> bool>) {
+        self.import.set_check(check);
+    }
+
+    /// One frame's drop-handler poll at `self.frames` (the tick this frame
+    /// reports on). An idle frame returns no rows and pushes nothing.
+    fn pump_imports(&mut self) {
+        for activity in self.import.poll(self.frames) {
+            self.shell.record_activity(activity);
+        }
     }
 
     /// Status line shown in the top menu.
@@ -1232,6 +1273,7 @@ impl EditorApp {
             .as_mut()
             .expect("checked above")
             .handle_platform_output(window, full.platform_output);
+        self.pump_imports();
         self.frames += 1;
     }
 
@@ -1799,6 +1841,68 @@ mod tests {
             ..EditorConfig::new()
         };
         assert_eq!(explicit.snapshot_path(), PathBuf::from("a.png"));
+    }
+
+    #[test]
+    fn import_dir_flag_reaches_the_config() {
+        let args: Vec<String> = ["e2040-editor", "--import-dir", "art/drop"]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+        let config = parse_args(&args).unwrap();
+        assert_eq!(config.import_dir, Some(PathBuf::from("art/drop")));
+        assert_eq!(EditorConfig::new().import_dir, None, "off by default");
+        assert!(HELP.contains("--import-dir"));
+    }
+
+    #[test]
+    fn the_frame_poll_records_accepted_and_refused_import_rows() {
+        let dir = std::env::temp_dir().join(format!("ed1-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let taken = dir.join("taken.glb");
+        let blocked = dir.join("blocked.glb");
+        std::fs::write(&taken, b"a").unwrap();
+        std::fs::write(&blocked, b"a").unwrap();
+        let config = EditorConfig {
+            project: dir.join("scene.edoc"),
+            import_dir: Some(dir.clone()),
+            ..EditorConfig::new()
+        };
+        let mut app = EditorApp::new(config).unwrap();
+        assert!(app.shell.activity().is_empty(), "watching is not a row");
+        app.set_import_check(Box::new(|path: &Path| path.ends_with("taken.glb")));
+
+        // Both writes land inside the coalescing window: frame 0 is quiet.
+        std::fs::write(&taken, b"aa").unwrap();
+        std::fs::write(&blocked, b"bb").unwrap();
+        app.pump_imports();
+        assert!(app.shell.activity().is_empty(), "inside the window");
+
+        // Frame 2 reports both, each with its own verdict. Folder listing order
+        // is not ours, so the pair is checked as a set.
+        app.frames = 2;
+        app.pump_imports();
+        let rows = app.shell.activity().rows();
+        assert_eq!(rows.len(), 2);
+        let accepted = rows
+            .iter()
+            .filter(|row| row.verb == "import.accepted")
+            .count();
+        let refused = rows
+            .iter()
+            .filter(|row| row.verb == "import.refused")
+            .count();
+        assert_eq!((accepted, refused), (1, 1));
+        assert!(rows.iter().all(|row| row.tick == 2), "the report tick");
+        assert_eq!(app.import.tally().accepted, 1);
+        assert_eq!(app.import.tally().refused, 1);
+
+        // Coalesced: the next frame has nothing to add.
+        app.frames = 3;
+        app.pump_imports();
+        assert_eq!(app.shell.activity().len(), 2, "one report per change");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Unique temp project path per test (parallel-safe, no collisions).

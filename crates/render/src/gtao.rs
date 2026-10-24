@@ -12,7 +12,6 @@
 //! `crate::graph::look_frame_uniform_bytes` so the 32-byte look image has
 //! one writer (GX1 owner); the graph tests own the shared device fixture.
 
-use std::fmt;
 use std::time::Instant;
 
 use crate::fog::normalize3;
@@ -24,8 +23,7 @@ use crate::decals::{compute_storage_entry, compute_uniform_entry};
 // Bounds: every external size is validated before allocation.
 // ---------------------------------------------------------------------------
 
-/// Largest accepted look dimension in pixels (mirrors the RA1 frame bound).
-pub const MAX_LOOK_DIM: u32 = 2048;
+pub use crate::types::{LookError, LookFrame, MAX_LOOK_DIM};
 /// Full-to-half resolution divisor for the AO buffer.
 pub const GTAO_HALF_DIV: u32 = 2;
 /// Fixed GTAO slice axes (Jimenez 2016 school, reimplemented, no donor code).
@@ -140,81 +138,13 @@ const SLICE_DIRS: [(i32, i32); GTAO_SLICES] = [(1, 0), (0, 1), (1, 1), (1, -1)];
 // it cannot run without a device, the window build never takes that path.
 // ---------------------------------------------------------------------------
 
-/// Look pass failures. `NoDevice` covers headless-twin calls with no wgpu
-/// device in hand; `Device` covers device-side failures on the window build.
-#[derive(Clone, PartialEq, Debug)]
-pub enum LookError {
-    /// Caller input is unusable; reason carried.
-    Invalid(String),
-    /// No device behind this call; what to build first, carried.
-    NoDevice(String),
-    /// A device, queue or map call failed; message carried.
-    Device(String),
-}
-
-impl fmt::Display for LookError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid(e) => write!(f, "look input: {e}"),
-            Self::NoDevice(e) => write!(f, "look bind needs a device: {e}"),
-            Self::Device(e) => write!(f, "look device: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for LookError {}
-
 // ---------------------------------------------------------------------------
 // LookFrame: the shared plain-data frame uniforms every look pass binds.
-// Minimal and stable: RL4/RL6/RP2 build on these four fields.
+// The type itself lives in `crate::types` so the frame graph can name it
+// without depending on this pass; only the GTAO-specific helper stays here.
 // ---------------------------------------------------------------------------
 
-/// Frame uniforms shared by all look passes: frame counter, target size,
-/// exposure anchor and sun direction. Plain data; validate before binding.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct LookFrame {
-    /// Frame counter for jitter and history indexing.
-    pub frame_index: u64,
-    /// Render target size in pixels, both components `1..=MAX_LOOK_DIM`.
-    pub viewport_px: [u32; 2],
-    /// Exposure anchor in EV100, must be finite.
-    pub exposure_ev100: f32,
-    /// Sun direction (any nonzero length), must be finite.
-    pub sun_dir: [f32; 3],
-}
-
 impl LookFrame {
-    /// Validate viewport, exposure and sun direction before any bind.
-    pub fn validate(&self) -> Result<(), LookError> {
-        if self.viewport_px[0] == 0 || self.viewport_px[1] == 0 {
-            return Err(LookError::Invalid(format!(
-                "look viewport {}x{} is zero",
-                self.viewport_px[0], self.viewport_px[1]
-            )));
-        }
-        if self.viewport_px[0] > MAX_LOOK_DIM || self.viewport_px[1] > MAX_LOOK_DIM {
-            return Err(LookError::Invalid(format!(
-                "look viewport {}x{} exceeds {MAX_LOOK_DIM}",
-                self.viewport_px[0], self.viewport_px[1]
-            )));
-        }
-        if !self.exposure_ev100.is_finite() {
-            return Err(LookError::Invalid(
-                "look exposure_ev100 is not finite".into(),
-            ));
-        }
-        if !self.sun_dir.iter().all(|c| c.is_finite()) {
-            return Err(LookError::Invalid("look sun_dir is not finite".into()));
-        }
-        let len2 = self.sun_dir[0] * self.sun_dir[0]
-            + self.sun_dir[1] * self.sun_dir[1]
-            + self.sun_dir[2] * self.sun_dir[2];
-        if len2 < 1e-12 {
-            return Err(LookError::Invalid("look sun_dir has ~zero length".into()));
-        }
-        Ok(())
-    }
-
     /// Half-resolution target size in pixels (ceil divide by [`GTAO_HALF_DIV`]).
     pub fn half_size(&self) -> [u32; 2] {
         [

@@ -30,6 +30,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/board-slice.mjs` (+ `tools/board-slice.test.mjs`): read one board row.
 - `tools/book-links.mjs` (+ `tools/book-links.test.mjs`): fail on a broken internal link in the handbook (`docs/book`) or the assembled Pages site; add the handbook link to the game page.
 - `tools/books.mjs` (+ `tools/books.test.mjs`): search the engine and Rust books.
+- `tools/build-timings.mjs` (+ `tools/build-timings.test.mjs`): read a cargo `--timings` HTML report as the unit table and concurrency line a receipt pastes.
 - `tools/cargo-guard.mjs` (+ `tools/cargo-guard.test.mjs`): cap cargo time and messages.
 - `tools/cast-safe.mjs` (+ `tools/cast-safe.test.mjs`): node script; see its header.
 - `tools/city-osm.mjs` (+ `tools/city-osm.test.mjs`): convert an offline OSM slice to glTF.

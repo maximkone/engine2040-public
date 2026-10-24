@@ -16,7 +16,9 @@ fixing the lines below and adding one line to `../archive/INDEX.md`.
 
 | Folder | Status | What it answers |
 |---|---|---|
+| `build-speed-2026-10-24/` | LIVE | the 2026 levers not in `rust-speed-2026-10-23/`: headstart, RDR, TPDE, parallel-frontend status; and the measured dead end in dependency dedupe |
 | `editor-art-gaps-2026-10-24/` | LIVE | editor UI, art-side and artist-side gaps; six ranked steals from arXiv and GitHub |
+| `hot-reload-2026-10-24/` | LIVE | hot reload for gameplay code: dylib shape, state at the tick boundary, ABI rules, 7-step landing plan (OPT13) |
 
 ## 2026-10-23 (current gap waves)
 

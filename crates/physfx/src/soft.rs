@@ -8,6 +8,11 @@
 //!
 //! Units: meters and seconds; `stiffness_hz` is the natural frequency of the edge springs.
 //! The authority layer never sees this: the golden hash is unchanged.
+//!
+//! [`SoftSolve::Substeps`] runs one tick as N small steps of one solver iteration each, so the
+//! accumulated impulse per tick is N and the spring stretch no longer follows the iteration
+//! count (Macklin et al., "Small Steps in Physics Simulation", MIG 2019: substeps set the
+//! effective stiffness, iterations only converge it).
 
 use engine_physics::rapier::{FIXED_DT, GRAVITY_Y};
 use rapier3d::dynamics::{SoftBodyBuilder, SoftBodyHandle, SpringCoefficients};
@@ -31,6 +36,9 @@ const STIFFNESS_HZ: (f32, f32) = (1.0, 60.0);
 const PARTICLE_KG: f32 = 0.01;
 /// Damping ratio of every cloth spring: critical, so a free row settles instead of ringing.
 const DAMPING: f32 = 1.0;
+/// The per-step solve iterations Rapier gives a soft body: the shipped count when no
+/// [`SoftSolve`] is set.
+const DEFAULT_PGS_ITERATIONS: usize = 3;
 
 /// A sheet of cloth: `rows` particles down the hang, `cols` across the pinned edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -230,12 +238,44 @@ impl SoftCloth {
     }
 }
 
+/// Which solver setting one fixed tick of a [`SoftWorld`] spends, and how it spends it.
+///
+/// The two forms cost the same constraint work per tick: one Rapier step solves every spring
+/// once per iteration, so `Iterations(n)` and `Substeps(n)` both touch the sheet `n` times.
+/// They differ in the step they integrate over, which is what sets the stiffness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoftSolve {
+    /// One step of the whole fixed tick with `iterations` solver iterations: the shipped path.
+    Iterations(usize),
+    /// `substeps` small steps of `1/n` of the fixed tick, one solver iteration each: the small
+    /// steps form. A sub-step count of 1 is the same as [`Self::Iterations`]`(1)`.
+    Substeps(usize),
+}
+
+impl SoftSolve {
+    /// Steps one tick runs, and the solver iterations each step runs.
+    ///
+    /// One Rapier soft-body step solves every spring once per `additional_pgs_iterations`, so
+    /// `Iterations(n)` and `Substeps(n)` both touch the sheet `n` times per tick: the constraint
+    /// total per tick is fixed, only the step length differs.
+    #[must_use]
+    fn plan(self) -> (usize, usize) {
+        match self {
+            Self::Iterations(n) => (1, n.max(1)),
+            Self::Substeps(n) => (n.max(1), 1),
+        }
+    }
+}
+
 /// One Rapier soft-body world for every cloth of a [`crate::PhysFx`] world: one
 /// `SoftBodySet` and one pipeline, stepped at the fixed 60 Hz. The cloths have no colliders
 /// and never meet the ragdolls; they are a float look layer.
 pub struct SoftWorld {
     world: PhysicsWorld,
     cloths: Vec<SoftCloth>,
+    /// How one tick spends the solver; `None` leaves the world on Rapier's own defaults, the
+    /// shipped single-step path.
+    solve: Option<SoftSolve>,
 }
 
 impl SoftWorld {
@@ -248,7 +288,26 @@ impl SoftWorld {
         Self {
             world,
             cloths: Vec::new(),
+            solve: None,
         }
+    }
+
+    /// The same world, stepping each tick the way `solve` says. Cloths spawned before the call
+    /// keep the solver they were built with. The tier table does not call this yet: PX47 measured
+    /// the small-step form at 3.5 times the cost of one step with no stretch or settle gain, so
+    /// the shipped path stays.
+    #[must_use]
+    pub fn with_solve(mut self, solve: SoftSolve) -> Self {
+        let (steps, _) = solve.plan();
+        self.world.integration_parameters.dt = FIXED_DT / f32_of(steps);
+        self.solve = Some(solve);
+        self
+    }
+
+    /// How one tick spends the solver, or `None` on the shipped single-step default.
+    #[must_use]
+    pub fn solve(&self) -> Option<SoftSolve> {
+        self.solve
     }
 
     /// Builds and hangs one sheet. Refused past [`MAX_CLOTHS`] or with a bad desc; a refused
@@ -263,6 +322,10 @@ impl SoftWorld {
         }
         let sheet = Sheet::new(desc);
         let pin_y_m = sheet.pins[0][1];
+        // Rapier's own default is 3 per step; the shipped path keeps it.
+        let iterations = self
+            .solve
+            .map_or(DEFAULT_PGS_ITERATIONS, |solve| solve.plan().1);
         let builder = SoftBodyBuilder::new(sheet.positions)
             .edges(sheet.edges)
             .bend_edges(sheet.bends)
@@ -272,6 +335,7 @@ impl SoftWorld {
             .particle_radius(desc.spacing_m * 0.5)
             .softness(SpringCoefficients::new(desc.stiffness_hz, DAMPING))
             .gravity_scale(desc.gravity_scale)
+            .additional_pgs_iterations(iterations)
             .no_surface_collider()
             .can_sleep(true);
         let body = self.world.soft_bodies.insert(
@@ -292,25 +356,27 @@ impl SoftWorld {
 
     /// Steps the world one fixed tick and copies every cloth's particles into its buffer. The
     /// pin rows are snapped back to their rest positions before the copy, so a pinned particle
-    /// is exactly on its pin.
+    /// is exactly on its pin. A small-step solve snaps them before every sub-step too, so a pin
+    /// never drifts and pulls the sheet inside a tick.
     pub fn step(&mut self) {
         if self.cloths.is_empty() {
             return;
         }
-        self.world.step();
-        let Self { world, cloths } = self;
+        let (steps, _) = self.solve.unwrap_or(SoftSolve::Iterations(1)).plan();
+        if steps > 1 {
+            for _ in 0..steps {
+                hold_pins(&mut self.world, &self.cloths);
+                self.world.step();
+            }
+        } else {
+            self.world.step();
+        }
+        let Self { world, cloths, .. } = self;
+        hold_pins(world, cloths);
         for cloth in cloths {
             let Some(body) = world.soft_bodies.get_mut(cloth.body) else {
                 continue;
             };
-            let base = cloth.desc.pin_row * cloth.desc.cols;
-            for (col, pin) in cloth.pins.iter().enumerate() {
-                let i = base + col;
-                let p = body.particle_position(i);
-                if p.x != pin[0] || p.y != pin[1] || p.z != pin[2] {
-                    body.set_particle_position(i, Vector::new(pin[0], pin[1], pin[2]));
-                }
-            }
             for (out, p) in cloth.particles.iter_mut().zip(body.particle_positions()) {
                 *out = [p.x, p.y, p.z];
             }
@@ -333,6 +399,23 @@ impl SoftWorld {
 impl Default for SoftWorld {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Snaps every pinned particle of every cloth back onto its rest position.
+fn hold_pins(world: &mut PhysicsWorld, cloths: &[SoftCloth]) {
+    for cloth in cloths {
+        let Some(body) = world.soft_bodies.get_mut(cloth.body) else {
+            continue;
+        };
+        let base = cloth.desc.pin_row * cloth.desc.cols;
+        for (col, pin) in cloth.pins.iter().enumerate() {
+            let i = base + col;
+            let p = body.particle_position(i);
+            if p.x != pin[0] || p.y != pin[1] || p.z != pin[2] {
+                body.set_particle_position(i, Vector::new(pin[0], pin[1], pin[2]));
+            }
+        }
     }
 }
 

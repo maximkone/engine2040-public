@@ -43,12 +43,21 @@ pub(super) const BLIT_WGSL: &str = concat!(
     include_str!("../shaders/blit.wgsl")
 );
 
+/// Look-table display shader (E11): `shaders/lut_present.wgsl`. Reads the
+/// graded display frame, decodes the sRGB bytes to linear display values,
+/// samples the bound 3D table with the linear clamp sampler and writes the
+/// display frame. Only recorded when a table is bound, so a LUT-free frame
+/// keeps the blit's own bytes.
+pub(super) const LUT_PRESENT_WGSL: &str = include_str!("../shaders/lut_present.wgsl");
+
 mod auto_exposure_gpu;
 mod bind_memo;
 mod bloom_dual;
+mod buffers_read;
 mod capture;
 mod compressed;
 mod contact_live;
+mod debug_gbuffer;
 mod debug_lines;
 mod device_init;
 mod fight_fx;
@@ -60,6 +69,8 @@ mod gate;
 mod gtao_live;
 mod kind_table;
 mod live;
+mod look_seam;
+mod lut_upload;
 mod motion;
 mod msaa;
 mod presenter;
@@ -73,6 +84,9 @@ mod sun_shadow;
 mod taa_resolve;
 mod timing;
 mod warmup;
+
+/// GPU readback of the A3 debug frame (the pure frame lives in crate::buffers).
+pub use buffers_read::read_frame;
 
 /// The sun switch is one process-wide static, so a test that flips it and a
 /// test that renders a frame take this lock: a render never reads a value

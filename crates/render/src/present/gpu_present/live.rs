@@ -1065,31 +1065,6 @@ impl Presenter {
         }
     }
 
-    /// Blit view and pipeline for a window-path sink. A missing surface
-    /// pipeline or target set is a typed error, never a panic.
-    fn sink_target<'a>(
-        &'a self,
-        sink: LiveSink<'a>,
-    ) -> Result<(&'a wgpu::TextureView, &'a wgpu::RenderPipeline), PresentError> {
-        match sink {
-            LiveSink::Surface(view) => {
-                let pipeline = self
-                    .surface_pipeline
-                    .as_ref()
-                    .map(|(_, pipeline)| pipeline)
-                    .ok_or(PresentError::NoSurface)?;
-                Ok((view, pipeline))
-            }
-            LiveSink::Twin => {
-                let targets = self
-                    .targets
-                    .as_ref()
-                    .ok_or_else(|| PresentError::Validation("live twin has no targets".into()))?;
-                Ok((&targets.out_view, &self.twin_pipeline))
-            }
-        }
-    }
-
     /// Render one window-path frame into the LDR twin with no readback:
     /// the same encode the surface takes (live frame by default, probe
     /// frame under `set_look_probes`), minus the swapchain. For tests and
@@ -1318,11 +1293,16 @@ impl Presenter {
             let forward_ibl_started = engine_clock::now();
             let fwd_timer = timer.map(|(timer, _)| timer);
             let fwd = ForwardLook::live(&look, sky_draw, gtao_run, fight_fx, fwd_timer);
-            let sky_timed = self.encode_forward(&mut enc, targets, list, fwd, staged.order());
+            let sky_timed = self.encode_forward(&mut enc, targets, list, fwd, staged.order(), None);
             forward_ibl_ms = engine_clock::since(forward_ibl_started).as_secs_f64() * 1000.0;
             self.taa
                 .encode(&self.queue, &mut enc, targets.width, targets.height);
-            let (blit_view, blit_pipeline) = self.sink_target(sink)?;
+            // E11: the display plan. With no table bound the blit writes the
+            // sink itself; with one bound it lands in the twin and the look
+            // pass below writes the display target.
+            let stage = self.look_stage(sink)?;
+            let (blit_view, blit_pipeline) = (stage.blit, stage.pipeline);
+
             // LF3 first landing: the CPU GTAO helper
             // (`live_ao_upload_for_frame`: bake via
             // `gtao_live_full_for_forward`, guard via `check_ao_full_for_blit`,
@@ -1389,7 +1369,7 @@ impl Presenter {
                 blit_pipeline,
                 timer.map(|(timer, _)| timer.blit_writes()),
             );
-            let overlay_format = self.live_overlay_format(sink);
+            let overlay_format = stage.format;
             if let Some(plan) = self.overlay.hp_bars_plan(frame.aspect) {
                 let mut verts = [crate::overlay::QuadVertex::default();
                     crate::overlay::OVERLAY_MAX_QUADS * crate::overlay::VERTS_PER_QUAD];
@@ -1410,6 +1390,9 @@ impl Presenter {
             // The debug line pass rides the same after-blit view, one draw and
             // no depth; the off switch or an empty batch keeps the frame equal.
             self.encode_debug_lines(&mut enc, frame.aspect, overlay_format, blit_view);
+            // E11: the look pass, after the grade and before the display
+            // write. No table means no pass, so the frame is byte-identical.
+            self.encode_look_pass(&mut enc, stage, blit_view, width, height);
             if let Some((timer, slot)) = timer {
                 let timed = PassesTimed {
                     sky: sky_timed,
@@ -1570,6 +1553,7 @@ impl Presenter {
                 list,
                 ForwardLook::probed(particle_timed, timer.map(|(timer, _)| timer)),
                 staged.order(),
+                None,
             );
             if let (Some((timer, slot)), true) = (timer, probe) {
                 timer.encode_resolve(
@@ -1671,14 +1655,17 @@ impl Presenter {
             );
             // Cached at attach: no per-frame pipeline build, and a failed
             // attach never replaced the last-good one.
-            let (blit_view, blit_pipeline) = self.sink_target(sink)?;
+            let stage = self.look_stage(sink)?;
             self.encode_blit(
                 &mut blit_enc,
                 &targets.blit_bind,
-                blit_view,
-                blit_pipeline,
+                stage.blit,
+                stage.pipeline,
                 None,
             );
+            // E11: the look pass, after the grade and before the display
+            // write. No table means no pass, so the frame is byte-identical.
+            self.encode_look_pass(&mut blit_enc, stage, stage.blit, width, height);
         }
         self.queue.submit(Some(blit_enc.finish()));
         self.pop_scope(scope)?;

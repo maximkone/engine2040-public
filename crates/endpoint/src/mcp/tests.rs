@@ -1141,12 +1141,16 @@ fn assert_back_compat(server: &McpServer) -> Vec<String> {
     // `codex.search` and `codex.cite` are allowlisted by exact name: they
     // read the codex passage index and write one ref line in a Rome table
     // entry, never arbitrary code.
-    const ALLOWED_BY_NAME: [&str; 5] = [
+    // `project.run` is allowlisted by exact name: it reads one built project
+    // package (`build/<name>.e2package`), rebuilds the same project and plays it
+    // headless through the packaged slice, never arbitrary code.
+    const ALLOWED_BY_NAME: [&str; 6] = [
         "play.run",
         "code.callers",
         "test.run",
         "codex.search",
         "codex.cite",
+        "project.run",
     ];
     for tool in server.all_tools() {
         let name = tool.name.to_lowercase();

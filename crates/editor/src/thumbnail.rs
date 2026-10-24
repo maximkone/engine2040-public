@@ -1,16 +1,18 @@
-//! Asset thumbnails: one 256x256 RGBA8 image per content digest, LRU-bounded.
+//! Asset thumbnails: one 128x128 RGBA8 image per content digest, LRU-bounded.
 //!
 //! Owner: the editor session. The browser panel asks for a thumbnail per listed
-//! asset; the capture path renders the pixels and inserts them here. This
-//! module never invents a pixel: a row without an insert stays missing, so the
-//! browser draws a placeholder instead of a fake image.
+//! asset; the import cooks the pixels ([`engine_assets::thumb_cook`]) and the
+//! browser inserts them here ([`ThumbnailCache::insert_cooked`]). This module
+//! never invents a pixel: a row without an insert stays missing, so the browser
+//! draws a placeholder instead of a fake image.
 //! Keying: one entry per content digest, so two asset names whose pixels match
 //! share one buffer; a name binds to a digest ([`ThumbnailCache::insert`]) and a
 //! read follows the name.
-//! Determinism: the digest is FNV-1a 64 over the RGBA bytes, and eviction takes
-//! the smallest caller-supplied use tick (smallest digest on a tie), so the
-//! same inserts and reads always evict the same entry. No clock, no RNG.
-//! Budget: one thumbnail is [`THUMB_BYTES`] (256 KiB); the caller's byte cap
+//! Determinism: the digest is FNV-1a 64 over the RGBA bytes, which is the
+//! digest the cook seals, and eviction takes the smallest caller-supplied use
+//! tick (smallest digest on a tie), so the same inserts and reads always evict
+//! the same entry. No clock, no RNG.
+//! Budget: one thumbnail is [`THUMB_BYTES`] (64 KiB); the caller's byte cap
 //! bounds the whole cache and eviction never leaves a stale name binding.
 //! Errors: [`ThumbError`]; a refused insert changes nothing.
 
@@ -18,9 +20,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use engine_core::hash_bytes;
 
-/// Thumbnail width and height in pixels.
-pub const THUMB_EDGE: usize = 256;
-/// Bytes of one RGBA8 thumbnail (`256 * 256 * 4`).
+/// Thumbnail width and height in pixels: the budget the import cooks at
+/// ([`engine_assets::thumb_cook::THUMB_EDGE`]); the size test below keeps the
+/// two from drifting apart.
+pub const THUMB_EDGE: usize = 128;
+/// Bytes of one RGBA8 thumbnail (`128 * 128 * 4`).
 pub const THUMB_BYTES: usize = THUMB_EDGE * THUMB_EDGE * 4;
 /// Byte cap a caller gets when it names none: eight thumbnails.
 pub const DEFAULT_CAP_BYTES: usize = 8 * THUMB_BYTES;
@@ -145,6 +149,24 @@ impl ThumbnailCache {
         self.used_bytes = self.used_bytes.saturating_add(THUMB_BYTES);
         self.evict_to_cap();
         Ok(digest)
+    }
+
+    /// Insert the pixels an import cooked ([`engine_assets::thumb_cook`]).
+    ///
+    /// This is the one seam between the assets crate's cook and this cache: the
+    /// cooked digest is the digest of its own pixels, so inserting here binds
+    /// the name to the digest the browser row reports.
+    ///
+    /// # Errors
+    /// Same refusals as [`ThumbnailCache::insert`]: a cooked buffer that is not
+    /// [`THUMB_BYTES`] long is refused and nothing is cached.
+    pub fn insert_cooked(
+        &mut self,
+        asset: &str,
+        thumb: &engine_assets::thumb_cook::CookedThumb,
+        now: u64,
+    ) -> Result<u64, ThumbError> {
+        self.insert(asset, &thumb.rgba, now)
     }
 
     /// Read one asset's thumbnail, marking it used at `now`.
@@ -352,7 +374,55 @@ mod tests {
                 needed: THUMB_BYTES
             }
         );
-        assert!(error.to_string().contains("262144"), "{error}");
+        assert!(error.to_string().contains("65536"), "{error}");
         assert!(small.is_empty());
+    }
+
+    // The import cooks at the size this cache holds: the two constants are one
+    // budget, so a drift on either side fails here.
+    #[test]
+    fn the_cache_holds_exactly_the_size_the_import_cooks() {
+        assert_eq!(
+            THUMB_BYTES,
+            engine_assets::thumb_cook::THUMB_BYTES,
+            "cache and cook share one thumbnail budget"
+        );
+        assert_eq!(
+            u32::try_from(THUMB_EDGE).unwrap(),
+            engine_assets::thumb_cook::THUMB_EDGE
+        );
+    }
+
+    // WG14: the cache reads the pixels the import cooked, keys them by the
+    // cook's own digest, and a second insert of the same content costs nothing.
+    #[test]
+    fn the_cache_reads_the_import_cooked_thumbnail() {
+        // One 4x4 source, so the cook upsamples it to the 128 px budget.
+        let source = [90u8, 120, 60, 255].repeat(16);
+        let cooked = engine_assets::thumb_cook::cook_thumbnail(&source, 4, 4).expect("cooks");
+        let mut cache = ThumbnailCache::default();
+        let digest = cache
+            .insert_cooked("banner", &cooked, 1)
+            .expect("the cooked size fits");
+        assert_eq!(digest, cooked.digest, "the cook's digest is the cache key");
+        let row = cache.get("banner", 2).expect("bound name");
+        assert_eq!(row.rgba, cooked.rgba, "the cache holds the cooked pixels");
+        assert_eq!(row.digest, cooked.digest);
+        assert_eq!(cache.used_bytes(), engine_assets::thumb_cook::THUMB_BYTES);
+        // The same content under another name is one entry, not two.
+        assert_eq!(cache.insert_cooked("banner-copy", &cooked, 3), Ok(digest));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.used_bytes(), engine_assets::thumb_cook::THUMB_BYTES);
+        // A buffer that is not one thumbnail is refused, nothing cached.
+        let mut wrong = cooked.clone();
+        wrong.rgba.truncate(16);
+        assert_eq!(
+            cache.insert_cooked("crate", &wrong, 4),
+            Err(ThumbError::WrongSize {
+                got: 16,
+                expected: THUMB_BYTES
+            })
+        );
+        assert!(cache.get("crate", 5).is_none());
     }
 }

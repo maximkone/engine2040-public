@@ -11,10 +11,10 @@
 //!
 //! The engine cvars (`maxspeed`, `accelerate`, `airaccelerate`, `friction`,
 //! `stopspeed`, `edgefriction`) are not in the SDK, so they are fields of
-//! [`Params`], not constants of the law: a reader runs another server's table
-//! without an edit. [`Params::hl1`] is the fixture's table.
+//! `Params`, not constants of the law: a reader runs another server's table
+//! without an edit. `Params::hl1` is the fixture's table.
 //!
-//! Units are HL units and seconds inside; [`Params::unit_m`] converts to
+//! Units are HL units and seconds inside; `Params::unit_m` converts to
 //! meters. The SDK's own jump line (`sqrt(2 * 800 * 45.0)`) pins gravity at
 //! 800 u/s^2, which at the engine's inch-per-unit is 20.32 m/s^2, twice our
 //! `GRAVITY_Y`. The fixture therefore picks `unit_m = |GRAVITY_Y| / 800` and
@@ -23,7 +23,7 @@
 //! against our 1.40 m capsule.
 //!
 //! Never in the tick: this module is compiled for the `rapier` lane (the lane
-//! [`super::controller`] lives in), has no caller in the sim, and writes no
+//! `super::controller` lives in), has no caller in the sim, and writes no
 //! state the tick or the hash reads.
 #![forbid(unsafe_code)]
 

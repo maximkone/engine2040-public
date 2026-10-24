@@ -1,6 +1,6 @@
 //! clinch: ragdolls that share a place part without sinking into each other (NS3).
 //!
-//! Consumer: the clinch leg of [`ragdoll_tape`](super::ragdoll_tape), which parts its two
+//! Consumer: the clinch leg of `ragdoll_tape`, which parts its two
 //! fighters after every step; any code that keeps several ragdolls in separate worlds can call
 //! the same function. Each fighter has a world of its own (Rapier never sees another fighter's
 //! bones), so this pass is the only contact between them. Units: meters, kilograms, seconds.

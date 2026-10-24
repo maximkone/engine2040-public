@@ -1161,6 +1161,70 @@ crate::e2_tool!(
 );
 
 /// The material pack: ten verbs, loaded on demand.
+/// Verb: fold a graph into its record text and digest.
+pub const TOOL_MATERIAL_FROM_GRAPH: &str = "material.from_graph";
+
+/// The graph form `material.from_graph` folds: the same document
+/// `material.graph.set` takes.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MaterialFromGraphArgs {
+    /// The graph as JSON text: `material`, `base`, `nodes` and `output`.
+    pub graph: String,
+}
+
+/// What `material.from_graph` answers: the record in its canonical form.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MaterialFromGraphOutput {
+    /// Canonical record text; parsing it back as a TOML record gives the same
+    /// bytes, which is the graph-to-record contract.
+    pub record: String,
+    /// FNV-1a over `record`, 16 hex digits.
+    pub digest: String,
+    /// Record name the fold wrote.
+    pub name: String,
+    /// Parent record the fold extended.
+    pub base: String,
+    /// Nodes the graph folds.
+    pub nodes: u32,
+    /// Gameplay layers the record carries.
+    pub layers: u32,
+}
+
+/// `material.from_graph`: one graph in, its record text and digest out.
+/// Nothing is stored: the same graph always folds to the same bytes.
+fn material_from_graph(
+    _server: &crate::mcp::McpServer,
+    args: &MaterialFromGraphArgs,
+) -> Result<MaterialFromGraphOutput, McpToolError> {
+    let graph = parse_graph(&args.graph)?;
+    let record = fold_graph(&graph)?;
+    let text = record.to_text();
+    Ok(MaterialFromGraphOutput {
+        digest: format!("{:016x}", engine_core::hash_bytes(text.as_bytes())),
+        record: text,
+        name: record.name.clone(),
+        base: graph.base.clone(),
+        nodes: u32::try_from(graph.nodes.len()).unwrap_or(u32::MAX),
+        layers: u32::try_from(record.layers.len()).unwrap_or(u32::MAX),
+    })
+}
+
+crate::e2_tool!(
+    /// `material.from_graph`: fold a node graph into its record.
+    MaterialFromGraphTool,
+    name = TOOL_MATERIAL_FROM_GRAPH,
+    description = "Fold a node graph (the same `material`, `base`, `nodes` and `output` document material.graph.set takes) into its material record and answer the canonical record text, its digest, the name and base it carries, and its node and layer counts. The record text parses back to the same bytes, so a graph and a TOML record that mean the same thing fold equal. An unsupported node kind refuses by name with the legal kinds.",
+    readonly = true,
+    args = MaterialFromGraphArgs,
+    output = MaterialFromGraphOutput,
+    invoke = material_from_graph
+);
+
+/// The shipped material pack: eleven verbs, five of which commit.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
@@ -1211,6 +1275,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<MaterialGraphGetTool>(
         TOOL_MATERIAL_GRAPH_GET,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<MaterialFromGraphTool>(
+        TOOL_MATERIAL_FROM_GRAPH,
         PACK,
         CapabilityCard::Observe,
     )?);
@@ -1826,7 +1895,7 @@ mod tests {
     }
 
     #[test]
-    fn the_pack_registers_ten_verbs_with_their_cards() {
+    fn the_pack_registers_its_verbs_with_their_cards() {
         let registry = super::super::PackRegistry::shipped();
         assert!(registry.errors().is_empty(), "{:?}", registry.errors());
         for name in [
@@ -1837,6 +1906,7 @@ mod tests {
             TOOL_MATERIAL_PARAM,
             TOOL_MATERIAL_COMPARE,
             TOOL_MATERIAL_GRAPH_GET,
+            TOOL_MATERIAL_FROM_GRAPH,
         ] {
             let verb = registry.verb(name).expect("registered");
             assert_eq!(verb.card(), CapabilityCard::Observe, "{name}");
@@ -1851,5 +1921,77 @@ mod tests {
             assert_eq!(verb.card(), CapabilityCard::Commit, "{name}");
             assert!(!verb.readonly(), "{name}");
         }
+    }
+
+    #[test]
+    fn from_graph_answers_the_record_and_the_text_round_trips_byte_equal() {
+        let server = server();
+        let out = MaterialFromGraphTool::invoke(
+            &server,
+            MaterialFromGraphArgs {
+                graph: BRICK.to_owned(),
+            },
+        )
+        .expect("the graph folds");
+        assert_eq!(out.name, "brick_wall");
+        assert_eq!(out.base, "stone");
+        assert_eq!(out.nodes, 5);
+        assert_eq!(out.layers, 1);
+        assert_eq!(out.digest.len(), 16);
+        // The record text is the record: parsing it back gives the same bytes,
+        // so a graph and a record text that mean the same thing fold equal.
+        let record = MaterialSet::shipped()
+            .parse_against(&out.record)
+            .expect("the record parses against the shipped set");
+        assert_eq!(
+            record.to_text(),
+            out.record,
+            "the graph's record and the parsed text are byte-equal"
+        );
+        assert_eq!(
+            format!("{:016x}", engine_core::hash_bytes(out.record.as_bytes())),
+            out.digest
+        );
+        // The same graph twice answers the same bytes.
+        let again = MaterialFromGraphTool::invoke(
+            &server,
+            MaterialFromGraphArgs {
+                graph: BRICK.to_owned(),
+            },
+        )
+        .expect("the graph folds twice");
+        assert_eq!(again, out);
+    }
+
+    #[test]
+    fn from_graph_refuses_an_unsupported_node_kind_by_name() {
+        let server = server();
+        let broken = BRICK.replace(r#""kind": "noise""#, r#""kind": "voronoi""#);
+        assert_ne!(broken, BRICK, "the fixture carries the noise kind");
+        let err = MaterialFromGraphTool::invoke(
+            &server,
+            MaterialFromGraphArgs { graph: broken },
+        )
+        .expect_err("an unknown kind refuses");
+        assert_eq!(err.code, "bad_graph");
+        assert!(
+            err.message.contains("voronoi"),
+            "the refusal names the kind: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("noise, tile, gradient, curve, warp, blend"),
+            "the refusal names the legal kinds: {}",
+            err.message
+        );
+        // Text that is not a graph at all refuses the same way.
+        let err = MaterialFromGraphTool::invoke(
+            &server,
+            MaterialFromGraphArgs {
+                graph: "not a graph".to_owned(),
+            },
+        )
+        .expect_err("bad text refuses");
+        assert_eq!(err.code, "bad_graph");
     }
 }

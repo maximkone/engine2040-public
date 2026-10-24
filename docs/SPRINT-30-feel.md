@@ -205,9 +205,26 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   pair. The router pin passes at 130 with `level.paint` counted, and `bad_grid`, `no_kit`, `off_grid`,
   `rule_unsatisfiable` and `too_many_cells` joined the refusal kind tables. rust-quality PASS (the split
   of `plan` cleared its long-function and panic-site hits), rustfmt clean, `git diff --check` clean.
-- [ ] DOOR9 endpoint: anim.retarget, the clips we cannot use. Steal: Godot BoneMap over
+- [x] DOOR9 endpoint: anim.retarget, the clips we cannot use. Steal: Godot BoneMap over Landed 4d585ccc4.
   `bone_role_for_name`, `BoneMapping` and `bone_coverage` in `crates/anim/src/contract.rs`, which
   have no verb. A third-party clip goes from "unknown role" to intake, retarget and a preview
   frame. Files: `crates/endpoint/src/packs/anim.rs`, `crates/anim/src/contract.rs`.
   Accept: a Mixamo rig with UE bone names retargets to our skeleton and reports coverage 100%; an
   unknown bone refuses with its name; the preview is a real frame with pixels.
+  Proof: `cargo test -p engine-endpoint --features mcp --lib packs::anim` 16 passed, 0 failed (run
+  40071571314). `anim.retarget` scores an Unreal-named rig and a Mixamo rig onto the same 17 roles at
+  coverage 1000; `bone_coverage` now trusts a row tagged `manual`, so a hand-written row may name a
+  bone no table knows (`a_manual_row_scores_a_source_no_table_knows` pins it in the anim crate); an
+  unknown bone refuses `unknown_bone` with the bone and the 17 roles in the message, and bad profile,
+  bad override, a repeated override source and an empty bone list each refuse with their own code.
+  `anim.retarget.preview` lives in `crates/endpoint/src/packs/anim/preview.rs` and draws the same map
+  as one 128x128 PNG: PNG magic, IHDR size 128x128, 16 edges, coverage 1000, more than 500 lit
+  pixels, and the same digest on replay; a manual row changes the colour and the digest but not the
+  shape; a refusal
+  writes no file; `../evil.png`, `/etc` and `.jpg` refuse `bad_args`, sides 0 and 513 refuse
+  `bad_size`. The five new codes (`bad_override`, `bad_profile`, `duplicate_bone`, `missing_roles`,
+  `unknown_bone`) joined the INPUT kind table. Router pin 143 with both verbs (run 40073775596);
+  rust-quality PASS (99 A) on the owned paths, rustfmt clean, `git diff --check` clean. Left: the
+  door's refusal-classifier test is red on 22 codes that other packs produce (`bad_frames`,
+  `bad_manifest`, `no_project`, ...); none belongs to this row. Commits: `53c12ae61` retarget,
+  `4d585ccc4` preview.

@@ -14,6 +14,10 @@
 static TEST_ALLOC: engine_core::alloc_probe::CountingAlloc =
     engine_core::alloc_probe::CountingAlloc;
 
+pub mod types;
+
+mod timing;
+
 pub mod window;
 
 /// Fixed 2.5D ground projection: locked 45 degree yaw, `atan(0.5)` pitch and
@@ -310,6 +314,12 @@ pub mod dynres_gov;
 /// battery, never onto `Web`. Cold path, off the tick, no hash input;
 /// consumer is the startup tier pick.
 pub mod power;
+
+/// Mobile soak harness (BG8): the frame times and the resident set of a long
+/// run, the p50 and the RSS it reports, and the thermal-cliff flag. Pure over
+/// its inputs; the resident-set leaf reads `/proc/self/statm` where the host
+/// has one. Consumer is the device soak on a phone.
+pub mod soak;
 
 #[cfg(feature = "window")]
 pub mod gpu;

@@ -65,8 +65,14 @@ pub mod gym;
 /// DOOR8: `level.paint` — one gated call lays a kit across the cells of a room.
 pub mod level_paint;
 pub mod material;
+/// LG4: `memory.write`, `memory.recall` and `memory.share` keep typed
+/// facts behind the session's own capability token.
+pub mod memory;
 pub mod net;
 pub mod perf;
+/// Projects: project.new, project.build and project.run write the smallest
+/// real project, build its package and play it headless.
+pub mod project;
 /// Balance answers for one blow: the read-only `physics.read` verb.
 pub mod physics;
 /// Physics and render knobs an AI can set, with ranges, a replay tape and undo.
@@ -104,12 +110,13 @@ pub mod world;
 /// verifier verbs replace their replay-pack stand-ins in the same slot, so a
 /// build never serves one verb name twice.
 #[cfg(feature = "verify")]
-pub const PACK_NAMES: [&str; 24] = [
+pub const PACK_NAMES: [&str; 26] = [
     scene::PACK,
     break_::PACK,
     fx::PACK,
     anim::PACK,
     material::PACK,
+    memory::PACK,
     asset::PACK,
     rules::PACK,
     geo::PACK,
@@ -118,6 +125,7 @@ pub const PACK_NAMES: [&str; 24] = [
     net::PACK,
     perf::PACK,
     play::PACK,
+    project::PACK,
     verify::PACK,
     physics::PACK,
     physics_settings::PACK,
@@ -133,12 +141,13 @@ pub const PACK_NAMES: [&str; 24] = [
 
 /// Every pack name, in contract order. Each name has one module below.
 #[cfg(not(feature = "verify"))]
-pub const PACK_NAMES: [&str; 24] = [
+pub const PACK_NAMES: [&str; 26] = [
     scene::PACK,
     break_::PACK,
     fx::PACK,
     anim::PACK,
     material::PACK,
+    memory::PACK,
     asset::PACK,
     rules::PACK,
     geo::PACK,
@@ -147,6 +156,7 @@ pub const PACK_NAMES: [&str; 24] = [
     net::PACK,
     perf::PACK,
     play::PACK,
+    project::PACK,
     replay::PACK,
     physics::PACK,
     physics_settings::PACK,
@@ -605,6 +615,8 @@ impl PackRegistry {
                 net::pack(),
                 perf::pack(),
                 play::pack(),
+                memory::pack(),
+                project::pack(),
             ];
             // AD8: one contract slot, one owner. The verify pack serves the
             // replay pair itself when the feature is on.

@@ -289,13 +289,13 @@ fn chunk_all_settled32(chunk: &[Body]) -> bool {
 /// while the loop pays one `min` plus one multiply total and the compiler
 /// fuses each group into SIMD lanes (8 x `f32` fills one AVX2 lane, four lanes
 /// per 32-group, sequential scan keeps cache misses low
-/// [geaen | 3.4.2.7 Avoiding Cache Misses]). One [`chunk_all_settled32`]
+/// [geaen | 3.4.2.7 Avoiding Cache Misses]). One `chunk_all_settled32`
 /// narrowed check per group skips resting ground bodies when `h >= FIXED_DT`,
 /// so the 10k settled slice of the 11k mixed fixture pays only the predicate
 /// and the 1k dynamic prefix pays one velocity fast-fail (`vx|vy` two loads)
 /// plus one predictable branch per 32 bodies instead of per 8
 /// ([geaen | 3.4.3.2 Branch Prediction]). The remainder tail takes one
-/// [`slice_all_settled`] branch for its settled lanes (stepping a settled lane
+/// `slice_all_settled` branch for its settled lanes (stepping a settled lane
 /// via the fast path keeps every bit, so the batch-fail fallback may step all
 /// remainder lanes with no per-body skip); the stepping loop is an iterator
 /// with no per-lane bounds checks in index order. The skip flag fans into two

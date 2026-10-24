@@ -7,8 +7,8 @@
 //! Rapier world reads these bytes for checkpoint and rollback
 //! (`rapier::World::island_snapshot`).
 //!
-//! [`step_islands`] steps one unit per island, one island at a time, in up to
-//! [`MAX_THREADS`] lanes on a caller-owned [`JobPool`]. Islands are cut into
+//! `step_islands` steps one unit per island, one island at a time, in up to
+//! `MAX_THREADS` lanes on a caller-owned `JobPool`. Islands are cut into
 //! chunks by island count and `chunk` alone, lanes take chunks round-robin,
 //! and the chunk results merge by chunk index, so the lane count reaches
 //! neither state nor result order: 1, 2, 4 and 8 threads give the same
@@ -69,10 +69,10 @@ fn union_roots(p: &mut Vec<usize>, n: usize, pairs: &[(usize, usize)]) {
     }
 }
 
-/// Most lanes one [`step_islands`] call may fan out to.
+/// Most lanes one `step_islands` call may fan out to.
 pub const MAX_THREADS: usize = 64;
 
-/// How [`step_islands`] cuts and schedules its work.
+/// How `step_islands` cuts and schedules its work.
 ///
 /// Chunk edges depend on the island count and `chunk` only, never on
 /// `threads`, so every lane count visits the same chunks and merges them in
@@ -103,7 +103,7 @@ impl ParConfig {
 /// Why a parallel island step was refused. Nothing was stepped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParError {
-    /// Thread count zero or past [`MAX_THREADS`]; the culprit is carried.
+    /// Thread count zero or past `MAX_THREADS`; the culprit is carried.
     BadThreads(usize),
     /// Chunk size zero.
     BadChunk,
@@ -124,7 +124,7 @@ impl core::fmt::Display for ParError {
 
 impl std::error::Error for ParError {}
 
-/// Chunked split beside [`step_islands`]: the island ranges a step visits,
+/// Chunked split beside `step_islands`: the island ranges a step visits,
 /// `chunk` islands each. Entry `i` covers islands `start..end` in island
 /// order. Units: island indices. Determinism: the island count and `chunk`
 /// alone decide the edges, so 1/2/4/8 threads get the same ranges. Errors:
@@ -138,10 +138,10 @@ pub fn island_chunks(count: usize, chunk: usize) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// Sorted merge beside [`step_islands`]: chunk results by chunk index, island
+/// Sorted merge beside `step_islands`: chunk results by chunk index, island
 /// order inside, so 1/2/4/8 threads give the same sequence. Units: chunk
 /// indices plus results. Determinism: `sort_unstable` by index, no clock.
-/// Errors: none. Caller: [`step_islands`].
+/// Errors: none. Caller: `step_islands`.
 #[must_use]
 pub fn merge_sorted<R>(mut done: Vec<(usize, Vec<R>)>) -> Vec<R> {
     done.sort_unstable_by_key(|(index, _)| *index);

@@ -22,9 +22,9 @@ use crate::mcp::{McpServer, McpToolError};
 /// Tool name.
 pub const TOOL_ASSET_IMPOSTOR: &str = "asset.impostor";
 /// Smallest legion the verb prices.
-pub const MIN_FIGHTERS: u16 = 1;
+pub const MIN_LEGION: u16 = 1;
 /// Largest legion the verb prices (the crowd tape's own cap is higher).
-pub const MAX_FIGHTERS: u16 = 512;
+pub const MAX_LEGION: u16 = 512;
 /// Nearest distance the verb accepts, in metres (0 = the legion on top of the camera).
 pub const MIN_DISTANCE_M: u16 = 0;
 /// Farthest distance the verb accepts, in metres.
@@ -141,9 +141,9 @@ fn bad(message: String) -> McpToolError {
 
 /// Price one legion at one distance.
 fn impostor(args: &ImpostorArgs) -> Result<ImpostorOutput, McpToolError> {
-    if !(MIN_FIGHTERS..=MAX_FIGHTERS).contains(&args.fighters) {
+    if !(MIN_LEGION..=MAX_LEGION).contains(&args.fighters) {
         return Err(bad(format!(
-            "fighters {} is outside {MIN_FIGHTERS}..={MAX_FIGHTERS}; send a legion in that band",
+            "fighters {} is outside {MIN_LEGION}..={MAX_LEGION}; send a legion in that band",
             args.fighters
         )));
     }

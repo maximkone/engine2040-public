@@ -6,7 +6,7 @@
 //! store one layer integer per collider. Data owner: this table; the asset cook
 //! writes the integers and never names them. Units: one bit per layer in a
 //! `u32`. Determinism: constants and bit math only, no state.
-//! Errors: [`LayerError`] names the unknown layer word.
+//! Errors: `LayerError` names the unknown layer word.
 //!
 //! A collider belongs to exactly one layer (its *group*) and carries an accept
 //! *mask* of the groups it may meet. Two colliders collide when each one
@@ -16,7 +16,7 @@
 //!
 //! The table is written so both directions agree: layer `a` lists layer `b`
 //! exactly when layer `b` lists layer `a`. The old one-way "a blocks b" read
-//! is still there as [`blocks`], so the arena kit zone and the door verbs keep
+//! is still there as `blocks`, so the arena kit zone and the door verbs keep
 //! working unchanged.
 
 use core::fmt;

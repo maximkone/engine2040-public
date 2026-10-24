@@ -8,7 +8,7 @@
 //!
 //! A [`Ragdoll`] spawns one dynamic body per skeleton joint, joined
 //! parent-to-child with joints whose swing and twist limits come from the
-//! skeleton's joint table ([`JointTable`]: a knee or an elbow hinges, a spine
+//! skeleton's joint table (`JointTable`: a knee or an elbow hinges, a spine
 //! or a shoulder gets its named cone, an unknown name falls back to the joint
 //! depth), each carrying the row's friction torque motor. Collision groups keep
 //! a bone from touching its parent or children. The caller feeds the
@@ -1149,7 +1149,7 @@ pub fn insert_joints(
     }
 }
 
-/// Parent-to-child joints read from [`JointTable`]: a hinge for a knee or an
+/// Parent-to-child joints read from `JointTable`: a hinge for a knee or an
 /// elbow, a ball with its own swing cone and twist range for every other bone,
 /// each carrying the row's friction motor, anchored at the rest-pose midpoint of
 /// the pair, with contacts off between joined bodies. `spawn` passes the table it

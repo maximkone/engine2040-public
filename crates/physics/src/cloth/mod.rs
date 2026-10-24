@@ -1,25 +1,25 @@
 //! cloth: CPU Verlet cloth for fighter capes and arena banners, plus Q16 hair and rope strands.
 //!
-//! Consumer: the fighter look pins a cape at the shoulders ([`Cloth::pin_top_row`]) and steps it
+//! Consumer: the fighter look pins a cape at the shoulders (`Cloth::pin_top_row`) and steps it
 //! once per sim tick; the arena kit hangs banners from a rod the same way. The renderer reads
-//! [`Cloth::positions`]. Presentation only: floats, never hashed, never read by the simulation,
+//! `Cloth::positions`. Presentation only: floats, never hashed, never read by the simulation,
 //! so a cloth bug can look wrong but can never desync a replay.
 //!
-//! [`Strand`] is the same idea for hair and rope: a chain of particles stepped in Q47.16 fixed
+//! `Strand` is the same idea for hair and rope: a chain of particles stepped in Q47.16 fixed
 //! point, the root pinned to a scalp or both ends pinned between two points, tension-only links
-//! and a sagging hang. It is presentation only too: [`Strand::positions`] is the renderer's view
-//! and [`Strand::digest`] is a test-and-tape check, never the match hash.
+//! and a sagging hang. It is presentation only too: `Strand::positions` is the renderer's view
+//! and `Strand::digest` is a test-and-tape check, never the match hash.
 //!
 //! Units: meters, seconds, y up. The step is fixed at 60 Hz and takes no time argument; each
 //! tick runs `substeps` Verlet substeps with `iterations` link passes each, both from
-//! [`ClothParams`] ([`ClothTier`] fills them in). Math: position Verlet with linear air drag
+//! `ClothParams` (`ClothTier` fills them in). Math: position Verlet with linear air drag
 //! toward the wind, Jakobsen tension-only links (structure plus shear), one long-range tether per
 //! free particle to its nearest pin, one-way capsule colliders that push cloth and nothing back,
-//! and an optional floor ([`Cloth::set_ground`]) that no free particle sinks under. A sleeping
+//! and an optional floor (`Cloth::set_ground`) that no free particle sinks under. A sleeping
 //! cloth costs nothing until a pin moves, the wind changes, a collider touches it or the floor
 //! changes. Tearing is off unless `tear_strain` is set.
 //!
-//! Errors are typed [`ClothError`] and [`StrandError`]; bad caller input is refused before any
+//! Errors are typed `ClothError` and `StrandError`; bad caller input is refused before any
 //! state changes, and both steppers allocate nothing.
 //!
 //! Collisions (CLX): a collider carries its layer and the surface penetration the cloth may
@@ -27,9 +27,9 @@
 //! fighters, props, the world and other cloth; it never meets debris). A particle whose path
 //! crosses a collider stops at the time of impact instead of passing through it: the swept test
 //! uses the hashed tick's own Q16 detector ([`crate::query::swept_cast`]), so a fast gust cannot
-//! tunnel a cape through a body. [`Cloth::set_self_collision_set`] names the intercollision
+//! tunnel a cape through a body. `Cloth::set_self_collision_set` names the intercollision
 //! particle set: only those particles collide with each other, and a spatial hash keeps that
-//! pass off the quadratic path. [`Cloth::set_max_distance_gradient`] gives every particle its
+//! pass off the quadratic path. `Cloth::set_max_distance_gradient` gives every particle its
 //! own Max Distance, so a painted gradient is data and not a second solver.
 
 mod collide;
@@ -341,7 +341,7 @@ pub struct Cloth {
     hash_items: Vec<usize>,
     /// Swept-cast scratch, reused so the step never allocates.
     cast_hits: Vec<SweptHit>,
-    /// The floor height, meters, or `None` for no floor. See [`Cloth::set_ground`].
+    /// The floor height, meters, or `None` for no floor. See `Cloth::set_ground`.
     ground: Option<f32>,
     params: ClothParams,
     torn: usize,
@@ -538,7 +538,7 @@ impl Cloth {
 
     /// Put a floor under the sheet at `ground_y` meters, or take it away with `None`. A free
     /// particle never stays under the floor: each substep lifts it back onto the floor, takes its
-    /// downward motion away and keeps only [`GROUND_FRICTION_KEEP`] of its horizontal step, so a
+    /// downward motion away and keeps only `GROUND_FRICTION_KEEP` of its horizontal step, so a
     /// hem lies down instead of sliding or bouncing. Pinned particles never move. A changed floor
     /// wakes the sheet: a lowered or removed floor must let it fall, a raised one may put
     /// particles under it.
@@ -720,7 +720,7 @@ impl Cloth {
 
     /// The floor pass, the last step of a substep: a free particle at or under the floor is held
     /// on it. Its downward motion is taken away (a rise is kept, so a particle thrown up still
-    /// leaves) and its horizontal step is cut to [`GROUND_FRICTION_KEEP`]. A particle resting on
+    /// leaves) and its horizontal step is cut to `GROUND_FRICTION_KEEP`. A particle resting on
     /// the floor is held there too, so the friction works with gravity off as well. Index order,
     /// float math only.
     fn solve_ground(&mut self) {

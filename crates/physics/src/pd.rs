@@ -1,8 +1,8 @@
 //! pd: PD velocity-servo drive law for the powered ragdoll.
 //!
-//! Consumer: [`crate::powered::PoweredRagdoll`] feeds each driven bone
-//! through [`pd_raw`] per axis and caps the 3-vector with
-//! [`clamp_vector`]. Owner: this module owns the scalar law, the magnitude
+//! Consumer: `crate::powered::PoweredRagdoll` feeds each driven bone
+//! through `pd_raw` per axis and caps the 3-vector with
+//! `clamp_vector`. Owner: this module owns the scalar law, the magnitude
 //! clamp and the dt guard. Units: meters, seconds, 1/s gains, m/s and rad/s
 //! caps. Errors: none; every entry sanitizes non-finite input to a finite
 //! output, so the servo can never inject NaN into the world.
@@ -63,7 +63,7 @@ pub fn pd_raw(error: f32, vel: f32, kp: f32, kd: f32, dt: f32) -> f32 {
     sanitize(p - sanitize(kd * vel))
 }
 
-/// One capped servo axis: [`pd_raw`] clamped to `±max`. A bad cap (NaN,
+/// One capped servo axis: `pd_raw` clamped to `±max`. A bad cap (NaN,
 /// infinite, zero or negative) clamps to zero; the output is always finite.
 pub fn pd_axis(error: f32, vel: f32, kp: f32, kd: f32, dt: f32, max: f32) -> f32 {
     clamp1(pd_raw(error, vel, kp, kd, dt), max)

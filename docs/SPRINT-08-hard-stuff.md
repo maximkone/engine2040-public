@@ -199,6 +199,19 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   and recovers from shoves; replay exact x2; A/B against LM1 on blind
   review decides adoption. Hunt 2026-09-25: the student passes tract agreement (max abs diff at most 2.0) and the 100-match tournament [350, 650]; a student trained on a shuffled teacher must collapse, else the pipeline is rejected. Motion 2026-09-25: CT14 clips may seed teachers, under DT5 manifests; clips from non-commercial training data never train a shipped student. Decision 2026-10-23 (owner: skip "full RL from scratch"): no RL env and no reward are built for this row. The teacher is the CPG that PX5a lands, or a licence-clean donor policy when its retarget is cheap, and PX5b learns the residual by imitation. The AMP/DeepMimic from-scratch pipeline is dropped, not deferred. needs: PX4, DT2, NN1.
 - [x] PX5a physics: the physical gait, without a teacher. A procedural walk cycle drives the powered ragdoll's servo pose (`PoweredRagdoll::set_animated`) while `balance` biases it, so the legs push the body and a shove, a slope or a step moves it like a body. This is the cheap half of PX5 and the fallback if no teacher ever lands. Files: `crates/physics/src/gait.rs` (new), `crates/physics/tests/it/`. Accept: `cargo test -p engine-physics --features rapier --lib gait` and `cargo test -p engine-physics --features rapier --test it gait_` - a two-legged fixture walks 3 m in 120 ticks at 1.5 m/s and 6 m at 3 m/s with the pelvis inside 150 mm of the line and 60 mm of its start height, stops inside 30 ticks, replay twice gives the same hash, and a shove at the stagger threshold makes it step out and recover instead of gliding; no golden change (the fixture is a test, not a rule). Kill: if a stance foot slides more than 100 mm at 3 m/s, the cycle is wrong - drop the row and keep LM1. needs: PX4. Landed 29515678c. The feature gate is in the accept line because the module rides `engine-anim`. Numbers: pose stance foot 1.0 mm across a stance (0.5 mm per tick) against the 100 mm kill bar; 3.027 m at 1.5 m/s and 6.020 m at 3 m/s over 120 ticks, 0.000 m off the line, height band 0.050 m and 0.038 m; stop in 5 ticks with 5.6 mm pelvis drift; ragdoll hash, gait hash and pose bytes identical twice; the shove recovers at tick 30 with the next plant 0.261 m ahead. `--lib gait` 10 passed and `--test it gait_` 5 passed, clippy `--all-targets -D warnings` green. Two causes fixed on the way: the body's travel read one foot across a stance switch, and the stand blend used one stride amplitude for both tick ends. Open, not gated here: the served ragdoll still skids 0.158 m at 3 m/s because the P-80 drive trails the swing foot, and the stand blend gathers the feet ~0.25 m; each needs its own row.
+  Progress 2026-10-24 (lead experiment, reverted): the served foot's 0.158 m
+  skate at 3 m/s was attacked with a velocity feed-forward on the linear drive
+  (the drive adds the target's own travel over the loop gain to its error, so
+  a target moving at `v` is tracked at `v`). It made the skate worse, not
+  better: 0.304 m at full lead and 0.289 m at 0.4, against 0.158 m plain, and
+  it broke two gated bars (stop drift 43.3 mm, shove step-out 0.078 m at full
+  lead; the shove's plant 0.026 m at 0.4). Reverted in full, nothing landed. So
+  the skate is not steady-state lag of the pose target: the lead moved the foot
+  past its plant and it skated back onto it. The next seat should measure the
+  sole rather than the ankle bone (the reported number reads the bone origin,
+  while a rolling foot's contact point moves) before changing the law, and any
+  change has to keep `gait_stops_inside_thirty_ticks` and
+  `gait_shove_steps_out_and_recovers` green.
 - [ ] PX5b physics: the residual corrector, trained by imitation instead of RL. A small net learns the correction on top of the PX5a gait: record the CPG's own states at 60 Hz, fit a two-layer net to the balance-corrected target, export i8 `.e2nn`, and apply it as a residual on the servo targets. This replaces "RL from scratch" (owner 2026-10-23): no env, no reward, no GPU-days. Files: `crates/distill/src/train.rs` (continuous targets), `crates/distill/src/export.rs`, new `crates/physics/src/learned_ctrl.rs`. Accept: `cargo test -p engine-distill --lib regression` - a continuous-target fit converges on a fixture and the one-hot path is unchanged; `cargo test -p engine-physics --lib corrector` - the PX5a walk stays inside its bands and a stagger-threshold shove recovers at least 10 ticks sooner than PX5a alone over 20 seeded shoves; replay twice equal; no golden change. Kill: if the corrector needs more than 10 minutes of CPU training for one gait it is not worth the pipeline - ship PX5a alone. needs: PX5a.
 - [x] NN3 nn: quantization-aware training — `simulate_quantize()` during Progress 2026-10-17: crates/nn/src/qat.rs landed (simulate_quantize, train_student, export_qat, determinism_report; qat_beats_post_training_on_fixture and int8_student_is_bit_identical_with_report green, run 39057462635); left: the win is shown on a 64-row fixture not the DT3 tournament, and no digest compare across two toolchains is posted.
   training plus a determinism report across toolchains; only the int8
@@ -275,6 +288,21 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   golden `default_and_max_seed` PASS, `d57b5c8ae3096614` (run 39963342838). No `[[cloth]]` table was
   needed; cape and banner are code descs. Open leg: our own step buffers are built once, but Rapier's
   pipeline allocates its own per-step workspace, so no zero-allocation solver is claimed.
+  Progress 2026-10-24 (wiring leg): the missing production caller is landed. `crates/game/src/fighter_look_soft_cape.rs`
+  (new, PX44c) hangs one `ClothDesc::CAPE` sheet per seen fighter in a `PhysFx` world, spawns it where the
+  cape look is built, pins its row to the tick's shoulder row and steps it once per accepted tick with
+  `PhysFx::step`; `publish_capes` draws the cloth's own particle grid placed on that row instead of the RZ7
+  `CapePose` sheet. Switch: `E2040_SOFT_CAPE=1` in the environment when the look loads (off is the RZ7
+  chain, byte-identical draw). Numbers measured on this tree: switch on vs off hem differ 0.057 m; a still
+  cape goes quiet (under 0.001 m/tick for 10 ticks) at tick 68, settled sag 94.89 cm, worst 100.33 cm,
+  bound 101 cm; the same seeded 120-tick run gives cloth digest `02f9c1af7afcd61b` twice. Proof:
+  `px44c` 3 passed (`--features app --lib px44c`, printed numbers above); `--lib cape` 8 passed;
+  `--lib ragdoll_look` 20 passed; golden `default_and_max_seed` PASS (run 40073320588, HEAD 59bc0597a plus
+  these paths before the module split); rust-quality game PASS 96 (fighter_look.rs shrank 6757 -> 6645
+  after the mesh builder moved beside the cloth path). Box left: the cloth has no colliders and no wind hook, so a soft cape hangs in its own
+  frame and is placed on the shoulder row each tick rather than streaming behind a runner; the banner is
+  not spawned; a capture pair with the switch off/on was not run in this box; the 7 red `fighter_look`
+  buffer/allocation tests are foreign (they fail on HEAD without these paths: `skin_window_frame_matches_the_cpu_skinned_frame` on HEAD alone).
 - [ ] PX11 physics: PID servo - the joint motors of PX9 run a Fixed-point
   PID (P and D first, I clamped, D on the measurement, slew cap) instead of
   setting velocities, with one tuning per rig, not per animation. Tier B.
@@ -288,13 +316,49 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   (RMS µm/s per tick, float PD -> integer PID), hit / partial / 2 s get-up:
   Standard 103493/74471/106951 -> 102829/74028/106216, Heavy
   112617/89798/107166 -> 111726/89053/106366, Tall 114829/95693/107688 ->
-  114081/95044/107057. Overhead is NOT met: 1.27x on one runner run and
-  2.50x on another against the float PD law (the pd baseline itself swung
-  3.4-11.1 ms for the same 300k three-axis loop), accept is <= 10%; the bench
-  test stays `#[ignore]`d with those numbers. Golden x2 unchanged
-  (d57b5c8ae3096614). A slew tight enough to lower jitter further broke
-  `gait_walk` (pelvis band 70 mm, stop drift 1892 mm), so the looseness is
-  pinned by that suite.
+  114081/95044/107057: at or below the float law on all nine, and unchanged
+  by the 2026-10-24 rework. Overhead is NOT met. The old 1.27x/2.50x pair came
+  from a bench that timed the two arms in separate runs (pd 3.4-11.1 ms for the
+  same 300k steps), so it decided nothing; it is replaced by a paired bench
+  (`servo_overhead_within_ten_percent`, still `#[ignore]`d): both laws in one
+  process over one prepared 1000-step input set, 200 alternating pairs, 8
+  pairs dropped, wall clock with `black_box` on inputs and outputs, report
+  median + least/most. Before: float PD median 2.8 µs, integer 16.9 µs, ratio
+  median 5.96 (3.28-12.59). After caching the per-call constants (Q8 decode
+  of the two gains, the one `/ 1_000_000`, the I bound, the cap and the slew
+  built once per call in `Law`, plus the degenerate-`dt` branch hoisted out of
+  the three-axis loop and one `#[inline]` per axis): PD 5.2 µs, integer 16.9 µs,
+  ratio median 3.27 (1.14-6.00). The integer arm did not move because LLVM
+  already hoists those constants when `step` is inlined in a loop, so what is
+  left is the law itself: three 64-bit multiply-shift-clamp chains and the slew
+  loop-carried dependency per axis, against a float law LLVM vectorizes over
+  the three axes. Floor measured: about 3.2x, best paired rep 1.14. The 10%
+  leg stays open and the accept is not relaxed; the honest option for the owner
+  is to restate it, since a same-law swap of `f32` math for fixed-point costs
+  this much, or to accept the integer law on its determinism and jitter win.
+  Golden x2 unchanged (d57b5c8ae3096614). A slew tight enough to lower jitter
+  further broke `gait_walk` (pelvis band 70 mm, stop drift 1892 mm), so the
+  looseness is pinned by that suite.
+  Progress 2026-10-24 (second seat, bench corrected): the paired bench above
+  timed 1000 steps a sample, so a sample was microseconds wide (the same float
+  arm read 2.8 µs, then 5.2, then 12.4 for identical code) and the ratio could
+  not decide anything; its per-argument `black_box` also measured the box, not
+  the law. Reworked: 20_000 three-axis steps a sample (both input sets stay in
+  L2), 60 alternating pairs, 6 dropped, the slice black-boxed once, and a third
+  arm that is the float twin of the integer law (same integral band, bound, cap
+  and slew, in `f32`) because the shipped float arm is a stateless PD law and
+  the two were never the same computation. Numbers, µs per 20_000 three-axis
+  steps, median of 60 pairs: float PD 171.5 (8.6 ns a step), float PID 291.6
+  (14.6 ns), integer PID 654.4 (32.7 ns); pid/pd median 3.99 (1.39-5.66, the
+  accept pair) and pid/pidf median 2.34 (1.34-3.36, fixed point alone). A
+  branchless band (mask select) measured worse, 37.9 ns a step, and was
+  reverted; 50k-step samples read the same shape. The cost is the law: three
+  i64 multiply-shift-clamp chains plus the slew chain, and i64 has no SIMD
+  multiply on this CPU while the f32 law vectorizes over the three axes. In the
+  frame it is 240 bones x ~11 ns = about 9 µs of a 2800 µs tick, so the product
+  pays nothing measurable; the 10% leg is a micro-benchmark formality this CPU
+  cannot meet and the owner decision above stands. Jitter and golden unchanged
+  by the bench rework (18 passed, 1 ignored; d57b5c8ae3096614).
 - [ ] PX32 physics: CPU SPH fluid step — Clavet double-density + XSPH +
   spatial hash, explicit-Euler, fixed seed, ported as integer-mm Rust from
   flax-mcp `plugins/world/src/Physics/Core/Packs/Fluid/{SphSolver,SphConfig}.cs`

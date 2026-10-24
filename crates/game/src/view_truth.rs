@@ -973,6 +973,301 @@ pub fn brief_line_with_props(
     out
 }
 
+/// One posed body part as the picker sees it: the name and index the pose
+/// exposes, plus the world-space triangles it draws.
+///
+/// `positions` are the posed vertices of the part in world meters (the same
+/// array the look skins into the draw); `indices` address them as a triangle
+/// list. View only: nothing here reaches the simulation or its hash.
+#[derive(Clone, Copy, Debug)]
+pub struct PickPart<'a> {
+    /// Part name the pose exposes (`torso`, `head`, `shin_l`, ...).
+    pub name: &'static str,
+    /// Part index in the rig's part order, for a manifest row.
+    pub index: u16,
+    /// World-space posed vertices, meters.
+    pub positions: &'a [[f32; 3]],
+    /// Triangle list into `positions`.
+    pub indices: &'a [u32],
+}
+
+/// One drawn body in one frame, as the picker sees it: its slot, the world
+/// points the sight test joins (head to chest), and its posed parts.
+///
+/// The look owns the pose; this type only borrows it. `head` and `chest` are
+/// world meters, already placed through the body's root, so a pick and a
+/// sight test never re-do the root maths. View only.
+#[derive(Clone, Copy, Debug)]
+pub struct PickBody<'a> {
+    /// Match slot, the tie key after ray distance.
+    pub slot: u8,
+    /// World head point, meters: the sight ray starts here.
+    pub head: [f32; 3],
+    /// World chest point, meters: the sight ray ends here.
+    pub chest: [f32; 3],
+    /// Posed parts in the rig's part order.
+    pub parts: &'a [PickPart<'a>],
+}
+
+/// One frame as the picker sees it: every drawn body plus the staged props
+/// that can block a sight line (kit and ring draws).
+///
+/// Consumer: the door's `view.pick`/`view.sees` verbs and EV21's pick
+/// manifest, which check a rendered frame against this CPU truth. View only;
+/// no float here reaches the sim hash.
+#[derive(Clone, Copy, Debug)]
+pub struct PickScene<'a> {
+    /// Bodies in any order: ties break by slot, never by this order.
+    pub bodies: &'a [PickBody<'a>],
+    /// Solid props that block a sight line; ground no taller than
+    /// [`STEP_M`] never does.
+    pub props: &'a [PropTruth],
+}
+
+/// The nearest body a pick ray named.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PickHit {
+    /// Match slot of the body hit.
+    pub slot: u8,
+    /// Part name the pose exposes.
+    pub part: &'static str,
+    /// Part index in the rig's part order.
+    pub part_index: u16,
+    /// Triangle index inside the part.
+    pub triangle: u32,
+    /// World point of the hit, meters.
+    pub point: [f32; 3],
+    /// Ray parameter at the hit, meters from the eye.
+    pub t: f32,
+}
+
+/// Hits within this many meters of each other tie: the tie then breaks by
+/// body slot, then part index, then triangle index. A millimeter is far below
+/// a pixel at the arena's camera distance, so a visible tie is a real tie.
+pub const TIE_M: f32 = 1e-3;
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Unit vector, or `None` when the input has no direction or is non-finite.
+fn unit(v: [f32; 3]) -> Option<[f32; 3]> {
+    let len = dot(v, v).sqrt();
+    (len.is_finite() && len > 1e-6).then(|| [v[0] / len, v[1] / len, v[2] / len])
+}
+
+/// Möller-Trumbore ray/triangle, both winding sides: a skinned pose does not
+/// keep a triangle's winding consistent enough to cull back faces.
+fn ray_triangle(origin: [f32; 3], dir: [f32; 3], tri: [[f32; 3]; 3]) -> Option<f32> {
+    let e1 = sub(tri[1], tri[0]);
+    let e2 = sub(tri[2], tri[0]);
+    let p = cross(dir, e2);
+    let det = dot(e1, p);
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let s = sub(origin, tri[0]);
+    let u = dot(s, p) * inv;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = cross(s, e1);
+    let v = dot(dir, q) * inv;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = dot(e2, q) * inv;
+    t.is_finite().then_some(t)
+}
+
+/// The pick ray through NDC `x, y` (`-1..=1`, y up): origin at the eye, unit
+/// direction. `None` when the camera or the NDC point is unusable.
+fn pick_ray(camera: &Camera, x: f32, y: f32) -> Option<([f32; 3], [f32; 3])> {
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    camera.validate().ok()?;
+    let eye = camera.eye.to_array();
+    let forward = unit(sub(camera.target.to_array(), eye))?;
+    let up = unit(camera.up.to_array())?;
+    let right = unit(cross(forward, up))?;
+    let up = cross(right, forward);
+    let half = (camera.fov_y * 0.5).tan();
+    let dir = unit([
+        right[0] * x * half * camera.aspect + up[0] * y * half + forward[0],
+        right[1] * x * half * camera.aspect + up[1] * y * half + forward[1],
+        right[2] * x * half * camera.aspect + up[2] * y * half + forward[2],
+    ])?;
+    Some((eye, dir))
+}
+
+/// True when `candidate` beats `best` under the pick order: nearer by more
+/// than [`TIE_M`], or inside the tie band and lower by slot, part, triangle.
+fn nearer(candidate: &PickHit, best: &PickHit) -> bool {
+    if candidate.t < best.t - TIE_M {
+        return true;
+    }
+    if (candidate.t - best.t).abs() <= TIE_M {
+        return (candidate.slot, candidate.part_index, candidate.triangle)
+            < (best.slot, best.part_index, best.triangle);
+    }
+    false
+}
+
+/// The nearest posed triangle under NDC `x, y` (`-1..=1`, y up): the body
+/// slot, the part the pose exposes, the triangle and the world hit point.
+///
+/// A CPU ray against the posed triangles, clipped to the camera's near..far.
+/// `None` when nothing is hit, or when the camera, the NDC point or the eye
+/// is unusable. Ties ([`TIE_M`]) break by body slot, then part index, then
+/// triangle index, so the answer never depends on the order the caller staged
+/// its bodies and repeats run to run.
+///
+/// Consumer: the door's `view.pick` verb and EV21's pick manifest. Units:
+/// NDC `-1..=1` in, meters out. View only; no float here reaches the sim hash.
+#[must_use]
+pub fn view_pick(camera: &Camera, x: f32, y: f32, scene: &PickScene<'_>) -> Option<PickHit> {
+    let (eye, dir) = pick_ray(camera, x, y)?;
+    let mut best: Option<PickHit> = None;
+    for body in scene.bodies {
+        for part in body.parts {
+            for (tri_index, corners) in part.indices.chunks_exact(3).enumerate() {
+                let Some(tri) = triangle_at(part.positions, corners) else {
+                    continue;
+                };
+                let Some(t) = ray_triangle(eye, dir, tri) else {
+                    continue;
+                };
+                if !(camera.near..=camera.far).contains(&t) {
+                    continue;
+                }
+                let candidate = PickHit {
+                    slot: body.slot,
+                    part: part.name,
+                    part_index: part.index,
+                    triangle: u32::try_from(tri_index).unwrap_or(u32::MAX),
+                    point: [
+                        eye[0] + dir[0] * t,
+                        eye[1] + dir[1] * t,
+                        eye[2] + dir[2] * t,
+                    ],
+                    t,
+                };
+                if best.as_ref().is_none_or(|hit| nearer(&candidate, hit)) {
+                    best = Some(candidate);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// The world triangle `corners` address, or `None` when an index is out of
+/// range or a vertex is non-finite.
+fn triangle_at(positions: &[[f32; 3]], corners: &[u32]) -> Option<[[f32; 3]; 3]> {
+    let mut tri = [[0.0f32; 3]; 3];
+    for (axis, index) in corners.iter().enumerate() {
+        let vertex = positions.get(usize::try_from(*index).ok()?)?;
+        if !vertex.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        tri[axis] = *vertex;
+    }
+    Some(tri)
+}
+
+/// True when the segment `from..to` (parameter `0..=1`) crosses the bounds:
+/// the slab test on every axis.
+fn segment_hits_box(from: [f32; 3], to: [f32; 3], min: [f32; 3], max: [f32; 3]) -> bool {
+    if !min.iter().chain(max.iter()).all(|v| v.is_finite()) {
+        return false;
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for axis in 0..3 {
+        let delta = to[axis] - from[axis];
+        if delta.abs() < 1e-9 {
+            if from[axis] < min[axis] || from[axis] > max[axis] {
+                return false;
+            }
+            continue;
+        }
+        let (a, b) = (
+            (min[axis] - from[axis]) / delta,
+            (max[axis] - from[axis]) / delta,
+        );
+        lo = lo.max(a.min(b));
+        hi = hi.min(a.max(b));
+        if lo > hi {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when team-mate `a`'s head sees `b`'s chest: no other body's posed
+/// triangle and no solid prop sits inside the segment.
+///
+/// Both endpoint bodies are excluded by slot, so a fighter's own head and
+/// torso never block its own sight. A prop no taller than [`STEP_M`] is
+/// ground and never blocks: the ring floor sits under everyone's chest.
+/// `false` when either slot is absent or `a`'s head equals `b`'s chest.
+///
+/// Consumer: the door's `view.sees` verb and EV21's pick manifest. Units:
+/// world meters. View only; no float here reaches the sim hash.
+#[must_use]
+pub fn view_sees(scene: &PickScene<'_>, a: u8, b: u8) -> bool {
+    let Some((from, to)) = sight_segment(scene.bodies, a, b) else {
+        return false;
+    };
+    let delta = sub(to, from);
+    for body in scene.bodies {
+        if body.slot == a || body.slot == b {
+            continue;
+        }
+        for part in body.parts {
+            for corners in part.indices.chunks_exact(3) {
+                let Some(tri) = triangle_at(part.positions, corners) else {
+                    continue;
+                };
+                if ray_triangle(from, delta, tri).is_some_and(|t| (0.0 < t) && (t < 1.0)) {
+                    return false;
+                }
+            }
+        }
+    }
+    for prop in scene.props {
+        if prop.max[1] - prop.min[1] > STEP_M && segment_hits_box(from, to, prop.min, prop.max) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `a`'s head and `b`'s chest when both slots are staged and the segment has
+/// a direction.
+fn sight_segment(bodies: &[PickBody<'_>], a: u8, b: u8) -> Option<([f32; 3], [f32; 3])> {
+    let from = bodies.iter().find(|body| body.slot == a)?.head;
+    let to = bodies.iter().find(|body| body.slot == b)?.chest;
+    let delta = sub(to, from);
+    if !from.iter().chain(to.iter()).all(|v| v.is_finite()) || dot(delta, delta) < 1e-12 {
+        return None;
+    }
+    Some((from, to))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1808,5 +2103,243 @@ mod tests {
             );
         }
         println!("am24 line: {line}");
+    }
+
+    // ---- SP65: pick and sight, the CPU oracle for the frame -------------
+
+    /// A camera square to the world axes, eye 6 m out on +Z, so a world point
+    /// projects by the fixture's own formula; yaw 0 faces `+z` (the file's
+    /// frame), so the eye looks down `-z`.
+    fn flat_camera() -> Camera {
+        Camera::new([0.0, 1.5, 6.0], [0.0, 1.5, 0.0], [0.0, 1.0, 0.0], 1.0)
+    }
+
+    /// The front face of a standing body: a 1.8 m quad on `+Z`, feet on sand.
+    fn front_quad(x: f32, z: f32) -> [[f32; 3]; 4] {
+        [
+            [x - 0.3, 0.0, z],
+            [x + 0.3, 0.0, z],
+            [x + 0.3, 1.8, z],
+            [x - 0.3, 1.8, z],
+        ]
+    }
+
+    /// Two triangles over a quad: corners 0,1,2 and 0,2,3.
+    const QUAD: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+    /// The fixture's analytic projection: the same pinhole the camera draws
+    /// with, written out so a pick is checked against maths, not itself.
+    fn project(ndc_of: [f32; 3]) -> [f32; 2] {
+        let cam = flat_camera();
+        let depth = cam.eye.z - ndc_of[2];
+        let half = (cam.fov_y * 0.5).tan();
+        [
+            (ndc_of[0] - cam.eye.x) / (depth * half * cam.aspect),
+            (ndc_of[1] - cam.eye.y) / (depth * half),
+        ]
+    }
+
+    /// A seeded uniform in `0..=1`: the fixture's own LCG, so a failed pick
+    /// repeats exactly.
+    fn lcg(state: &mut u32) -> f32 {
+        *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        f32::from(u16::try_from(*state >> 16).unwrap_or(0)) / 65_535.0
+    }
+
+    #[test]
+    fn a_hundred_seeded_view_picks_name_the_body_the_projection_names() {
+        // Three bodies at three depths and three screen columns: the quad a
+        // pick aims at is the only quad its ray can reach.
+        let at = [(-2.0f32, 0.0f32), (0.0, -1.0), (2.0, 1.0)];
+        let quads: [[[f32; 3]; 4]; 3] = std::array::from_fn(|i| front_quad(at[i].0, at[i].1));
+        let parts: [PickPart<'_>; 3] = std::array::from_fn(|i| PickPart {
+            name: "torso",
+            index: u16::try_from(i).unwrap_or(0),
+            positions: &quads[i],
+            indices: &QUAD,
+        });
+        let bodies: [PickBody<'_>; 3] = std::array::from_fn(|i| PickBody {
+            slot: u8::try_from(i).unwrap_or(0),
+            head: [at[i].0, 1.7, at[i].1],
+            chest: [at[i].0, 1.3, at[i].1],
+            parts: std::slice::from_ref(&parts[i]),
+        });
+        let scene = PickScene {
+            bodies: &bodies,
+            props: &[],
+        };
+        let cam = flat_camera();
+        let run = || {
+            let mut seed = 2040u32;
+            (0..100)
+                .map(|pick| {
+                    let body = pick % 3;
+                    // Inside the quad, never on its edge.
+                    let (u, v) = (0.15 + 0.7 * lcg(&mut seed), 0.15 + 0.7 * lcg(&mut seed));
+                    let quad = &quads[body];
+                    let point: [f32; 3] = std::array::from_fn(|axis| {
+                        quad[0][axis]
+                            + (quad[1][axis] - quad[0][axis]) * u
+                            + (quad[3][axis] - quad[0][axis]) * v
+                    });
+                    let ndc = project(point);
+                    let hit = view_pick(&cam, ndc[0], ndc[1], &scene).map(|hit| (hit, point));
+                    let (hit, want) = hit.expect("a pick inside a quad hits it");
+                    assert_eq!(
+                        hit.slot,
+                        u8::try_from(body).unwrap_or(0),
+                        "pick {pick} names the wrong body: {hit:?}"
+                    );
+                    assert_eq!(hit.part, "torso");
+                    assert_eq!(hit.part_index, u16::try_from(body).unwrap_or(0));
+                    assert!(
+                        hit.triangle < 2,
+                        "pick {pick} rides the quad's front triangles"
+                    );
+                    for axis in 0..3 {
+                        assert!(
+                            (hit.point[axis] - want[axis]).abs() < 0.01,
+                            "pick {pick} axis {axis}: {:?} vs {want:?}",
+                            hit.point
+                        );
+                    }
+                    hit
+                })
+                .collect::<Vec<PickHit>>()
+        };
+        let first = run();
+        assert_eq!(first.len(), 100);
+        assert_eq!(first, run(), "the same seeded picks twice: same hits");
+        // A body beside the aim is never named for the body behind it.
+        assert!(
+            first.iter().filter(|hit| hit.slot == 2).count() > 20,
+            "the near body is picked when aimed at"
+        );
+    }
+
+    #[test]
+    fn view_sees_flips_when_a_body_steps_between_two_fighters() {
+        let a = front_quad(-1.0, 0.0);
+        let b = front_quad(1.0, 0.0);
+        let middle = front_quad(0.0, 0.0);
+        let aside = front_quad(5.0, 0.0);
+        let blocked_quads = [a, b, middle];
+        // The sight line dips through the quads' plane (z = 0) between the
+        // two fighters, so it crosses the middle body's front face.
+        let blocked_parts: [PickPart<'_>; 3] = std::array::from_fn(|i| PickPart {
+            name: "torso",
+            index: u16::try_from(i).unwrap_or(0),
+            positions: &blocked_quads[i],
+            indices: &QUAD,
+        });
+        let blocked: [PickBody<'_>; 3] = std::array::from_fn(|i| PickBody {
+            slot: u8::try_from(i).unwrap_or(0),
+            head: [blocked_quads[i][0][0] + 0.3, 1.7, -0.5],
+            chest: [blocked_quads[i][0][0] + 0.3, 1.3, 0.5],
+            parts: std::slice::from_ref(&blocked_parts[i]),
+        });
+        let scene = PickScene {
+            bodies: &blocked,
+            props: &[],
+        };
+        assert!(!view_sees(&scene, 0, 1), "a body stands in the sight line");
+        assert!(view_sees(&scene, 0, 0), "a fighter sees its own chest");
+        // The same scene with the middle body stepped aside: the line opens.
+        let open_quads = [a, b, aside];
+        let open_parts: [PickPart<'_>; 3] = std::array::from_fn(|i| PickPart {
+            name: "torso",
+            index: u16::try_from(i).unwrap_or(0),
+            positions: &open_quads[i],
+            indices: &QUAD,
+        });
+        let open: [PickBody<'_>; 3] = std::array::from_fn(|i| PickBody {
+            slot: u8::try_from(i).unwrap_or(0),
+            head: [open_quads[i][0][0] + 0.3, 1.7, -0.5],
+            chest: [open_quads[i][0][0] + 0.3, 1.3, 0.5],
+            parts: std::slice::from_ref(&open_parts[i]),
+        });
+        let scene = PickScene {
+            bodies: &open,
+            props: &[],
+        };
+        assert!(view_sees(&scene, 0, 1), "nothing blocks the open line");
+        assert!(!view_sees(&scene, 0, 7), "an absent slot never sees");
+        // A solid prop blocks too; ground no taller than STEP_M does not.
+        let wall = PropTruth {
+            kind: "kit",
+            min: [-0.2, 0.0, -0.2],
+            max: [0.2, 2.0, 0.2],
+        };
+        let scene = PickScene {
+            bodies: &open,
+            props: &[wall],
+        };
+        assert!(!view_sees(&scene, 0, 1), "a prop wall blocks the line");
+        let kerb = PropTruth {
+            kind: "ring",
+            min: [-0.2, 0.0, -0.2],
+            max: [0.2, STEP_M, 0.2],
+        };
+        let scene = PickScene {
+            bodies: &open,
+            props: &[kerb],
+        };
+        assert!(view_sees(&scene, 0, 1), "ground never blocks a chest line");
+    }
+
+    #[test]
+    fn view_pick_misses_and_an_exact_tie_breaks_by_slot() {
+        let near = front_quad(0.0, 0.0);
+        let far = front_quad(0.0, 0.0);
+        let near_parts = [PickPart {
+            name: "torso",
+            index: 0,
+            positions: &near,
+            indices: &QUAD,
+        }];
+        let far_parts = [PickPart {
+            name: "torso",
+            index: 0,
+            positions: &far,
+            indices: &QUAD,
+        }];
+        // Staged high slot first: the tie must not follow the caller's order.
+        let bodies = [
+            PickBody {
+                slot: 3,
+                head: [0.0, 1.7, 0.0],
+                chest: [0.0, 1.3, 0.0],
+                parts: &near_parts,
+            },
+            PickBody {
+                slot: 1,
+                head: [0.0, 1.7, 0.0],
+                chest: [0.0, 1.3, 0.0],
+                parts: &far_parts,
+            },
+        ];
+        let scene = PickScene {
+            bodies: &bodies,
+            props: &[],
+        };
+        let cam = flat_camera();
+        let centre = project([0.0, 0.9, 0.0]);
+        let hit = view_pick(&cam, centre[0], centre[1], &scene).expect("the chest of the pile");
+        assert_eq!(hit.slot, 1, "equal depth breaks by slot, not by order");
+        assert!(
+            hit.t > 6.0 && hit.t < 6.1,
+            "both bodies sit about 6 m out: t={}",
+            hit.t
+        );
+        assert_eq!(
+            view_pick(&cam, -0.95, 0.95, &scene),
+            None,
+            "off the bodies: a miss"
+        );
+        assert_eq!(
+            view_pick(&cam, f32::NAN, 0.0, &scene),
+            None,
+            "a non-finite pick never hits"
+        );
     }
 }

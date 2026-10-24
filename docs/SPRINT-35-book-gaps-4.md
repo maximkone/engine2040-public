@@ -82,16 +82,23 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   same action bits as the pad mapping and hashes the same in a tape; two
   replays are equal. F2P: a touch point is dropped. P2P: the keyboard, pad and
   agent lanes unchanged, golden unchanged. needs: BG8's tier table (no).
-- [ ] BG8 render: no mobile tier or thermal budget — `render/src/quality.rs:11-18`
-  has Potato and Web only. Add a `Mobile` tier (DPR cap 2, one shadow cascade,
-  GTAO off or half-res, texture and physfx caps) picked from adapter limits
-  and a device-class hint, plus a soak harness that prints p50, RSS and a
-  thermal-cliff flag. Diff: regular. Tier A. Size M. Owns
+- [x] BG8 render: no mobile tier or thermal budget — Landed 63aa4ae1.
+  `render/src/quality.rs:11-18` has Potato and Web only. Add a `Mobile` tier
+  (DPR cap 2, one shadow cascade, GTAO off or half-res, texture and physfx
+  caps) picked from adapter limits and a device-class hint, plus a soak
+  harness that prints p50, RSS and a thermal-cliff flag. Diff: regular. Tier A.
+  Size M. Owns
   `crates/render/src/quality.rs`, `crates/render/src/lib.rs`, one test.
   Accept: `cargo test -p engine-render --lib mobile_tier` green: the tier is
   picked from limits, every cap is under the desktop tier, and a 30-minute
   soak report prints p50, RSS and no cliff line. F2P: no Mobile variant exists.
   P2P: Potato and Web picks unchanged, golden unchanged. needs: none.
+  Landed: `Quality::Mobile` (one cascade, no AO, no TAA, `dpr_cap` 2, phone
+  caps under the desktop row), picked by `choose_device_tier(DeviceClass,
+  max_texture_2d)` — the limits only cut down, a phone and a tablet get the
+  mobile row, a desktop gets comfort; `crates/render/src/soak.rs` prints the
+  p50, the RSS and the cliff flag; `crates/physfx/src/caps.rs` mirrors the
+  row; also `crates/render/src/power.rs` and `crates/web/src/tier_view.rs`.
 - [ ] BG9 build: no Android leg — no `aarch64-linux-android` in the tree or CI.
   Add the target to the check matrix with the NDK on the runner, for the arena
   shell only; the golden is not run there. Diff: regular. Tier B. Size L. Owns
@@ -99,7 +106,8 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   Accept: `cargo check --target aarch64-linux-android -p engine-game --features app`
   prints PASS on the runner. F2P: the target is never built. P2P: the five
   existing matrix legs unchanged. needs: NDK on the runner (owner/runner call).
-- [ ] BG10 web: the shipped build is not SIMD128 — `tools/web-build.mjs` has no
+- [x] BG10 web: the shipped build is not SIMD128 — Landed 0da1f49c4.
+  `tools/web-build.mjs` has no
   `simd128`; only the golden matrix proves the target
   (`golden-matrix.yml:132-162`). Add a `--simd` switch that passes
   `-C target-feature=+simd128`, keep the 8 MiB dist / 4.7 MB wasm caps, and
@@ -109,6 +117,19 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   build, and no p50 regression. F2P: the flag is never passed. P2P: the scalar
   build and the dist layout unchanged. needs: `dist/web` must not be dirty by
   another seat at the time of the build.
+  Landed: OPT61 (`e82e42300`) had already shipped SIMD128 as the default arm, so
+  the row's F2P was stale and its real gap was the other side: `--scalar` now
+  builds the pre-SIMD module from the same tree (no cargo rustflag, and
+  `--enable-simd` dropped from wasm-opt), and both arms name the flag they were
+  built with in `build.json` and in the printed line. Measured on the two arms
+  built from one tree: the SIMD arm is under every cap (dist 7,521,325 of
+  8,388,608; wasm 4,529,041 of 4,700,000; first_bundle 3,040,049 of 3,050,000);
+  the scalar arm misses the bundle cap by 4,882 bytes (3,054,882 of 3,050,000),
+  so the SIMD arm stays the one that ships. Both pages ran clean and their
+  replay digests are equal (`golden d57b5c8ae3096614 state 2aca9338670aa0cb
+  corpus b37fc6d66df2d417`, and the same on the no-WebGPU page); the same A/B
+  workload on the two builds reads cpu p50 0.385 ms (SIMD) against 0.580 ms
+  (scalar) — no regression.
 - [x] BG11 ecs: every job allocates — Landed 541a1fe5. `ecs/src/pool.rs:58`
   boxes the closure and
   `:475` boxes each job; `par_chunks_map` builds slots and a result `Vec`. Add
@@ -119,7 +140,7 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   equality tests unchanged. F2P: no allocation count exists and the box is
   unconditional. P2P: `identical_poses_under_every_chunking_and_worker_count`
   and the golden unchanged. needs: none.
-- [ ] BG12 ci: the loom model never runs — the model is at `pool.rs:494` and
+- [x] BG12 ci: the loom model never runs — Landed 12a7c7dab.
   `rg loom .github/workflows` is 0. Add a CI leg that runs
   `RUSTFLAGS="--cfg loom" cargo test -p engine-ecs --lib loom_pool` and a note
   in the job pool. Diff: good. Tier A. Size S. Owns
@@ -127,6 +148,17 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   (read only). Accept: the leg is green on a planted model with a missing wait
   red and the real model green. F2P: the model is only compiled by hand. P2P:
   the five matrix legs unchanged. needs: none.
+  Landed: the CI leg (`.github/workflows/loom.yml`, the cfg from
+  `.cargo/loom.toml`) and the note in the pool's header came with
+  `872e4322c`; the module now holds the two models the row asks for. The real
+  one (`loom_pool_scope_returns_after_every_job`) is unchanged. The planted one
+  (`loom_pool_planted_missing_wait_is_caught`) is the same protocol with the
+  wait left out: the scope returns while its job is still open, the model fails
+  there, and the test catches that failure and reports it, so the leg stays
+  green while the missing wait stays visible. With the wait planted out of
+  `help_until_done` the real model fails (0 jobs ran, 2 were expected) and the
+  planted one stays green: the leg has teeth. The plant was reverted in the
+  same step and never landed.
 - [x] BG13 arena: the bare build is claimed but not gated — Landed e310aa24e.
   `crates/arena/Cargo.toml:33-36` says `--no-default-features` builds;
   `authority.rs:275` is then unused (a bare-build warning). Make that clippy

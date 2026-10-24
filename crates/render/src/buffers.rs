@@ -47,6 +47,25 @@ pub enum BufferError {
         /// Values `width * height` needs.
         expected: usize,
     },
+    /// A channel texture the GPU readback needs is absent or uncopyable.
+    MissingChannel {
+        /// Channel name (`"normal"`, `"depth"`, `"albedo"`, `"material_id"`).
+        channel: &'static str,
+        /// Which pass must exist first.
+        why: &'static str,
+    },
+    /// A channel texture carries a format the readback cannot take.
+    Format {
+        /// Channel name.
+        channel: &'static str,
+        /// Format the readback needs, by name.
+        want: &'static str,
+    },
+    /// A mapped readback never arrived (device lost or a driver fault).
+    Readback {
+        /// Channel whose copy failed.
+        channel: &'static str,
+    },
 }
 
 impl std::fmt::Display for BufferError {
@@ -63,6 +82,18 @@ impl std::fmt::Display for BufferError {
             } => write!(
                 f,
                 "debug frame {buffer} holds {got} values for {expected} pixels; write exactly one value per pixel"
+            ),
+            Self::MissingChannel { channel, why } => write!(
+                f,
+                "debug frame {channel} has no texture: {why}"
+            ),
+            Self::Format { channel, want } => write!(
+                f,
+                "debug frame {channel} texture is not {want}; read back that format"
+            ),
+            Self::Readback { channel } => write!(
+                f,
+                "debug frame {channel} readback never mapped; rebuild the device and read again"
             ),
         }
     }
@@ -132,9 +163,9 @@ impl DebugFrame {
         }
         let mut albedo_bytes = Vec::with_capacity(pixels.saturating_mul(4));
         for color in albedo {
-            albedo_bytes.push(quantize_byte(clamp01(color[0])));
-            albedo_bytes.push(quantize_byte(clamp01(color[1])));
-            albedo_bytes.push(quantize_byte(clamp01(color[2])));
+            albedo_bytes.push(quantize_unit_byte(clamp01(color[0])));
+            albedo_bytes.push(quantize_unit_byte(clamp01(color[1])));
+            albedo_bytes.push(quantize_unit_byte(clamp01(color[2])));
             albedo_bytes.push(255);
         }
         let material_id = ids.to_vec();
@@ -248,16 +279,21 @@ fn clamp01(value: f32) -> f32 {
 /// One `-1..=1` share as a byte over `0..=255`, rounded half up without a
 /// float cast (eight halving steps, the crate's fixed-search idiom).
 fn quantize_byte(share: f32) -> u8 {
-    let scaled = share.clamp(-1.0, 1.0) * 0.5 + 0.5;
-    let tick = scaled.mul_add(255.0, 0.5);
+    quantize_unit_byte(share.clamp(-1.0, 1.0) * 0.5 + 0.5)
+}
+
+/// One `0..=1` share as a byte over `0..=255`, rounded half up: the albedo
+/// path, and the tail of [`quantize_byte`].
+fn quantize_unit_byte(share: f32) -> u8 {
+    let tick = share.clamp(0.0, 1.0).mul_add(255.0, 0.5);
     let mut low = 0u8;
     let mut high = 255u8;
-    while high - low > 1 {
-        let mid = low + (high - low) / 2;
+    while high > low {
+        let mid = low + (high - low).div_ceil(2);
         if tick >= f32::from(mid) {
             low = mid;
         } else {
-            high = mid;
+            high = mid - 1;
         }
     }
     low
@@ -265,16 +301,16 @@ fn quantize_byte(share: f32) -> u8 {
 
 /// One `0..=1` share as a depth tick over `0..=65535`, rounded half up the
 /// same way (sixteen halving steps).
-fn quantize_u16(share: f32) -> u16 {
-    let tick = share.mul_add(65535.0, 0.5);
+pub(crate) fn quantize_u16(share: f32) -> u16 {
+    let tick = share.clamp(0.0, 1.0).mul_add(65535.0, 0.5);
     let mut low = 0u16;
     let mut high = u16::MAX;
-    while high - low > 1 {
-        let mid = low + (high - low) / 2;
+    while high > low {
+        let mid = low + (high - low).div_ceil(2);
         if tick >= f32::from(mid) {
             low = mid;
         } else {
-            high = mid;
+            high = mid - 1;
         }
     }
     low
@@ -316,7 +352,7 @@ fn encode_normal(normal: [f32; 3]) -> [u8; 4] {
 }
 
 /// Decode the octahedral pair at one pixel back to a unit direction.
-fn decode_normal(bytes: &[u8], pixel: usize) -> [f32; 3] {
+pub(crate) fn decode_normal(bytes: &[u8], pixel: usize) -> [f32; 3] {
     let base = pixel.saturating_mul(4);
     let rx = bytes.get(base).copied().unwrap_or(128);
     let ry = bytes.get(base + 1).copied().unwrap_or(128);

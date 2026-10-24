@@ -77,11 +77,13 @@ pub fn power_cap(reading: &PowerReading, tier: Quality) -> Quality {
     }
 }
 
-/// One tier down, and never onto `Web` (a browser tab, not a battery step).
+/// One tier down, and never onto `Web` (a browser tab, not a battery step) or
+/// `Mobile` (a device class, not a battery step).
 const fn step_down(tier: Quality) -> Quality {
     match tier {
         Quality::High => Quality::Comfort,
         Quality::Comfort => Quality::Potato,
+        Quality::Mobile => Quality::Potato,
         Quality::Potato | Quality::Web => tier,
     }
 }
@@ -211,6 +213,20 @@ mod tests {
             Quality::Potato
         );
         assert_eq!(power_cap(&battery(10, true), Quality::Web), Quality::Web);
+    }
+
+    #[test]
+    fn power_never_steps_onto_the_mobile_tier() {
+        // The mobile row is a device class, not a battery step: a desktop on
+        // battery drops to the floor, a phone drops to the floor too.
+        assert_eq!(
+            power_cap(&battery(10, true), Quality::Mobile),
+            Quality::Potato
+        );
+        assert_eq!(
+            power_cap(&battery(90, false), Quality::Mobile),
+            Quality::Mobile
+        );
     }
 
     #[test]

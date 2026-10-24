@@ -5,7 +5,7 @@
 //! Y up; directions are normalized here, distances are along the unit direction.
 //! Determinism: `+ - * /`, `sqrt` and comparisons in `f32`, colliders and triangles in
 //! stored order, ties go to the earlier one; the same world and the same cast always
-//! give the same hit on every machine. Errors: [`CastError`] names the bad argument;
+//! give the same hit on every machine. Errors: `CastError` names the bad argument;
 //! a clean miss is `Ok(None)`. Budget: one pass over the in-scope triangles per cast,
 //! with a bounding-box skip per collider; no allocation.
 //!

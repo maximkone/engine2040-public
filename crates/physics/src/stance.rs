@@ -5,11 +5,11 @@
 //! pose the character controller ([`crate::controller2`]) resolved plus the fighter's request each
 //! tick, and reads back the stance, lean and weapon pose to feed combat and presentation. Data
 //! owner: this module owns the three capsules, the lean throw and the weapon rule; the walls are
-//! the caller's [`Block`] slice. Units: integer millimeters, facing as a Q10 unit vector (1024 is
+//! the caller's `Block` slice. Units: integer millimeters, facing as a Q10 unit vector (1024 is
 //! one). Determinism: `+ - * /` on integers only (`i128` for the segment test), blocks visited in
 //! slice order, no float, no clock; the same world, pose and requests give the same body and the
-//! same [`Body::hash`]. Errors: none; a request the room refuses is answered with the nearest
-//! pose that fits and a [`Report`] saying what was refused. Budget: one pass over the blocks per
+//! same `Body::hash`. Errors: none; a request the room refuses is answered with the nearest
+//! pose that fits and a `Report` saying what was refused. Budget: one pass over the blocks per
 //! check, a handful of checks per tick, no allocation.
 //!
 //! Each stance is one vertical capsule, so "clipping" means that capsule overlapping a block's

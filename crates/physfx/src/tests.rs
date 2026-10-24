@@ -13,6 +13,7 @@ mod receipt;
 mod settle;
 mod sever;
 mod soft;
+mod terrain;
 mod tether;
 mod tunnel;
 mod verbs;

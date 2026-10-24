@@ -2,11 +2,11 @@
 //!
 //! Consumer: the arena hit pipeline feeds each landed blow to both
 //! [`crate::balance::BalanceState`] (the blow's own level) and
-//! [`StaggerMemory`] (what the blow leaves behind) through
+//! `StaggerMemory` (what the blow leaves behind) through
 //! [`crate::balance::BalanceState::apply_memory_hit`]; presentation reads
-//! [`StaggerMemory::servo_strength_q8`] to soften the powered-ragdoll drive
-//! and [`StaggerMemory::limp_mm`] to pose the limp. Owner: this module owns
-//! [`StaggerMemory`], [`StaggerLevel`] and the pain, fatigue and injury
+//! `StaggerMemory::servo_strength_q8` to soften the powered-ragdoll drive
+//! and `StaggerMemory::limp_mm` to pose the limp. Owner: this module owns
+//! `StaggerMemory`, `StaggerLevel` and the pain, fatigue and injury
 //! budgets. Units: Q8 impulse units where 256 reads unity, ticks at 60 Hz,
 //! millimetres of limp. Determinism: integer counters plus comparisons only,
 //! fixed bone order, no clock and no dice — one hit sequence hashes one way.
@@ -119,7 +119,7 @@ impl StaggerMemory {
         self.pain_q8
     }
 
-    /// Current fatigue, Q8 units; [`StaggerMemory::servo_strength_q8`]
+    /// Current fatigue, Q8 units; `StaggerMemory::servo_strength_q8`
     /// turns it into drive.
     pub fn fatigue_q8(&self) -> u16 {
         self.fatigue_q8

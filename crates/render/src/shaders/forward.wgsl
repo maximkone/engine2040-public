@@ -15,6 +15,7 @@
 //             fs_sky        sky radiance (infinite-distance fog form)
 //             fs_display    offscreen 8-bit capture: one light, ACES + sRGB
 //             fs_skinned    as fs_display, magenta without a skin
+//             fs_gbuffer    A3 debug channels: normal, albedo, material id
 //
 // The BRDF exists once (`direct_light`). Pipelines that use a subset of the
 // bindings below simply leave the rest out of their layout.
@@ -1014,6 +1015,50 @@ fn fs(in: VOut) -> FsOut {
         prev_ndc = in.prev_clip.xy / in.prev_clip.w;
     }
     out.motion = (cur_ndc - prev_ndc) * vec2<f32>(0.5, -0.5);
+    return out;
+}
+
+// A3 debug G-buffer: the same geometry and material the window `fs` entry
+// shades, written as the three channels `buffers::read_frame` reads. No
+// default pass uses this entry; a debug capture builds its own pipeline.
+//   location 0  RGBA8 world-space normal, octahedral pair in R,G as
+//               `share * 0.5 + 0.5` (the Rust `octahedral_xy` /
+//               `quantize_byte` pair; the target's round-to-nearest byte
+//               lands within one step of the CPU's half-up), B is 1 on the
+//               front hemisphere and 0 behind, A is 1.
+//   location 1  RGBA8 LINEAR albedo (`base_color * base_map` before
+//               lighting, never sRGB), A is 1.
+//   location 2  R16Uint material family (`mat.kind`, the LF8 word the
+//               shading branches read).
+struct GbufferOut {
+    @location(0) normal: vec4<f32>,
+    @location(1) albedo: vec4<f32>,
+    @location(2) id: u32,
+};
+
+@fragment
+fn fs_gbuffer(in: VOut) -> GbufferOut {
+    // Same mapped normal as `fs`, so the debug view shows what lit the pixel.
+    let map_texel = textureSample(normal_map, normal_smp, in.uv).rgb;
+    let map_n = eg12_decode_normal(map_texel, normalize(in.world_n));
+    var n = eg12_world_normal(normalize(in.world_n), in.tangent, map_n);
+    let spread = abs(n.x) + abs(n.y) + abs(n.z);
+    n = select(vec3<f32>(0.0, 0.0, 1.0), n / max(spread, 1e-12), spread > 1e-12);
+    // The back hemisphere folds inward; the reader unfolds it from the pair
+    // alone, so the fold must keep the sign of z in the pair itself.
+    let back = n.z < 0.0;
+    var x = n.x;
+    var y = n.y;
+    if (back) {
+        let ox = x;
+        let oy = y;
+        x = (1.0 - abs(oy)) * sign(ox);
+        y = (1.0 - abs(ox)) * sign(oy);
+    }
+    var out: GbufferOut;
+    out.normal = vec4<f32>(x * 0.5 + 0.5, y * 0.5 + 0.5, select(1.0, 0.0, back), 1.0);
+    out.albedo = vec4<f32>(mat.base_color * textureSample(base_map, base_smp, in.uv).rgb, 1.0);
+    out.id = mat.kind;
     return out;
 }
 

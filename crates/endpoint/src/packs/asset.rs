@@ -126,7 +126,7 @@ pub use search::{
 mod impostor;
 pub use impostor::{
     ImpostorArgs, ImpostorOutput, ImpostorTool, TierRowsOut, CARD_PRESETS, CARD_THRESHOLD_M,
-    MAX_DISTANCE_M, MAX_FIGHTERS, MIN_DISTANCE_M, MIN_FIGHTERS, TIER_NAMES,
+    MAX_DISTANCE_M, MAX_LEGION, MIN_DISTANCE_M, MIN_LEGION, TIER_NAMES,
 };
 
 /// The artist's import loop over a GLB (card S3, W1, W6): `asset.cook` runs the whole mesh

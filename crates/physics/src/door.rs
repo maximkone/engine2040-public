@@ -1,17 +1,17 @@
 //! door: hinged doors with integer angles and states (UW10).
 //!
 //! Consumer: none yet. The headless composer (UW26) applies squad and fighter actions to the
-//! doors of a map, feeds each [`Outcome`] to nav (link changes) and audio (cue words), and
-//! swaps a door collider's layer for [`Door::layer`] so casts and fighters see the new state.
+//! doors of a map, feeds each `Outcome` to nav (link changes) and audio (cue words), and
+//! swaps a door collider's layer for `Door::layer` so casts and fighters see the new state.
 //! Data owner: this module owns the state machine and its outcome table. Units: decidegrees
 //! for angles (900 is a quarter turn), integrity points for `hp`. Determinism: integer table
 //! lookup only, no float, no clock, no random draw; the same door and the same action always
-//! give the same door and the same outcome, and [`Door::hash`] folds the whole state. Errors:
+//! give the same door and the same outcome, and `Door::hash` folds the whole state. Errors:
 //! none; every state accepts every action, because a kick at a broken door is a legal thing to
 //! do and does nothing. Budget: one table row per action, no allocation.
 //!
 //! `hp` is the integrity of whatever holds the door shut: the leaf, its lock or a wedge under
-//! it. A locked or wedged door gives way when blows take `hp` to [`GIVE_HP`] or below; any
+//! it. A locked or wedged door gives way when blows take `hp` to `GIVE_HP` or below; any
 //! door at zero `hp` is broken, and a broken door is terminal and blocks nothing.
 #![forbid(unsafe_code)]
 
@@ -212,7 +212,7 @@ const WRECK: u16 = u16::MAX;
 
 /// The outcome table, `[state][action]` in discriminant order. A holding state (locked, wedged)
 /// names itself as `next` while it holds; [`Door::apply`] turns it into open once the blows
-/// have taken `hp` to [`GIVE_HP`].
+/// have taken `hp` to `GIVE_HP`.
 const RULES: [[Rule; 6]; 7] = {
     use DoorEvent as E;
     use DoorState as S;

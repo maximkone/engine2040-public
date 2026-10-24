@@ -3,16 +3,16 @@
 //!
 //! The ragdoll joint set used to take one swing limit from the joint's depth in the
 //! hierarchy. A name carries more than a depth does: a knee bends about one axis, an
-//! elbow folds the other way, a spine turns less than a shoulder. [`JointTable`] holds
-//! one [`JointSpec`] per bone, named from the skeleton (`knee`, `elbow`, `spine`,
+//! elbow folds the other way, a spine turns less than a shoulder. `JointTable` holds
+//! one `JointSpec` per bone, named from the skeleton (`knee`, `elbow`, `spine`,
 //! `shoulder`, `hip` and their synonyms), with the depth limit as the fallback for a
-//! bone the table does not know. A knee or an elbow gets [`JointKind::Hinge`]; every
-//! other named bone gets [`JointKind::Ball`] with its own cone and twist.
+//! bone the table does not know. A knee or an elbow gets `JointKind::Hinge`; every
+//! other named bone gets `JointKind::Ball` with its own cone and twist.
 //!
-//! Two refusals keep a broken rig out of the solver: [`JointSpec::ball`] and
-//! [`JointSpec::hinge`] refuse a limit in degrees outside `0..=180`, and
-//! [`JointTable::try_humanoid`] refuses a skeleton whose parent links are not exactly
-//! one tree (a bone without a joint flies apart under gravity). [`bone_groups`] builds
+//! Two refusals keep a broken rig out of the solver: `JointSpec::ball` and
+//! `JointSpec::hinge` refuse a limit in degrees outside `0..=180`, and
+//! `JointTable::try_humanoid` refuses a skeleton whose parent links are not exactly
+//! one tree (a bone without a joint flies apart under gravity). `bone_groups` builds
 //! the collision groups that keep a bone from touching its parent or children while
 //! the same bone of two ragdolls still collides.
 //!
@@ -277,7 +277,7 @@ pub fn check_joint_count(skeleton: &Skeleton) -> Result<(), JointError> {
     Ok(())
 }
 
-/// Per-bone joint table: one [`JointSpec`] per bone in skeleton order (the root row
+/// Per-bone joint table: one `JointSpec` per bone in skeleton order (the root row
 /// carries the defaults and is unused, its parent is `None`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct JointTable {
@@ -291,12 +291,12 @@ type NamedRow = (JointKind, [f32; 3]);
 
 impl JointTable {
     /// Table from the skeleton's joint names. A hinge name (a knee, an elbow) gets
-    /// [`JointKind::Hinge`] with a 1..145 degree flexion range; a spine, chest, neck,
+    /// `JointKind::Hinge` with a 1..145 degree flexion range; a spine, chest, neck,
     /// head, shoulder, upper arm, hip or thigh gets its named cone and twist; every
     /// other bone falls back to the depth limit it had before. Allocates once for the
     /// table (never per tick); math is comparisons plus one constant multiply. A row
     /// the published numbers cannot express keeps the depth fallback;
-    /// [`JointTable::try_humanoid`] reports that instead of hiding it.
+    /// `JointTable::try_humanoid` reports that instead of hiding it.
     pub fn humanoid(skeleton: &Skeleton) -> Self {
         let depths = joint_depths(skeleton);
         let mut rows = Vec::with_capacity(skeleton.len());
@@ -311,7 +311,7 @@ impl JointTable {
     }
 
     /// The same table, refusing a skeleton whose parent links leave a named rig bone
-    /// unjoined and a row that breaks [`JointSpec::ball`] or [`JointSpec::hinge`].
+    /// unjoined and a row that breaks `JointSpec::ball` or `JointSpec::hinge`.
     /// `spawn` reads this one, so a detached bone stops before the solver sees it.
     pub fn try_humanoid(skeleton: &Skeleton) -> Result<Self, JointError> {
         check_joint_count(skeleton)?;

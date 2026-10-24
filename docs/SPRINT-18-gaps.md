@@ -2079,7 +2079,7 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   `fight_ring.rs`. Accept: a 10-frame brief lists every kit draw once per
   frame, x2 equal; a fixture fighter inside a pillar breaks the law. F2P:
   props are not in the brief. P2P: game lib green. needs: none.
-- [ ] SP65 game: ask the frame — `view_pick(x, y)` (NDC) returns the nearest
+- [x] SP65 game: ask the frame — `view_pick(x, y)` (NDC) returns the nearest Landed f8b8721a1.
   body slot, part and world point by a CPU ray against the posed triangles
   (kit bounds next); `view_sees(a, b)` says whether fighter a's head sees
   fighter b's chest past other bodies and props. EV21's pick manifest consumes
@@ -2205,7 +2205,12 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   reject the same draws on a fixture camera set (same survivor ids, same order), the pixels of a captured
   frame are equal to the CPU path within the existing frame-diff epsilon, and the plan is byte-identical
   twice. F2P: two finished cull modules nobody calls.
-- [ ] OPT58 endpoint: a long receipt travels by reference, not cut. No verb in the door ever returns a
+  Progress 2026-10-24 (f22c2a343): the flag-gated plan and the CPU agreement tests land
+  (`E2040_GPU_CULL`, `cpu_submit_order` stays the default and the fallback; 8 passed with
+  `--features window`, same survivor ids in the same order on 4 fixture cameras, plan bytes equal
+  twice). Left: the pixel leg (`frame_diff_count` at `PASS_EPSILON`) and a device-side indirect
+  draw that reads the args the plan already hands back; the draw still takes the existing path.
+- [x] OPT58 endpoint: a long receipt travels by reference, not cut. Landed 7dd5f036c. gh-check `cargo test -p engine-endpoint --features mcp --lib receipt_link`: 1 passed (run 40067436660), `--lib tool_budget`: 3 passed, rust-quality PASS. No verb in the door ever returns a
   `resource_link` (grep finds none in `crates/endpoint`), so a caller that needs more than the inline text
   must re-call with narrower arguments; some verbs carry an honest `truncated` flag (`log_tools.rs`) and the
   rest simply report what fits, so a model cannot fetch the whole artifact. Serve the full receipt as a
@@ -2236,7 +2241,7 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   the PGO build, posting frame p50/p99 and the build wall time for each; the golden prints
   `d57b5c8ae3096614` on both. Keep it only if the frame time drops and the build stays inside the nightly
   budget. F2P: no profile-guided build exists.
-- [ ] OPT61 web: SIMD128 in the shipped wasm. `docs/HASH-LAW.md` already records `wasm32-wasip1-simd128` as
+- [x] OPT61 web: SIMD128 in the shipped wasm. Landed e82e4230. `docs/HASH-LAW.md` already records `wasm32-wasip1-simd128` as
   MATCH, so the risk question is answered; the change is `--enable-simd` in
   `tools/web-build.mjs::WASM_OPT_FEATURES` plus `-C target-feature=+simd128` on the cargo build line. Threads
   and memory64 stay rejected (threads need cross-origin isolation everywhere; memory64 peaks past the soak

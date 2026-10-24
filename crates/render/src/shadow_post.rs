@@ -248,14 +248,7 @@ pub fn shot_rgb8(look: &Look, w: usize, h: usize) -> Vec<u8> {
     }
     out
 }
-pub fn fnv1a64(b: &[u8]) -> u64 {
-    let mut h = 0xcbf29ce484222325u64;
-    for x in b {
-        h ^= *x as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
+pub use crate::types::fnv1a64;
 fn mx(h: u64, v: u32) -> u64 {
     (h ^ v as u64).wrapping_mul(0x100000001b3)
 }

@@ -84,6 +84,8 @@ mod rig;
 #[cfg(feature = "rapier")]
 mod soft;
 #[cfg(feature = "rapier")]
+mod terrain;
+#[cfg(feature = "rapier")]
 mod tether;
 #[cfg(feature = "rapier")]
 mod types;
@@ -116,6 +118,10 @@ pub use fx::{PhysFx, RagdollReceipt, Severed, TetherInfo, HIT_FADE_S};
 pub use rig::{Hinge, Rig};
 #[cfg(feature = "rapier")]
 pub use soft::{ClothDesc, ClothError, SoftCloth, SoftReceipt, SoftWorld, MAX_CLOTHS};
+#[cfg(feature = "rapier")]
+pub use terrain::{
+    HeightTerrain, ShapeParams, TerrainError, TerrainShape, MAX_SAMPLES, TERRAIN_FRICTION,
+};
 #[cfg(feature = "rapier")]
 pub use tether::TetherState;
 #[cfg(feature = "rapier")]

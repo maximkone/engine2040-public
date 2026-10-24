@@ -25,12 +25,15 @@ use crate::break_look::{BreakCue, BreakDust, BreakLook, BreakProp, LookError, BR
 use crate::camera::to_mm;
 use crate::TickOutcome;
 use engine_arena::{crate_rest, ArenaConfig};
+use engine_core::hash::hash_bytes;
+use engine_core::splitmix64;
 use engine_destruction::budget::{
     BudgetError, DebrisBudget, DebrisLedger, ShardSeed, MAX_BUDGET_SHARDS, MAX_PER_EVENT,
     MAX_POS_MM,
 };
 use engine_destruction::debris_lod::{plan_lod, LodConfig, LodError, Tier as LodTier};
 use engine_physfx::{Blast, Material, Stats, Tier};
+use engine_render::particles_gpu::EmitterKind;
 use engine_render::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter};
 use engine_render::v1::{cube, upload_mesh, MeshData, MeshError, PbrMaterial};
 
@@ -103,6 +106,11 @@ pub struct BreakScene {
     broke_at: Option<u32>,
     /// The break sound of the last accepted tick, until the audio feed takes it.
     cue: Option<BreakCue>,
+    /// The dust of the last tick that freed pieces, until the frame that draws it takes it: a
+    /// quiet tick must not clear a cloud the frame has not drawn yet.
+    dust: Option<BreakDust>,
+    /// Puffs this picture has handed the particle feed, one cloud per tick that freed pieces.
+    dust_puffs: u32,
     /// Boxes already on the GPU: half-extents and model they were baked with (a merged proxy
     /// reuses its lead piece's key with a bigger box, so the half counts too).
     sent: Vec<(MeshKey, [f32; 3], [f32; 12])>,
@@ -134,6 +142,8 @@ impl BreakScene {
             observed: 0,
             broke_at: None,
             cue: None,
+            dust: None,
+            dust_puffs: 0,
             sent: Vec::new(),
         })
     }
@@ -147,6 +157,9 @@ impl BreakScene {
         }
         self.look.observe(outcome.tick, &outcome.breaks)?;
         self.cue = self.look.take_cue();
+        if let Some(cloud) = self.look.take_dust() {
+            self.dust = Some(cloud);
+        }
         self.observed += 1;
         if !outcome.breaks.is_empty() {
             self.breaks = self
@@ -212,6 +225,14 @@ impl BreakScene {
         camera_m: [f32; 3],
     ) -> Result<usize, SceneError> {
         let draws = self.draws(alpha, camera_m)?;
+        // RZ4 dust: a tick that freed pieces raised one cloud in the look; it reaches the fight
+        // pool once, on the frame that draws that tick, so a break tick puffs where the blow
+        // landed and a quiet frame (no cloud waiting) adds nothing. Straight up, as the
+        // knockdown path throws its dust.
+        if let Some(dust) = self.take_dust() {
+            presenter.fight_burst(EmitterKind::Dust, dust.at_m, [0.0, 1.0, 0.0], dust.puffs);
+            self.dust_puffs = self.dust_puffs.saturating_add(dust.puffs);
+        }
         for draw in &draws {
             let fresh = self
                 .sent
@@ -219,7 +240,12 @@ impl BreakScene {
                 .position(|(key, ..)| *key == draw.mesh)
                 .is_none_or(|at| self.sent[at].1 != draw.half || self.sent[at].2 != draw.model);
             if fresh {
-                let mesh = baked_box(draw.half, &draw.model).map_err(SceneError::Mesh)?;
+                let mesh = if shard_pieces() {
+                    baked_shard(draw.half, &draw.model, shard_seed(&draw.mesh))
+                } else {
+                    baked_box(draw.half, &draw.model)
+                }
+                .map_err(SceneError::Mesh)?;
                 presenter
                     .upload_mesh(draw.mesh, &mesh)
                     .map_err(SceneError::Upload)?;
@@ -280,12 +306,22 @@ impl BreakScene {
         if let Some(cue) = self.look.take_cue() {
             self.cue = Some(cue);
         }
+        if let Some(cloud) = self.look.take_dust() {
+            self.dust = Some(cloud);
+        }
         Ok(pushed)
     }
 
     /// The blast dust of the last [`BreakScene::observe_blast`], once.
     pub fn take_dust(&mut self) -> Option<BreakDust> {
-        self.look.take_dust()
+        self.dust.take()
+    }
+
+    /// Puffs this picture has handed the particle feed: one cloud per tick that freed pieces,
+    /// never growing on a quiet tick.
+    #[must_use]
+    pub const fn dust_puffs(&self) -> u32 {
+        self.dust_puffs
     }
 
     /// Counters of the physical layer.
@@ -294,14 +330,16 @@ impl BreakScene {
         self.look.stats()
     }
 
-    /// The window's receipt line: `arena break: breaks=<n> debris=<n> awake=<n>`.
+    /// The window's receipt line: `arena break: breaks=<n> debris=<n> awake=<n> dust=<n>`, where
+    /// `dust` is the particles this picture threw for the breaks.
     #[must_use]
     pub fn receipt_line(&self) -> String {
         format!(
-            "arena break: breaks={} debris={} awake={}",
+            "arena break: breaks={} debris={} awake={} dust={}",
             self.breaks,
             self.debris(),
-            self.stats().awake
+            self.stats().awake,
+            self.dust_puffs
         )
     }
 }
@@ -420,6 +458,121 @@ pub fn baked_box(half: [f32; 3], model: &[f32; 12]) -> Result<MeshData, MeshErro
         .collect();
     let normals: Vec<[f32; 3]> = unit.normals.iter().map(|n| turn(*n)).collect();
     upload_mesh(&positions, &normals, &unit.uvs, &unit.indices)
+}
+
+/// Draw a chunk as a beveled shard (the default) or as the plain box. The box is the shard
+/// look's off switch for a capture pair: both bake the same piece into the same place, so the
+/// pair moves no sim state and no golden. `E2040_BREAK_BOX=1` picks the box; the environment is
+/// read once per process, and the capture harness is the only caller that sets it.
+fn shard_pieces() -> bool {
+    static BOX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*BOX.get_or_init(|| std::env::var("E2040_BREAK_BOX").is_ok_and(|v| v == "1"))
+}
+
+/// Smallest share of a half-extent a shard corner keeps: the corners are pulled inward by a
+/// seeded fraction of [`1.0 - SHARD_MIN_SHARE`] of their own arm, never past the chunk's AABB,
+/// so the drawn shard never pokes out of the box the physical layer simulates.
+const SHARD_MIN_SHARE: f32 = 0.82;
+
+/// Corners of a box, indexed `x + 2 * y + 4 * z` with a set bit meaning `+`.
+const SHARD_FACES: [[usize; 4]; 6] = [
+    [4, 5, 7, 6],
+    [0, 2, 3, 1],
+    [1, 3, 7, 5],
+    [0, 4, 6, 2],
+    [2, 6, 7, 3],
+    [0, 1, 5, 4],
+];
+
+/// The four quad corners' UVs, shared by every shard face.
+const SHARD_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+/// A beveled shard baked into world space: the chunk's box with its eight corners pulled inward
+/// by a fraction seeded from `seed`, its six outside faces and the same six reversed as inside
+/// faces, placed by `model` (3 rows of 4, row-major). Every vertex stays inside the box's AABB.
+/// The same arguments give the same [`MeshData`] twice. `upload_mesh` validates the result.
+pub fn baked_shard(half: [f32; 3], model: &[f32; 12], seed: u64) -> Result<MeshData, MeshError> {
+    let h = half.map(|v| v.abs().max(1e-4));
+    let mut corners = [[0.0f32; 3]; 8];
+    for (i, corner) in corners.iter_mut().enumerate() {
+        let sign = |bit: usize| if i & (1 << bit) != 0 { 1.0f32 } else { -1.0 };
+        for (axis, c) in corner.iter_mut().enumerate() {
+            let share = SHARD_MIN_SHARE + (1.0 - SHARD_MIN_SHARE) * seeded_fraction(seed, i, axis);
+            *c = sign(axis) * h[axis] * share;
+        }
+    }
+    let turn = |v: [f32; 3]| {
+        [
+            model[0] * v[0] + model[1] * v[1] + model[2] * v[2],
+            model[4] * v[0] + model[5] * v[1] + model[6] * v[2],
+            model[8] * v[0] + model[9] * v[1] + model[10] * v[2],
+        ]
+    };
+    let mut positions = Vec::with_capacity(SHARD_FACES.len() * 8);
+    let mut normals = Vec::with_capacity(SHARD_FACES.len() * 8);
+    let mut uvs = Vec::with_capacity(SHARD_FACES.len() * 8);
+    let mut indices = Vec::with_capacity(SHARD_FACES.len() * 12);
+    for face in &SHARD_FACES {
+        let world: [[f32; 3]; 4] = [0, 1, 2, 3].map(|k| {
+            let r = turn(corners[face[k]]);
+            [r[0] + model[3], r[1] + model[7], r[2] + model[11]]
+        });
+        let outward = face_normal(world[0], world[1], world[2]);
+        // Outside triangles keep the face's winding; inside ones reverse it and flip the normal,
+        // so a cut face reads from within when a piece tumbles.
+        for (flip, order) in [
+            (false, [0u32, 1, 2, 0, 2, 3]),
+            (true, [0u32, 2, 1, 0, 3, 2]),
+        ] {
+            let base = u32::try_from(positions.len()).unwrap_or(0);
+            let normal = if flip { outward.map(|c| -c) } else { outward };
+            for (k, at) in world.iter().enumerate() {
+                positions.push(*at);
+                normals.push(normal);
+                uvs.push(SHARD_UVS[k]);
+            }
+            indices.extend(order.map(|i| base + i));
+        }
+    }
+    upload_mesh(&positions, &normals, &uvs, &indices)
+}
+
+/// The unit outward normal of triangle `a b c`, or `+Y` for a triangle too flat to have one (the
+/// corner jitter cannot make one flat, so this only guards a bad half-extent).
+fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let n = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len > 1e-6 {
+        [n[0] / len, n[1] / len, n[2] / len]
+    } else {
+        [0.0, 1.0, 0.0]
+    }
+}
+
+/// A stable fraction in `0.0..=1.0` for one corner and axis of a shard seed: the same seed gives
+/// the same corner every run and every machine (the core's hash and mix, no float state).
+fn seeded_fraction(seed: u64, corner: usize, axis: usize) -> f32 {
+    let mut raw = [0u8; 10];
+    raw[..8].copy_from_slice(&seed.to_le_bytes());
+    raw[8] = u8::try_from(corner).unwrap_or(0);
+    raw[9] = u8::try_from(axis).unwrap_or(0);
+    let z = splitmix64(hash_bytes(&raw));
+    f32::from(u16::try_from((z >> 48) & 0xFFFF).unwrap_or(0)) / 65535.0
+}
+
+/// The shard seed of one piece key: the chunk's id and the box digest (the box digest already
+/// follows `hx, hy, hz`), so each piece keeps its own corner pattern as it moves.
+#[must_use]
+pub fn shard_seed(key: &MeshKey) -> u64 {
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&key.digest[..8]);
+    key.id.rotate_left(17) ^ u64::from_le_bytes(head)
 }
 
 #[cfg(test)]
@@ -833,6 +986,131 @@ mod tests {
         assert_eq!(bare.hp(), painted.hp());
         assert!(scene.breaks() > 0, "the painted run did see the break");
         assert!(scene.debris() > 0 && scene.debris() <= WINDOW_TIER.caps().bodies);
+    }
+
+    /// RZ4 dust: the look's cloud reaches the frame once, on the tick that freed pieces, and a
+    /// quiet tick raises none. The window's `push` reads this same `take_dust`, so the break
+    /// tick is the only frame that adds puffs to the fight pool.
+    #[test]
+    fn break_wire_a_break_tick_hands_one_dust_cloud_and_a_quiet_tick_none() {
+        let cfg = config();
+        let mut app = App::new(cfg).expect("app");
+        let mut scene = scene_for(&app);
+        let mut cloud = None;
+        let mut break_tick = 0;
+        for tick in 0..cfg.ticks {
+            let out = app.tick(script(tick));
+            scene.observe_outcome(&out).expect("tick");
+            if out.breaks.is_empty() && cloud.is_none() {
+                assert_eq!(
+                    scene.take_dust(),
+                    None,
+                    "tick {tick}: a quiet tick raises no cloud"
+                );
+            } else if cloud.is_none() {
+                break_tick = tick;
+                cloud = scene.take_dust();
+            }
+        }
+        let dust = cloud.expect("the break tick raises a cloud");
+        assert!(dust.puffs > 0, "{dust:?}");
+        let [x, y, z] = scene.center_m;
+        let reach = scene.half_m + 1.0;
+        assert!(
+            (dust.at_m[0] - x).abs() <= reach
+                && (dust.at_m[1] - y).abs() <= reach
+                && (dust.at_m[2] - z).abs() <= reach,
+            "the cloud sits on the crate: {dust:?}"
+        );
+        assert_eq!(scene.take_dust(), None, "one cloud per break tick");
+        assert_eq!(
+            scene.dust_puffs(),
+            0,
+            "no puffs before a frame draws the cloud"
+        );
+        // The window draws many ticks per frame: a cloud raised on one tick must survive the
+        // quiet ticks that follow it until the frame that draws it takes it.
+        let mut fresh = App::new(cfg).expect("app");
+        let mut held = scene_for(&fresh);
+        let mut painted = None;
+        for tick in 0..cfg.ticks {
+            let out = fresh.tick(script(tick));
+            held.observe_outcome(&out).expect("tick");
+            if painted.is_none() && held.dust.is_some() {
+                painted = Some(tick);
+            }
+            if let Some(at) = painted {
+                if tick >= at + 3 {
+                    let cloud = held.take_dust().unwrap_or_else(|| {
+                        panic!("the cloud of tick {at} survived to tick {tick}")
+                    });
+                    assert!(cloud.puffs > 0);
+                    assert_eq!(held.take_dust(), None, "one cloud, once");
+                    assert!(at <= break_tick, "same script, same break");
+                    return;
+                }
+            }
+        }
+        panic!("the script breaks the crate");
+    }
+
+    /// RZ4 shards: one beveled mesh per piece, deterministic from its key, every vertex inside
+    /// the chunk's AABB, and validated by the same `upload_mesh` the presenter runs.
+    #[test]
+    fn break_wire_shard_mesh_is_deterministic_and_inside_its_box() {
+        let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let key = MeshKey::new(7, [3; 32]);
+        let seed = shard_seed(&key);
+        for half in [[0.5, 0.5, 0.5], [0.2, 0.6, 0.35], [1.0, 0.15, 0.8]] {
+            let shard = baked_shard(half, &identity, seed).expect("the shard validates");
+            let again = baked_shard(half, &identity, seed).expect("the shard validates");
+            assert_eq!(shard, again, "the same seed bakes the same mesh twice");
+            assert_eq!(
+                shard.positions.len(),
+                SHARD_FACES.len() * 8,
+                "six faces, two shells"
+            );
+            assert_eq!(
+                shard.indices.len(),
+                SHARD_FACES.len() * 12,
+                "outside and inside"
+            );
+            for (axis, h) in half.iter().enumerate() {
+                for p in &shard.positions {
+                    assert!(
+                        p[axis].abs() <= h + 1e-6,
+                        "axis {axis}: {} pokes out of {h}",
+                        p[axis]
+                    );
+                }
+                // The shard is not the box: at least one corner was pulled inward.
+                let (lo, hi) = shard
+                    .positions
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                        (lo.min(p[axis]), hi.max(p[axis]))
+                    });
+                assert!(hi - lo < 2.0 * h, "axis {axis}: the box was not beveled");
+            }
+            for n in &shard.normals {
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                assert!((len - 1.0).abs() < 1e-5, "unit normal, got {len}");
+            }
+        }
+        // A different piece key is a different shard.
+        let other = shard_seed(&MeshKey::new(8, [3; 32]));
+        assert_ne!(
+            baked_shard([0.5; 3], &identity, seed).expect("bakes"),
+            baked_shard([0.5; 3], &identity, other).expect("bakes")
+        );
+        // The shard lands where the model puts it, inside the moved box.
+        let moved = [1.0, 0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, -3.0];
+        let shard = baked_shard([0.5, 0.25, 0.5], &moved, seed).expect("bakes");
+        for p in &shard.positions {
+            assert!((p[0] - 2.0).abs() <= 0.5 + 1e-6);
+            assert!((p[1] - 1.0).abs() <= 0.25 + 1e-6);
+            assert!((p[2] + 3.0).abs() <= 0.5 + 1e-6);
+        }
     }
 
     /// The baked box lands where the model puts it, with unit outward normals.

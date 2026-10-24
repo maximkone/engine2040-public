@@ -60,8 +60,15 @@ use engine_endpoint::{
 /// `--features mcp`: the live count is 126, thirty-one over the BG4 arm, so
 /// every arm moves up by thirty-one. The fx pack's four preset verbs
 /// (`fx.preset.list|preview|set|clear`, 2026-10-24) add four more, so the live
-/// router under `--features mcp` is 130.
-const EXPECTED_ROUTER: usize = 130
+/// router under `--features mcp` is 130. Measured again at HEAD the same day:
+/// 134, three more verbs landed inside existing packs while DOOR8 and DOOR9
+/// were in review. DOOR9 (2026-10-24) adds `anim.retarget`, the bone-map verb
+/// over the 17 roles, and `anim.retarget.preview`, the same map drawn as one
+/// PNG frame. Two seats landed while DOOR9 was in review: the project pack
+/// (`project.new`, `project.build`, `project.run`) and the memory pack
+/// (`memory.write`, `memory.recall`, `memory.share`), six verbs more. Measured
+/// 2026-10-24 under `--features mcp` after all of that: 143.
+const EXPECTED_ROUTER: usize = 143
     + if cfg!(feature = "rules") { 5 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

@@ -50,6 +50,19 @@ here: `OPT59` in `SPRINT-18-gaps.md` is the same row.
   substeps x 1), lower longest-edge stretch and fewer ticks to settle, digest twice identical,
   cost within +10%.
   F2P: stiffness follows the iteration count. Card §3.2.
+  Progress (2026-10-24, 49e5f1566): mechanism landed behind `SoftWorld::with_solve`, shipped
+  single-step path unchanged and still the default, because the Accept does not pass. Measured on
+  the 4x4 pinned banner (same spring set, six solves per tick): 1x6 rest stretch 1.0517, peak
+  1.0522, settle 16; 6x1 rest 1.0516, peak 1.0523, settle 16 (digest 21664091a2809521 both, and
+  the same on a second `--fresh` run). Cost 400 ticks of a cape, 3 interleaved reps: mean
+  3.44x one step, spread +-0.93, i.e. far over the +10% bar. Card §3.2 named two readings, Small
+  Steps and XPBD; the cheaper (substeps, no new solver) was taken. The premise does not hold
+  here: Rapier's soft solver never reads `num_solver_iterations` (that knob is the rigid island
+  solver), the cloth's real count is `SoftBodyBuilder::additional_pgs_iterations` (default 3) and
+  no tier reaches it, and the rest shape is set by the spring compliance (Hz + damping ratio):
+  iter 2 rest 1.0515 against iter 6 rest 1.0517, spread 0.023%, so no stiffness is left for a
+  tier knob to move. Next: either drop the row or re-aim it at a mesh dense enough for the
+  per-step overhead to vanish.
 - [ ] PX48 physics: clear the CCD fixed-target cache on a teleport. Rapier 0.36 caches CCD fixed
   targets; call `CCDSolver::invalidate_fixed_targets_cache` after a snapshot restore, a teleport
   or a collider swap, and record that `max_ccd_substeps = 0` disables CCD. Tier B. Size S. Owns
@@ -76,13 +89,19 @@ here: `OPT59` in `SPRINT-18-gaps.md` is the same row.
   both counted and printed; the recall arm needs no more calls, and a remembered workflow on a
   changed scene re-checks before it applies.
   F2P: the door starts cold every session. Card §4.2.
-- [ ] AAC6 audio: find the path around the corner. Search one or two propagation paths around
+- [x] AAC6 audio: find the path around the corner. Search one or two propagation paths around
   geometry and take the best gain, instead of the one straight listener-to-source ray that steps to
   full wall loss. Tier B. Size M. Owns `crates/audio/src/occlude.rs` (`Wall`,
   `MAX_WALLS_PER_QUERY = 256`) and `crates/audio/src/spatial.rs`.
   Accept: a voice 2 m around a 1 m stone corner reads within 3 dB of a 64-ray reference and costs
   no more than `BUDGET_MS_PER_VOICE` 0.1 ms; the curve no longer steps.
-  F2P: an open door around the corner still reads the full wall loss. Card §5.1.
+  F2P: an open door around the corner still reads the full wall loss. Card §5.1. Landed f60d6a1dd.
+  Method: closed-form visible fraction of a `SOURCE_RADIUS_CM` 50 voice disc, from the two boundary
+  rays through each wall end (cheaper form of the card's sampled fraction); each wall keeps
+  `pass + (1 - pass) * clear`, so a fully hidden wall still reads the exact table loss.
+  Numbers: corner 2.16 m behind a 1 m stone L, 64-ray 0.4000 (-7.96 dB) vs query 0.4265 (-7.40 dB),
+  +0.56 dB; fade band 8 angles worst 2.58 dB; 64-step walk past the corner worst step 1.09 dB, still
+  reaching the stone table loss 0.4; 64-wall query mean 0.0019 ms over 10k (budget 0.1).
 - [ ] AAC7 audio: a measured HRIR sphere behind a flag. Replace the 8-octant synthetic filter with
   about 32 measured directions at 16 taps, interpolated in azimuth and elevation, authored as SOFA.
   Tier B. Size M. Owns `crates/audio/src/hrtf.rs` (`OCTANTS = 8`, `HRTF_TAPS = 16`,
@@ -91,3 +110,14 @@ here: `OPT59` in `SPRINT-18-gaps.md` is the same row.
   than 6 dB off at 8 kHz; state stays under 4 KB; the octant path is unchanged when the flag is
   off. The perceptual claim needs a listening A/B and is not run here.
   F2P: octant panning cannot tell 0 degrees from 40. Card §5.2.
+  Progress 2026-10-24: measured sphere landed behind `set_measured_sphere`,
+  off by default (octant path bit-exact). 48 measured MIT KEMAR directions
+  (16 az x 3 elev at 22.5 deg, 16 taps, 44.1 kHz, 3136-byte `.bin` plus a
+  const table; licence and subset in `content/audio/PROVENANCE.md`, KEMAR
+  page: "no restrictions on use, provided the authors are cited"), ITD from
+  the measured arrival. Held-out (every 4th column) rms 6.29 dB, worst
+  10.92 dB; ITD error 3.67 samples mean, 12.00 worst; query 0.35 us.
+  Still missing: the 6 dB 8 kHz bar (10.75 dB worst held out: needs a denser
+  azimuth grid or magnitude/phase interpolation), the SOFA authored form
+  (bytes are a plain `.bin`; HDF5 needs a reader this lane has not got), a
+  stated ILD error set and the listening A/B.

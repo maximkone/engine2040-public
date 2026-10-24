@@ -38,10 +38,15 @@
 //! @group(2) @binding(1) var lut_sampler: sampler;
 //!
 //! fn lut_fetch(display: vec3<f32>) -> vec3<f32> {
-//!     // Domain 0..=1 and linear filtering: the sampler reproduces
-//!     // `Lut3d::apply` at the texel centers and trilinearly between them.
-//!     let coords = clamp(display, vec3<f32>(0.0), vec3<f32>(1.0));
-//!     return textureSampleLevel(lut_tex, lut_sampler, coords, 0.0).rgb;
+//!     // Domain 0..=1 onto texel centers, exactly `Lut3d::apply`: the grid is
+//!     // `color * (size - 1)` and the texture unit is `(grid + 0.5) / size`.
+//!     // A naive `clamp(display)` fetch is wrong by half a texel and by the
+//!     // `size - 1` stretch; the device test in `lut_upload` catches that.
+//!     let dims = vec3<f32>(textureDimensions(lut_tex));
+//!     let grid = clamp(display, vec3<f32>(0.0), vec3<f32>(1.0)) * (dims - vec3<f32>(1.0));
+//!     let uv = (grid + vec3<f32>(0.5)) / dims;
+//!     // The upload is blue-fastest: texture x is blue and texture z is red.
+//!     return textureSampleLevel(lut_tex, lut_sampler, vec3<f32>(uv.b, uv.g, uv.r), 0.0).rgb;
 //! }
 //! ```
 

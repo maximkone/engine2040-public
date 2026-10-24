@@ -213,7 +213,7 @@ pub struct PoweredSnapshot {
     pub ccd_flags: Vec<bool>,
     /// Total contact pairs observed at snapshot time.
     pub contact_events: u64,
-    /// PID state of the linear servo, one per bone (see [`Servo`]).
+    /// PID state of the linear servo, one per bone (see `Servo`).
     pub servo_lin: Vec<Servo>,
     /// PID state of the angular servo, one per bone.
     pub servo_ang: Vec<Servo>,

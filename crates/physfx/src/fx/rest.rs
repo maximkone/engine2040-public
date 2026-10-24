@@ -26,6 +26,12 @@ use super::{pose_of, GroupId, PhysFx};
 use rapier3d::dynamics::RigidBody;
 use rapier3d::math::Vector;
 
+/// One group's rest reading, as [`PhysFx::rest_state`] reports it: bone count,
+/// quiet ticks, sleeping bones, fastest linear and angular speed, its
+/// persistent island and whether that island reads at rest.
+#[cfg(test)]
+pub(crate) type RestState = (usize, u32, usize, f32, f32, Option<u32>, bool);
+
 /// Every bone of a lying ragdoll is under this: meters per second.
 const REST_MAX_BONE_MPS: f32 = 0.5;
 /// Every bone of a lying ragdoll is under this: radians per second, for the sleep decision.
@@ -225,7 +231,7 @@ impl PhysFx {
     /// and angular speed, its persistent island and whether that island reads at rest; the
     /// settle test names the group that holds up the world.
     #[cfg(test)]
-    pub(crate) fn rest_state(&self) -> Vec<(usize, u32, usize, f32, f32, Option<u32>, bool)> {
+    pub(crate) fn rest_state(&self) -> Vec<RestState> {
         let mut out = Vec::new();
         for (gi, group) in self.groups.iter().enumerate() {
             if !matches!(group.id, GroupId::Ragdoll(_) | GroupId::Limb(_)) {

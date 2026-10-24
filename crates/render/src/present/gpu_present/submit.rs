@@ -3,6 +3,7 @@
 //! Continues `impl Presenter` from `presenter`; helpers used across the
 //! split are `pub(super)`, everything else keeps its exact shape.
 use super::super::*;
+use super::debug_gbuffer::{clear_attachment, DebugTargets};
 use super::frame::{
     decal_err, ibl_err, layer_err, particle_err, sky_err, trail_err, FrameOutput, FrameReceipt,
     LookPassReceipt, Targets,
@@ -537,7 +538,23 @@ impl Presenter {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: OUTPUT_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        // E11: the look-table target. `TEXTURE_BINDING` lets a later frame's
+        // pass read it, `COPY_SRC` the capture; the blit never writes it.
+        let lut_out_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ra1-look-out"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OUTPUT_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -802,6 +819,8 @@ impl Presenter {
             hdr_texture: hdr,
             out_view: out_texture.create_view(&wgpu::TextureViewDescriptor::default()),
             out_texture,
+            lut_out_view: lut_out_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            lut_out_texture,
             depth_view,
             depth_texture,
             fog_texture,
@@ -1091,29 +1110,44 @@ impl Presenter {
         list: &DrawList,
         look: ForwardLook<'_>,
         order: &[usize],
+        debug: Option<&DebugTargets>,
     ) -> bool {
         // EG11b: the live sun map runs here; a skipped pass writes `enabled` 0.
-        let wanted = look.sun_depth && forward_sun_enabled();
+        // A3: a debug capture shades nothing but the G-buffer, so it never
+        // records the sun map (the live frame's stays as it was).
+        let wanted = debug.is_none() && look.sun_depth && forward_sun_enabled();
         sun_last_us_store(self.sun_sub.record(self, enc, list, wanted));
         // EG13: on plus built resolves 4x into 1x HDR, else today's 1x path.
         let (_, should_resolve) =
             super::msaa::msaa_forward_choice(&self.msaa, targets.msaa.is_some());
-        let msaa_pair = targets.msaa.as_ref().filter(|_| should_resolve);
-        let (color_view, depth_view, pipeline, skinned_pipeline, resolve) = match msaa_pair {
-            Some(pair) => (
-                &pair.color_view,
-                &pair.depth_view,
-                &self.forward_hdr_msaa,
-                &self.forward_skinned_msaa,
-                Some(&targets.hdr_view),
-            ),
-            None => (
-                &targets.hdr_view,
-                &targets.depth_view,
-                &self.forward_hdr,
-                &self.forward_skinned,
+        let msaa_pair = debug
+            .is_none()
+            .then(|| targets.msaa.as_ref().filter(|_| should_resolve))
+            .flatten();
+        let (color_view, depth_view, pipeline, skinned_pipeline, resolve) = match debug {
+            Some(dbg) => (
+                &dbg.normal_view,
+                &dbg.depth_view,
+                &dbg.pipeline,
+                &dbg.skinned,
                 None,
             ),
+            None => match msaa_pair {
+                Some(pair) => (
+                    &pair.color_view,
+                    &pair.depth_view,
+                    &self.forward_hdr_msaa,
+                    &self.forward_skinned_msaa,
+                    Some(&targets.hdr_view),
+                ),
+                None => (
+                    &targets.hdr_view,
+                    &targets.depth_view,
+                    &self.forward_hdr,
+                    &self.forward_skinned,
+                    None,
+                ),
+            },
         };
         // LF5: the MSAA pass keeps its single HDR attachment, so it cannot
         // write motion (a 4x twin would break the transient cap). Clear the
@@ -1140,10 +1174,15 @@ impl Presenter {
         // Depth is stored while something reads it after the pass: the
         // own-pass sky, the fog feed copy, or a staged splat field (FEEL5).
         // HDR pixels stay bit-identical either way.
-        let sky_plan = resolve_sky_plan(capture_sky_decision(), look.sky, msaa_pair.is_some());
-        let keep_depth =
-            look.keep_depth || (self.decal_sub.has_splat_draw() && msaa_pair.is_none());
-        let depth_store = if forward_depth_should_store(keep_depth, sky_plan) {
+        let sky_plan = if debug.is_some() {
+            SkyPlan::Skip
+        } else {
+            resolve_sky_plan(capture_sky_decision(), look.sky, msaa_pair.is_some())
+        };
+        let keep_depth = debug.is_some()
+            || look.keep_depth
+            || (self.decal_sub.has_splat_draw() && msaa_pair.is_none());
+        let depth_store = if debug.is_some() || forward_depth_should_store(keep_depth, sky_plan) {
             wgpu::StoreOp::Store
         } else {
             wgpu::StoreOp::Discard
@@ -1184,11 +1223,29 @@ impl Presenter {
             Some(id_attachment),
             Some(motion_attachment),
         ];
+        // A3: the debug capture clears its own three channels and writes
+        // nothing else, so the frame's HDR, id and motion targets are never
+        // touched by a debug render.
+        let debug_attachments = debug.map(|dbg| {
+            [
+                Some(clear_attachment(
+                    &dbg.normal_view,
+                    wgpu::Color {
+                        r: 0.5,
+                        g: 0.5,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                )),
+                Some(clear_attachment(&dbg.albedo_view, wgpu::Color::TRANSPARENT)),
+                Some(clear_attachment(&dbg.ids_view, wgpu::Color::TRANSPARENT)),
+            ]
+        });
         let color_attachments: &[Option<wgpu::RenderPassColorAttachment<'_>>] =
-            if msaa_pair.is_some() {
-                &color_attachments[..1]
-            } else {
-                &color_attachments[..3]
+            match (&debug_attachments, msaa_pair) {
+                (Some(attachments), _) => attachments,
+                (None, Some(_)) => &color_attachments[..1],
+                (None, None) => &color_attachments[..3],
             };
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ra1-forward"),
@@ -1269,6 +1326,12 @@ impl Presenter {
             let draw_u = u32::try_from(draw).unwrap_or(0);
             rp.draw_indexed(0..mesh.count, 0, draw_u..draw_u + 1);
             i = j;
+        }
+        // A3: a debug capture stops after the geometry. The sky, the floor
+        // blood, the particles and the trail would paint channels the frame
+        // has no business showing.
+        if debug.is_some() {
+            return false;
         }
         if sky_plan == SkyPlan::InPass {
             // The sky entries read only the fog uniform; any forward bind
@@ -1633,6 +1696,7 @@ impl Presenter {
                 list,
                 ForwardLook::blocking(particles),
                 staged.order(),
+                None,
             );
             // RL9 depth-readback seam: this frame's depth feeds the fog
             // tranche below (same queue order, so the copy sees the
@@ -1761,9 +1825,26 @@ impl Presenter {
                 OUTPUT_FORMAT,
                 &targets.out_view,
             );
+            // E11: the look pass sits between the graded frame (plus the HUD
+            // and lines that ride its view) and the display write. A frame
+            // with no table bound records nothing and copies the blit's own
+            // bytes, so its pixels stay exactly what they were.
+            let display_texture = if self.look_lut_bound() {
+                if let Some(bind) =
+                    self.lut_pass
+                        .bind(&self.device, &self.lut, &targets.out_view, width, height)
+                {
+                    let pipeline = self.lut_pass.pipeline_for(&self.device, OUTPUT_FORMAT);
+                    self.lut_pass
+                        .encode(&mut blit_enc, &bind, &pipeline, &targets.lut_out_view);
+                }
+                &targets.lut_out_texture
+            } else {
+                &targets.out_texture
+            };
             blit_enc.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &targets.out_texture,
+                    texture: display_texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -2266,7 +2347,11 @@ fn color_target_states(formats: &[wgpu::TextureFormat]) -> Vec<Option<wgpu::Colo
     formats
         .iter()
         .map(|format| {
-            let blend = if *format == super::frame::ID_TARGET_FORMAT {
+            // Integer targets are not blendable; the id channel and the A3
+            // debug ids are plain uints, so they take no blend state.
+            let blend = if *format == super::frame::ID_TARGET_FORMAT
+                || *format == wgpu::TextureFormat::R16Uint
+            {
                 None
             } else {
                 Some(wgpu::BlendState::REPLACE)
@@ -2371,6 +2456,7 @@ pub(super) fn forward_pipeline(
         multisample,
         constants,
         false,
+        false,
     )
 }
 
@@ -2396,6 +2482,7 @@ pub(super) fn forward_skinned_pipeline(
         multisample,
         constants,
         true,
+        false,
     )
 }
 
@@ -2403,9 +2490,9 @@ pub(super) fn forward_skinned_pipeline(
 /// the same shader source compiles to the fp32 look or the potato one.
 #[expect(
     clippy::too_many_arguments,
-    reason = "8 inputs mirror the forward pass"
+    reason = "9 inputs mirror the forward pass"
 )]
-fn forward_pipeline_for(
+pub(super) fn forward_pipeline_for(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
@@ -2414,6 +2501,7 @@ fn forward_pipeline_for(
     multisample: wgpu::MultisampleState,
     constants: &[(&str, f64)],
     skinned: bool,
+    debug: bool,
 ) -> wgpu::RenderPipeline {
     use crate::pipeline_warmup::CountedPipelines as _;
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2426,8 +2514,10 @@ fn forward_pipeline_for(
     let targets = color_target_states(formats);
     // LF5: the 1x forward carries the motion target as its third
     // attachment, so only that shape reads the previous position stream.
-    // The MSAA twin keeps HDR alone and its old vertex entries.
-    let motion = formats.len() > 2;
+    // The MSAA twin keeps HDR alone and its old vertex entries. A3: the
+    // debug G-buffer also has three targets but reads no motion, so it
+    // keeps the plain entries.
+    let motion = formats.len() > 2 && !debug;
     let (entry, stride, attributes): (&str, u64, &[wgpu::VertexAttribute]) = match (skinned, motion)
     {
         (false, true) => (
@@ -2482,7 +2572,7 @@ fn forward_pipeline_for(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs"),
+            entry_point: Some(if debug { "fs_gbuffer" } else { "fs" }),
             targets: &targets,
             compilation_options: guard_options(constants),
         }),

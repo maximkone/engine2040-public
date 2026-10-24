@@ -125,6 +125,8 @@ impl From<LogError> for McpToolError {
 pub struct LogStore {
     ring: RingBuffer,
     pushed: u64,
+    /// OPT58: full receipts a digest answered with a summary of, by URI.
+    pub(crate) receipts: crate::resources::ReceiptStore,
 }
 
 impl LogStore {
@@ -133,6 +135,7 @@ impl LogStore {
         Self {
             ring: RingBuffer::new(cap),
             pushed: 0,
+            receipts: crate::resources::ReceiptStore::new(),
         }
     }
 
@@ -196,7 +199,8 @@ pub struct LogDigestArgs {
 
 /// Digest answer: stable per-code counts bounded by the byte budget.
 /// Units are events, bytes and budget bytes. No errors once read; a tight
-/// budget sets `truncated`. Budget is at most 16384 bytes.
+/// budget sets `truncated`. Budget is at most 16384 bytes. `summary` names the
+/// byte count the answer left behind and `resource_uri` fetches it whole.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -207,6 +211,9 @@ pub struct LogDigestOutput {
     pub budget: u64,
     pub overflow: u64,
     pub truncated: bool,
+    pub summary: String,
+    pub resource_uri: Option<String>,
+    pub full_bytes: u64,
 }
 
 /// Query request: absolute cursor, page size and optional code filter.
@@ -257,7 +264,11 @@ impl ServerState {
     }
 
     /// Stable digest of the retained ring, bounded by `budget_bytes`.
-    pub fn log_digest(&self, args: &LogDigestArgs) -> Result<LogDigestOutput, McpToolError> {
+    ///
+    /// A budget that cuts the digest publishes the whole body as a receipt row
+    /// and prints its URI, so the answer travels by reference instead of
+    /// losing rows. `truncated` stays exactly `kept != full`.
+    pub fn log_digest(&mut self, args: &LogDigestArgs) -> Result<LogDigestOutput, McpToolError> {
         let budget = args.budget_bytes.unwrap_or(LOG_DIGEST_DEFAULT_BUDGET);
         if budget == 0 || budget > LOG_DIGEST_MAX_BUDGET {
             return Err(LogError::BadBudget { budget }.into());
@@ -265,14 +276,40 @@ impl ServerState {
         let events = self.logs.snapshot();
         let kept = digest(&events, budget as usize);
         let full = digest(&events, usize::MAX);
+        let truncated = kept != full;
+        let full_bytes = u64::try_from(full.len()).unwrap_or(u64::MAX);
+        let left = full.len().saturating_sub(kept.len());
+        let (summary, resource_uri) = if truncated {
+            let uri = self.logs.receipts.publish(&full);
+            (
+                format!(
+                    "digest {} of {full_bytes} bytes inline; {left} bytes behind {uri}",
+                    kept.len()
+                ),
+                Some(uri),
+            )
+        } else {
+            (
+                format!("digest {full_bytes} bytes inline; 0 bytes left behind"),
+                None,
+            )
+        };
         Ok(LogDigestOutput {
             bytes: kept.len() as u64,
-            truncated: kept != full,
+            truncated,
             digest: kept,
             events: events.len() as u64,
             budget: u64::from(budget),
             overflow: self.logs.overflow_count(),
+            summary,
+            resource_uri,
+            full_bytes,
         })
+    }
+
+    /// OPT58: the full body published under one receipt URI, if still held.
+    pub fn receipt_text(&self, uri: &str) -> Option<&str> {
+        self.logs.receipts.read(uri)
     }
 
     /// One cursor page over the retained ring in stable (seq-ascending)
@@ -495,6 +532,70 @@ mod tests {
         push(&other, EventCode::SIM_TICK, 1, "tick");
         push(&other, EventCode::PROVIDER_TIMEOUT, 3, "slow");
         assert_eq!(digest(&other, None).digest, first.digest);
+    }
+
+    #[test]
+    fn receipt_link_carries_the_full_digest_it_left_behind() {
+        let server = server();
+        seed_mixed(&server);
+
+        // A digest that fits stays inline, prints its own byte count and
+        // offers no link: the answer is already whole.
+        let inline = digest(&server, Some(LOG_DIGEST_MAX_BUDGET));
+        assert!(!inline.truncated, "16384 bytes hold four rows");
+        assert!(
+            inline.resource_uri.is_none(),
+            "a short receipt stays inline"
+        );
+        assert!(
+            inline
+                .summary
+                .contains(&format!("{} bytes inline", inline.bytes)),
+            "the summary names the byte count it kept: {}",
+            inline.summary
+        );
+        assert!(
+            inline.summary.contains("0 bytes left behind"),
+            "an inline receipt leaves nothing behind: {}",
+            inline.summary
+        );
+
+        // A budget that cuts the digest publishes the whole body and names it.
+        let tight = digest(&server, Some(16));
+        assert!(tight.truncated, "16 bytes cannot hold four rows");
+        assert_eq!(tight.bytes, tight.digest.len() as u64);
+        assert!(tight.bytes <= tight.budget);
+        assert!(
+            tight.full_bytes > tight.bytes,
+            "{} full bytes over {} kept",
+            tight.full_bytes,
+            tight.bytes
+        );
+        let uri = tight
+            .resource_uri
+            .as_deref()
+            .expect("a cut receipt travels by reference");
+        assert!(
+            tight.summary.contains(&format!(
+                "{} bytes behind {uri}",
+                tight.full_bytes - tight.bytes
+            )),
+            "the summary names the bytes it left behind: {}",
+            tight.summary
+        );
+
+        // The link is a real fetch: two reads are byte-identical and carry the
+        // whole digest, not the clipped one.
+        let first = server.receipt_text(uri).expect("the receipt reads");
+        let second = server.receipt_text(uri).expect("the receipt reads twice");
+        assert_eq!(first, second, "a receipt read twice is byte-identical");
+        assert_eq!(first.len() as u64, tight.full_bytes);
+        assert!(first.starts_with(&tight.digest), "the kept bytes prefix it");
+        assert!(first.contains("provider.timeout x2 first=3 last=7"));
+        assert!(
+            first.contains("heal.applied x1"),
+            "every row is behind: {first}"
+        );
     }
 
     #[test]

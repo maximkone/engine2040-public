@@ -355,6 +355,11 @@ pub(crate) struct Targets {
     pub(crate) hdr_texture: wgpu::Texture,
     pub(crate) out_view: wgpu::TextureView,
     pub(crate) out_texture: wgpu::Texture,
+    /// E11 look-table display target: the LUT pass writes here when a table
+    /// is bound, reading `out_view`; the display write then reads this one.
+    /// A frame with no table never touches it.
+    pub(crate) lut_out_view: wgpu::TextureView,
+    pub(crate) lut_out_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
     /// Depth texture behind `depth_view`; RL9 copies it per frame.
     pub(crate) depth_texture: wgpu::Texture,

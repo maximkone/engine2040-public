@@ -1,6 +1,6 @@
 //! servo: fixed-point PID joint servo for the powered ragdoll (PX11).
 //!
-//! Consumer: [`crate::powered::PoweredRagdoll::drive_bone`] runs one [`Servo`]
+//! Consumer: `crate::powered::PoweredRagdoll::drive_bone` runs one `Servo`
 //! per bone on each axis and converts its answer back to the world velocity.
 //! Owner: this module owns the integer PID law, the integral bound, the slew
 //! cap and the per-rig tuning table. Units: micro-units (1e-6 of the SI
@@ -10,19 +10,19 @@
 //! per-tick velocity factor the velocity servo already used (see [`crate::pd`]).
 //!
 //! Determinism: integer `+ - * /`, shifts, comparisons and one integer
-//! square root ([`engine_core::fixed::isqrt`]) in [`jitter_rms`]; no float
+//! square root ([`engine_core::fixed::isqrt`]) in `jitter_rms`; no float
 //! inside the loop, no allocation, no clock. The only float step is the
-//! caller's boundary conversion ([`to_micro`] / [`from_micro`]).
+//! caller's boundary conversion (`to_micro` / `from_micro`).
 //!
 //! The D term damps on the measurement, never on the error derivative, so a
 //! target step does not kick the servo and no error history is stored. The
-//! integral is bounded in µm·s ([`ServoTuning::integ_clamp_um_s`]) so a stuck
+//! integral is bounded in µm·s (`ServoTuning::integ_clamp_um_s`) so a stuck
 //! or unloaded bone cannot wind it up; the slew cap bounds the change of the
 //! commanded velocity per tick, which is what removes the rest buzz the
 //! float PD left at its speed cap.
 //!
-//! Tuning is per rig, never per animation: [`ServoTuning::for_rig`] is one
-//! const row per [`Rig`], and the bone's own drive table still owns the caps
+//! Tuning is per rig, never per animation: `ServoTuning::for_rig` is one
+//! const row per `Rig`, and the bone's own drive table still owns the caps
 //! and the zero-gain limp rule.
 #![forbid(unsafe_code)]
 
@@ -72,7 +72,7 @@ impl Rig {
 /// One servo tuning row: the gains and bounds that belong to a rig. P and D
 /// come from the bone's drive table scaled here; I, the integral bound and
 /// the slew cap are the rig's own character.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct ServoTuning {
     /// Integral gain, Q8 1/s². 6.0 is 1536.
     pub i_q8: i32,
@@ -120,7 +120,7 @@ impl ServoTuning {
 }
 
 /// A bone's proportional and damping gains, 1/s and per-tick factor, before
-/// [`Servo`] turns them into Q8.
+/// `Servo` turns them into Q8.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gains {
     /// P gain, 1/s.
@@ -129,12 +129,76 @@ pub struct Gains {
     pub d: f32,
 }
 
+/// The constants of one [`Servo::step`] call, in the law's units. They come
+/// from the bone's drive table and the rig row, which do not change between
+/// ticks, so the Q8 decode and the one division run only when one of them
+/// does: the tick loop then multiplies, shifts and clamps only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+struct Law {
+    /// The call the constants were built from: the gain bits (not the floats,
+    /// so a NaN row compares equal to itself), the step, the cap and the row.
+    p_bits: u32,
+    d_bits: u32,
+    dt_us: i64,
+    cap_um_s: i32,
+    tuning: ServoTuning,
+    /// The constants.
+    p_q8: i64,
+    d_q8: i64,
+    k_q8: i64,
+    i_bound: i64,
+    cap: i64,
+    slew: i64,
+    valid: bool,
+}
+
+impl Law {
+    /// The constants of one call.
+    fn of(p_bits: u32, d_bits: u32, dt_us: i64, cap_um_s: i32, tuning: &ServoTuning) -> Self {
+        let i_q8 = i64::from(tuning.i_q8);
+        Self {
+            p_bits,
+            d_bits,
+            dt_us,
+            cap_um_s,
+            tuning: *tuning,
+            p_q8: to_q8(f32::from_bits(p_bits)),
+            d_q8: to_q8(f32::from_bits(d_bits)),
+            // The per-tick integral gain: i_q8 * dt, Q8, once per call.
+            k_q8: i_q8.saturating_mul(dt_us) / MICRO,
+            // The I term's bound in µm/s, the row's µm·s bound through the gain.
+            i_bound: (i_q8 * tuning.integ_clamp_um_s) >> 8,
+            cap: i64::from(cap_um_s.max(0)),
+            slew: i64::from(tuning.slew_um_s_tick.max(0)),
+            valid: dt_us > 0 && dt_us <= MAX_DT_US,
+        }
+    }
+
+    /// Whether these are the constants of that call.
+    fn is_for(
+        &self,
+        p_bits: u32,
+        d_bits: u32,
+        dt_us: i64,
+        cap_um_s: i32,
+        tuning: &ServoTuning,
+    ) -> bool {
+        self.p_bits == p_bits
+            && self.d_bits == d_bits
+            && self.dt_us == dt_us
+            && self.cap_um_s == cap_um_s
+            && self.tuning == *tuning
+    }
+}
+
 /// Three-axis PID state of one driven bone: the integral and the last
-/// commanded velocity per axis, so the next step can bound both.
+/// commanded velocity per axis, so the next step can bound both, plus the
+/// last call's constants (see `Law`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Servo {
     integ: [i64; 3],
     out: [i32; 3],
+    law: Law,
 }
 
 impl Servo {
@@ -143,6 +207,25 @@ impl Servo {
         Self {
             integ: [0; 3],
             out: [0; 3],
+            law: Law {
+                p_bits: 0,
+                d_bits: 0,
+                dt_us: 0,
+                cap_um_s: 0,
+                tuning: ServoTuning {
+                    i_q8: 0,
+                    integ_clamp_um_s: 0,
+                    integ_band_um: 0,
+                    slew_um_s_tick: 0,
+                },
+                p_q8: 0,
+                d_q8: 0,
+                k_q8: 0,
+                i_bound: 0,
+                cap: 0,
+                slew: 0,
+                valid: false,
+            },
         }
     }
 
@@ -186,6 +269,11 @@ impl Servo {
     /// `cap_um_s` the caller's speed cap. A step outside `(0, MAX_DT_US]`
     /// answers the P term only, leaving the integral, the last command and
     /// the slewed output untouched.
+    ///
+    /// The call's constants are built once and kept (see `Law`): a bone
+    /// whose drive table row, step and cap do not move pays neither the Q8
+    /// decode nor the division.
+    #[inline]
     pub fn step(
         &mut self,
         err: [i64; 3],
@@ -195,48 +283,53 @@ impl Servo {
         tuning: &ServoTuning,
         cap_um_s: i32,
     ) -> [i32; 3] {
-        let p_q8 = to_q8(gains.p);
-        let d_q8 = to_q8(gains.d);
-        let cap = i64::from(cap_um_s.max(0));
-        let i_q8 = i64::from(tuning.i_q8);
-        // The per-tick integral gain: i_q8 * dt, Q8, computed once per step.
-        let k_q8 = i_q8.saturating_mul(dt_us) / MICRO;
-        // The I term's bound in µm/s, the row's µm·s bound through the gain.
-        let i_bound = (i_q8 * tuning.integ_clamp_um_s) >> 8;
-        let slew = i64::from(tuning.slew_um_s_tick.max(0));
-        let valid = dt_us > 0 && dt_us <= MAX_DT_US;
+        let (p_bits, d_bits) = (gains.p.to_bits(), gains.d.to_bits());
+        if !self.law.is_for(p_bits, d_bits, dt_us, cap_um_s, tuning) {
+            self.law = Law::of(p_bits, d_bits, dt_us, cap_um_s, tuning);
+        }
+        let law = self.law;
         let mut out = [0i32; 3];
-        for (((e, v), integ), (slot, prev)) in err
-            .iter()
-            .zip(vel.iter())
-            .zip(self.integ.iter_mut())
-            .zip(out.iter_mut().zip(self.out.iter_mut()))
-        {
-            let e = (*e).clamp(-MAX_TERM, MAX_TERM);
-            let v = (*v).clamp(-MAX_TERM, MAX_TERM);
-            let p_term = (p_q8 * e) >> 8;
-            if !valid {
-                let raw = p_term.clamp(-cap, cap);
-                *slot = i32::try_from(raw).unwrap_or(0);
-                *prev = *slot;
-                continue;
+        if !law.valid {
+            // The P-only answer of a degenerate step: no integral, no slew.
+            for axis in 0..3 {
+                let e = err[axis].clamp(-MAX_TERM, MAX_TERM);
+                let raw = ((law.p_q8 * e) >> 8).clamp(-law.cap, law.cap);
+                out[axis] = i32::try_from(raw).unwrap_or(0);
+                self.out[axis] = out[axis];
             }
-            // Integral term, µm/s, accumulated per rig and only inside the
-            // band, so a get-up's travel cannot wind it up. `k_q8` folds the
-            // step into the gain once, so the tick loop has no division.
-            if e.abs() <= tuning.integ_band_um {
-                *integ = (*integ + ((k_q8 * e) >> 8)).clamp(-i_bound, i_bound);
-            }
-            let i_term = *integ;
-            // D on the measurement: a damping push against the measured rate.
-            let d_term = (d_q8 * v) >> 8;
-            let raw = (p_term + i_term - d_term).clamp(-cap, cap);
-            let slewed = i64::from(*prev) + (raw - i64::from(*prev)).clamp(-slew, slew);
-            *slot = i32::try_from(slewed).unwrap_or(0);
-            *prev = *slot;
+            return out;
+        }
+        for axis in 0..3 {
+            out[axis] = run_axis(
+                err[axis],
+                vel[axis],
+                &mut self.integ[axis],
+                self.out[axis],
+                law,
+            );
+            self.out[axis] = out[axis];
         }
         out
     }
+}
+
+/// One valid axis of [`Servo::step`]: P, the bounded integral inside its
+/// band, D against the measured rate, the cap and then the slew.
+#[inline]
+fn run_axis(e: i64, v: i64, integ: &mut i64, prev: i32, law: Law) -> i32 {
+    let e = e.clamp(-MAX_TERM, MAX_TERM);
+    let v = v.clamp(-MAX_TERM, MAX_TERM);
+    let p_term = (law.p_q8 * e) >> 8;
+    // Only inside the band, so a get-up's travel cannot wind it up; `k_q8`
+    // folds the step into the gain once per call, so this loop divides never.
+    if e.abs() <= law.tuning.integ_band_um {
+        *integ = (*integ + ((law.k_q8 * e) >> 8)).clamp(-law.i_bound, law.i_bound);
+    }
+    // D on the measurement: a damping push against the measured rate.
+    let d_term = (law.d_q8 * v) >> 8;
+    let raw = (p_term + *integ - d_term).clamp(-law.cap, law.cap);
+    let slewed = i64::from(prev) + (raw - i64::from(prev)).clamp(-law.slew, law.slew);
+    i32::try_from(slewed).unwrap_or(0)
 }
 
 /// A gain in Q8 (256 = 1.0), saturating at the term bound. Non-finite and
@@ -773,83 +866,274 @@ mod tests {
         }
     }
 
-    /// Loop cost of one law: `ITERS` ticks of three axes each, across four
-    /// bones so the harness measures throughput, as a rig does, and not one
-    /// servo's latency chain.
+    // ---- the accept's overhead leg: paired, alternating, same process -----
+
+    /// Three-axis steps in one arm run. Long enough that one sample is
+    /// milliseconds, not microseconds (the first bench timed 1000 steps, and
+    /// the same float arm then read 2.8 µs on one run and 5.2 on the next),
+    /// and short enough that both input sets stay in L2 (the integer set is
+    /// 48 B a step, the float one 24 B).
+    const ARM_STEPS: usize = 20_000;
+    /// Pairs timed; the first [`WARMUP_PAIRS`] are dropped.
+    const ARM_PAIRS: usize = 60;
+    const WARMUP_PAIRS: usize = 6;
+    /// The step the paired bench runs, s.
+    const ARM_DT_S: f32 = 1.0 / 60.0;
+    /// The bench cap in world units, m/s (8 m/s is [`CAP`] in µm/s).
+    const ARM_CAP: f32 = 8.0;
+
+    /// The same steps in both laws' own units: µm and µm/s for the integer
+    /// law, m and m/s for the float one. Built once, outside the timed loop,
+    /// so neither arm pays the boundary conversion the caller shares.
+    struct Inputs {
+        int: Vec<([i64; 3], [i64; 3])>,
+        flt: Vec<([f32; 3], [f32; 3])>,
+    }
+
+    impl Inputs {
+        fn new(steps: usize) -> Self {
+            let mut int = Vec::with_capacity(steps);
+            let mut flt = Vec::with_capacity(steps);
+            for i in 0..steps {
+                let e = i64::try_from(i % 1000).unwrap_or(0) * 1_000 - 500_000;
+                let v = i64::try_from(i % 97).unwrap_or(0) * 10_000 - 480_000;
+                let (ei, vi) = ([e, -e, e / 2], [v, -v, v / 2]);
+                int.push((ei, vi));
+                let mut ef = [0.0f32; 3];
+                let mut vf = [0.0f32; 3];
+                for a in 0..3 {
+                    ef[a] = world(ei[a]);
+                    vf[a] = world(vi[a]);
+                }
+                flt.push((ef, vf));
+            }
+            Self { int, flt }
+        }
+    }
+
+    /// One float PD arm run: the crate's own capped single-axis law, three
+    /// axes per step. The gains are the caller's (hoisted, as `drive_bone`
+    /// takes them once per bone), the inputs and the sum are black-boxed so
+    /// nothing is folded away.
     #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "a test-only ratio of two laws; the wall clock never enters the tick or the hash"
     )]
-    fn law_cost(law: Law, iters: usize) -> std::time::Duration {
-        let t = tuning();
-        let mut servos = [Servo::new(); 4];
-        let mut acc: i64 = 0;
-        let (_, kd) = pd::stable_gains(P, D, 1.0 / 60.0);
-        let gains = Gains { p: P, d: kd };
+    fn arm_pd(
+        steps: &[([f32; 3], [f32; 3])],
+        kp: f32,
+        kd: f32,
+        acc: &mut f64,
+    ) -> std::time::Duration {
         let start = std::time::Instant::now();
-        for i in 0..iters {
-            let err = i64::try_from(i % 1000).unwrap_or(0) * 1_000 - 500_000;
-            let vel = i64::try_from(i % 97).unwrap_or(0) * 10_000 - 480_000;
-            let bone = i & 3;
-            match law {
-                Law::Pd => {
-                    let dt = 1.0 / 60.0;
-                    let (kp, kd) = pd::stable_gains(P, D, dt);
-                    let (e, v0) = (world(err), world(vel));
-                    let raw = [
-                        pd::pd_raw(e, v0, kp, kd, dt),
-                        pd::pd_raw(-e, -v0, kp, kd, dt),
-                        pd::pd_raw(e / 2.0, v0 / 2.0, kp, kd, dt),
-                    ];
-                    let v = pd::clamp_vector(raw, 8.0);
-                    acc += to_micro(v[0]) + to_micro(v[1]) + to_micro(v[2]);
-                }
-                Law::Pid => {
-                    let out = servos[bone].step(
-                        [err, -err, err / 2],
-                        [vel, -vel, vel / 2],
-                        DT_US,
-                        gains,
-                        &t,
-                        CAP,
-                    );
-                    acc += i64::from(out[0]) + i64::from(out[1]) + i64::from(out[2]);
-                }
+        let mut sum = 0.0f64;
+        // The slice itself is opaque, so the inputs cannot be folded: the
+        // per-value `black_box` of the first bench forced a memory round-trip
+        // on every argument and measured that, not the law.
+        let steps = std::hint::black_box(steps);
+        for (e, v) in steps {
+            let mut out = [0.0f32; 3];
+            for a in 0..3 {
+                out[a] = pd::pd_axis(e[a], v[a], kp, kd, ARM_DT_S, ARM_CAP);
             }
+            sum += f64::from(out[0]) + f64::from(out[1]) + f64::from(out[2]);
         }
-        std::hint::black_box(acc);
-        start.elapsed()
+        let spent = start.elapsed();
+        *acc += std::hint::black_box(sum);
+        spent
     }
 
-    /// PX11 open: the integer law measured 1.27x the float PD law on one
-    /// GitHub runner run and 2.50x on another (the pd baseline itself swung
-    /// 3.4-11.1 ms for the same 300_000 three-axis steps, so the ratio is
-    /// rough). The accept is <= 10%, so this test stays ignored until the
-    /// integer law gets cheaper; it is not relaxed. Run it with
-    /// `--include-ignored --nocapture` to read the current ratio.
-    #[test]
-    #[ignore = "PX11 open: integer PID measured 1.27-2.50x the float PD law, accept is <=10%"]
-    fn servo_overhead_within_ten_percent() {
-        const ITERS: usize = 300_000;
-        // Warm both paths, then alternate and keep the best run of each so a
-        // loaded box cannot inflate the ratio.
-        law_cost(Law::Pd, ITERS / 10);
-        law_cost(Law::Pid, ITERS / 10);
-        let mut best_pd = std::time::Duration::MAX;
-        let mut best_pid = std::time::Duration::MAX;
-        for _ in 0..3 {
-            best_pd = best_pd.min(law_cost(Law::Pd, ITERS));
-            best_pid = best_pid.min(law_cost(Law::Pid, ITERS));
+    /// One integer PID arm run: four bones stepped in turn, as a rig walks a
+    /// bone list, so the harness measures throughput and not one servo's
+    /// latency chain.
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "a test-only ratio of two laws; the wall clock never enters the tick or the hash"
+    )]
+    fn arm_pid(
+        steps: &[([i64; 3], [i64; 3])],
+        t: &ServoTuning,
+        gains: Gains,
+        acc: &mut i64,
+    ) -> std::time::Duration {
+        let mut servos = [Servo::new(); 4];
+        let start = std::time::Instant::now();
+        let mut sum = 0i64;
+        let steps = std::hint::black_box(steps);
+        for (i, (e, v)) in steps.iter().enumerate() {
+            let out = servos[i & 3].step(*e, *v, DT_US, gains, t, CAP);
+            sum += i64::from(out[0]) + i64::from(out[1]) + i64::from(out[2]);
         }
-        let ratio = best_pid.as_secs_f64() / best_pd.as_secs_f64();
+        let spent = start.elapsed();
+        *acc += std::hint::black_box(sum);
+        spent
+    }
+
+    /// The float twin of the integer law: the same P clamp, the same integral
+    /// band and bound, D on the measurement, the same cap and slew, in world
+    /// units. It exists so the bench can separate the cost of fixed point from
+    /// the cost of PID semantics: the shipped float arm is a stateless PD law,
+    /// so the two are not the same computation.
+    struct FloatPid {
+        integ: [f32; 3],
+        out: [f32; 3],
+    }
+
+    impl FloatPid {
+        fn new() -> Self {
+            Self {
+                integ: [0.0; 3],
+                out: [0.0; 3],
+            }
+        }
+
+        fn step(
+            &mut self,
+            err: [f32; 3],
+            vel: [f32; 3],
+            dt_s: f32,
+            gains: Gains,
+            t: &ServoTuning,
+        ) -> [f32; 3] {
+            let i_gain = narrow(f64::from(t.i_q8)) / 256.0;
+            let band = from_micro(t.integ_band_um);
+            let bound = from_micro(t.integ_clamp_um_s);
+            let slew = from_micro(i64::from(t.slew_um_s_tick));
+            let cap = ARM_CAP;
+            // The integer law's saturation bound in world units, so both arms
+            // clamp on the same value (MAX_TERM is µm).
+            let lim = from_micro(MAX_TERM);
+            let mut out = [0.0f32; 3];
+            for a in 0..3 {
+                let e = err[a].clamp(-lim, lim);
+                let v = vel[a].clamp(-lim, lim);
+                let p_term = gains.p * e;
+                if e.abs() <= band {
+                    self.integ[a] = (self.integ[a] + i_gain * e * dt_s).clamp(-bound, bound);
+                }
+                let d_term = gains.d * v;
+                let raw = (p_term + self.integ[a] - d_term).clamp(-cap, cap);
+                let prev = self.out[a];
+                let slewed = prev + (raw - prev).clamp(-slew, slew);
+                self.out[a] = slewed;
+                out[a] = slewed;
+            }
+            out
+        }
+    }
+
+    /// One float PID arm run: the same four-bone walk as [`arm_pid`], so the
+    /// only difference between the arms is integer versus float arithmetic.
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "a test-only ratio of two laws; the wall clock never enters the tick or the hash"
+    )]
+    fn arm_pid_f32(
+        steps: &[([f32; 3], [f32; 3])],
+        t: &ServoTuning,
+        gains: Gains,
+        acc: &mut f32,
+    ) -> std::time::Duration {
+        let mut servos = [
+            FloatPid::new(),
+            FloatPid::new(),
+            FloatPid::new(),
+            FloatPid::new(),
+        ];
+        let start = std::time::Instant::now();
+        let mut sum = 0.0f32;
+        let steps = std::hint::black_box(steps);
+        for (i, (e, v)) in steps.iter().enumerate() {
+            let out = servos[i & 3].step(*e, *v, ARM_DT_S, gains, t);
+            sum += out[0] + out[1] + out[2];
+        }
+        let spent = start.elapsed();
+        *acc += std::hint::black_box(sum);
+        spent
+    }
+
+    /// Median, least and most of a sample.
+    fn spread(mut v: Vec<f64>) -> (f64, f64, f64) {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let least = v.first().copied().unwrap_or(0.0);
+        let median = v.get(v.len() / 2).copied().unwrap_or(0.0);
+        let most = v.last().copied().unwrap_or(0.0);
+        (median, least, most)
+    }
+
+    /// PX11's accept, overhead leg. Three arms, one process, one set of steps,
+    /// run alternately [`ARM_PAIRS`] times over [`ARM_STEPS`] three-axis steps
+    /// each after [`WARMUP_PAIRS`] dropped pairs:
+    ///
+    /// - the shipped float PD law of `pd.rs` (stateless, no integral),
+    /// - its float twin of the integer law ([`FloatPid`]: same integral band,
+    ///   bound, cap and slew), so fixed point is measured against the same
+    ///   computation and not against a cheaper one,
+    /// - the integer PID of this module.
+    ///
+    /// Two ratios come out. `pid / pd` is the accept's literal pair — the new
+    /// servo against the law it replaced, which also carries the cost of the
+    /// integral and the slew. `pid / pidf` is the cost of fixed point alone.
+    /// The report is the median with its least and most, never a single run.
+    ///
+    /// The accept stays a median `pid / pd` at or below 1.10; it is not met, so
+    /// the bench stays `#[ignore]`d and the row open. The wall clock never
+    /// enters the tick or the hash; run it with `cargo test -p engine-physics
+    /// --lib servo_overhead -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "PX11 open: the integer PID is over the accept's 1.10 against the float PD law; the bench prints both ratios"]
+    fn servo_overhead_within_ten_percent() {
+        let (_, kd) = pd::stable_gains(P, D, ARM_DT_S);
+        let gains = Gains { p: P, d: kd };
+        let t = tuning();
+        let steps = Inputs::new(ARM_STEPS);
+        let (mut pd_acc, mut pidf_acc, mut pid_acc) = (0.0f64, 0.0f32, 0i64);
+        for _ in 0..WARMUP_PAIRS {
+            arm_pd(&steps.flt, P, kd, &mut pd_acc);
+            arm_pid_f32(&steps.flt, &t, gains, &mut pidf_acc);
+            arm_pid(&steps.int, &t, gains, &mut pid_acc);
+        }
+        let mut pd_us = Vec::with_capacity(ARM_PAIRS);
+        let mut pidf_us = Vec::with_capacity(ARM_PAIRS);
+        let mut pid_us = Vec::with_capacity(ARM_PAIRS);
+        let mut ratios = Vec::with_capacity(ARM_PAIRS);
+        let mut same_law = Vec::with_capacity(ARM_PAIRS);
+        for _ in 0..ARM_PAIRS {
+            let pd = arm_pd(&steps.flt, P, kd, &mut pd_acc).as_secs_f64() * 1e6;
+            let pidf = arm_pid_f32(&steps.flt, &t, gains, &mut pidf_acc).as_secs_f64() * 1e6;
+            let pid = arm_pid(&steps.int, &t, gains, &mut pid_acc).as_secs_f64() * 1e6;
+            pd_us.push(pd);
+            pidf_us.push(pidf);
+            pid_us.push(pid);
+            ratios.push(pid / pd);
+            same_law.push(pid / pidf);
+        }
+        let (pd_med, pd_lo, pd_hi) = spread(pd_us);
+        let (pidf_med, pidf_lo, pidf_hi) = spread(pidf_us);
+        let (pid_med, pid_lo, pid_hi) = spread(pid_us);
+        let (r_med, r_lo, r_hi) = spread(ratios);
+        let (s_med, s_lo, s_hi) = spread(same_law);
+        println!("servo overhead: {ARM_PAIRS} pairs of {ARM_STEPS} three-axis steps");
+        println!("  float PD  median {pd_med:.1} µs  least {pd_lo:.1}  most {pd_hi:.1}");
+        println!("  float PID median {pidf_med:.1} µs  least {pidf_lo:.1}  most {pidf_hi:.1}");
+        println!("  integer   median {pid_med:.1} µs  least {pid_lo:.1}  most {pid_hi:.1}");
+        println!("  pid / pd  median {r_med:.3}  least {r_lo:.3}  most {r_hi:.3}  (accept pair)");
         println!(
-            "servo overhead: pid {:?} / pd {:?} = {ratio:.3} ({} ticks each)",
-            best_pid, best_pd, ITERS
+            "  pid / pidf median {s_med:.3}  least {s_lo:.3}  most {s_hi:.3}  (fixed point alone)"
+        );
+        println!("  sums      pd {pd_acc:.3} pidf {pidf_acc:.3} pid {pid_acc}");
+        println!(
+            "  per bone per tick: integer {:.4} µs, float PID {:.4} µs (4 bones in turn)",
+            pid_med * 1e3 / ARM_STEPS as f64,
+            pidf_med * 1e3 / ARM_STEPS as f64
         );
         assert!(
-            ratio <= 1.10,
-            "pid overhead {ratio:.3} exceeds 10%: pid {best_pid:?} pd {best_pd:?}"
+            r_med <= 1.10,
+            "integer PID overhead median {r_med:.3} over the range {r_lo:.3}-{r_hi:.3} \
+             exceeds 1.10: pid {pid_med:.1} µs, pd {pd_med:.1} µs (fixed point alone {s_med:.3})"
         );
     }
 }

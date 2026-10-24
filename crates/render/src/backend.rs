@@ -512,7 +512,7 @@ pub fn arena600_eye(frame: u32) -> [f32; 3] {
 }
 
 /// Deterministic digest over the whole orbit (the eye bytes fed through
-/// the shared [`crate::shadow_post::fnv1a64`] owner, no local copy of the
+/// the shared [`crate::types::fnv1a64`] owner, no local copy of the
 /// constants): the x2 harness asserts this plus draws plus validation errors.
 #[must_use]
 pub fn arena600_digest() -> String {
@@ -524,7 +524,7 @@ pub fn arena600_digest() -> String {
         }
     }
     // Cold receipt path: one small buffer per harness run, never on a frame.
-    format!("{:016x}", crate::shadow_post::fnv1a64(&bytes))
+    format!("{:016x}", crate::types::fnv1a64(&bytes))
 }
 
 /// p50/p95/p99 in ms over one pass sample set. Pure over the samples.
@@ -941,7 +941,7 @@ mod tests {
         bytes[0..4].copy_from_slice(&eye[0].to_le_bytes());
         bytes[4..8].copy_from_slice(&eye[1].to_le_bytes());
         bytes[8..12].copy_from_slice(&eye[2].to_le_bytes());
-        std::hint::black_box(crate::shadow_post::fnv1a64(&bytes));
+        std::hint::black_box(crate::types::fnv1a64(&bytes));
         start.elapsed().as_secs_f64() * 1000.0
     }
 

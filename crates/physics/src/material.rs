@@ -5,8 +5,8 @@
 //!   ragdoll bones, limbs and debris, and grip for their contacts;
 //! - the authority walker (`controller2::Config::on`): grip (ground acceleration) and the step
 //!   height of the ground it stands on, all integers;
-//! - the audio cue picker ([`Material::cue`]): which [`SoundClass`] an impact makes and how
-//!   [`Loudness`] it is. It names a cue; it plays nothing.
+//! - the audio cue picker (`Material::cue`): which `SoundClass` an impact makes and how
+//!   `Loudness` it is. It names a cue; it plays nothing.
 //!
 //! Every number is an integer (thousandths for the coefficients) and the `f32` accessors only
 //! divide, so integer authority code and float presentation read the very same values.
@@ -73,7 +73,7 @@ pub struct Cue {
     pub loudness: Loudness,
 }
 
-/// Impact speeds, millimeters per second, where [`Loudness`] steps up: below the first nothing is
+/// Impact speeds, millimeters per second, where `Loudness` steps up: below the first nothing is
 /// heard, then soft, medium and hard.
 pub const LOUDNESS_STEPS_MM_S: [u32; 3] = [400, 1_500, 4_000];
 
@@ -180,7 +180,7 @@ impl Material {
     }
 
     /// The cue for an impact on this material at `impact_speed_mm_s` (the closing speed along
-    /// the contact normal): the material's [`SoundClass`] at the [`Loudness`] the speed earns.
+    /// the contact normal): the material's `SoundClass` at the `Loudness` the speed earns.
     pub const fn cue(self, impact_speed_mm_s: u32) -> Cue {
         Cue {
             class: self.sound(),
@@ -189,7 +189,7 @@ impl Material {
     }
 }
 
-/// The [`Loudness`] of an impact at `speed_mm_s`.
+/// The `Loudness` of an impact at `speed_mm_s`.
 pub const fn loudness(speed_mm_s: u32) -> Loudness {
     if speed_mm_s < LOUDNESS_STEPS_MM_S[0] {
         Loudness::Silent

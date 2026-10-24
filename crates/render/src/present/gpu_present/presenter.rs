@@ -127,6 +127,10 @@ pub struct Presenter {
     pub(crate) surface_config: Option<wgpu::SurfaceConfiguration>,
     pub(crate) swap: v1::SwapState,
     pub(crate) targets: Option<Targets>,
+    /// A3: the debug G-buffer a `debug_capture` renders into. `None` until the
+    /// first capture asks for it and after `clear_debug_targets`; a size change
+    /// rebuilds it. No live frame reads or writes it.
+    pub(crate) debug_targets: Option<crate::present::gpu_present::debug_gbuffer::DebugTargets>,
     pub(crate) cam_buf: wgpu::Buffer,
     /// LF5: the previous frame's view-projection (binding 21), a frame behind `cam_buf`.
     pub(crate) prev_cam_buf: wgpu::Buffer,
@@ -251,6 +255,14 @@ pub struct Presenter {
     /// and its one-frame-late readback. Built once with the device; the
     /// steady frame only dispatches and reads.
     pub(super) auto_exp_gpu: super::auto_exposure_gpu::AutoExposureGpu,
+    /// The look table on the GPU (E11): uploaded by [`Self::set_look`] once
+    /// per table, dropped when the chain's look clears. The frame loop never
+    /// re-uploads; the shader fetch is the shader owner's change.
+    pub(super) lut: super::lut_upload::LutSlot,
+    /// The look-table display pass (E11): the fullscreen triangle that reads
+    /// the graded frame, samples the bound table and writes the display
+    /// frame. Only recorded when a table is bound.
+    pub(super) lut_pass: super::lut_upload::LutPresentPass,
     /// The adapted stops: the meter state the frame ticks. One state per
     /// presenter, carried across frames.
     pub(crate) auto_exp_state: crate::post::AutoExposure,
@@ -1218,6 +1230,8 @@ impl Presenter {
             bloom_gpu: super::bloom_dual::BloomDualGpu::new(&device),
             contact_strength: 1.0,
             auto_exp_gpu: super::auto_exposure_gpu::AutoExposureGpu::new(&device, &queue),
+            lut: super::lut_upload::LutSlot::new(),
+            lut_pass: super::lut_upload::LutPresentPass::new(&device),
             auto_exp_state: crate::post::AutoExposure::default(),
             auto_exp_hist: None,
             auto_exp_enabled: false,
@@ -1292,6 +1306,7 @@ impl Presenter {
             surface_config: None,
             swap: v1::SwapState::new(0, 0),
             targets: None,
+            debug_targets: None,
             cam_buf,
             prev_cam_buf,
             prev_cam_bytes: None,

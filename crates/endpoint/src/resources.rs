@@ -62,6 +62,98 @@ pub const RESOURCE_MIME: &str = "text/plain";
 /// this is a bug in the producer, not a big answer.
 pub const MAX_RESOURCE_CHARS: usize = 256 * 1024;
 
+/// URI root of the receipts a verb publishes by reference: `<root>/<id>`.
+/// A receipt row is one full body a verb answered with a short summary of, so
+/// a client fetches the whole thing with `resources/read` instead of asking
+/// again with narrower arguments (OPT58).
+pub const RECEIPT_URI_ROOT: &str = "e2040://receipt";
+
+/// Most receipt rows one session keeps. The oldest drops first, so a bounded
+/// table of answers never grows without limit; a dropped row reads as absent
+/// and the verb answers with the summary alone.
+pub const RECEIPT_ROWS: usize = 8;
+
+/// One bounded table of the full bodies a verb answered with a summary.
+///
+/// The row id is the FNV-64 of the body, so one body always publishes the same
+/// URI and a read is byte-identical every time. No clock and no address enters
+/// the id, so the same call publishes the same row on every run.
+#[derive(Debug, Clone, Default)]
+pub struct ReceiptStore {
+    rows: Vec<(String, String)>,
+}
+
+impl ReceiptStore {
+    /// Empty table.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { rows: Vec::new() }
+    }
+
+    /// Publish one full body and return the URI that reads it back.
+    pub fn publish(&mut self, body: &str) -> String {
+        let uri = format!("{RECEIPT_URI_ROOT}/{}", hash_hex(body.as_bytes()));
+        if let Some((_, held)) = self.rows.iter_mut().find(|(known, _)| *known == uri) {
+            held.clear();
+            held.push_str(body);
+            return uri;
+        }
+        if self.rows.len() >= RECEIPT_ROWS {
+            self.rows.remove(0);
+        }
+        self.rows.push((uri.clone(), body.to_owned()));
+        uri
+    }
+
+    /// The body published under `uri`, if this session still holds it.
+    #[must_use]
+    pub fn read(&self, uri: &str) -> Option<&str> {
+        self.rows
+            .iter()
+            .find(|(known, _)| known == uri)
+            .map(|(_, body)| body.as_str())
+    }
+
+    /// Rows held.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// True when no receipt is held.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// True when the URI names a receipt row, not one of the static families.
+#[must_use]
+pub fn is_receipt_uri(uri: &str) -> bool {
+    uri.strip_prefix(RECEIPT_URI_ROOT)
+        .is_some_and(|rest| rest.len() > 1 && rest.starts_with('/'))
+}
+
+/// The wire contents of one receipt body.
+#[must_use]
+pub fn receipt_contents(uri: &str, text: String) -> ResourceContents {
+    ResourceContents::text(text, uri).with_mime_type(RESOURCE_MIME)
+}
+
+impl crate::mcp::McpServer {
+    /// Read one receipt body by URI: the fetch side of the `resource_uri` a
+    /// verb prints beside its summary. `None` means this session never
+    /// published it, or its row already dropped from the bounded table.
+    #[must_use]
+    pub fn receipt_text(&self, uri: &str) -> Option<String> {
+        if !is_receipt_uri(uri) {
+            return None;
+        }
+        let state = self.lock_read().ok()?;
+        state.receipt_text(uri).map(str::to_owned)
+    }
+}
+
 /// Why a resource request refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceError {

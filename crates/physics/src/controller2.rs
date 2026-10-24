@@ -11,7 +11,7 @@
 //! slices, so the same world plus the same inputs replay byte-identically on
 //! every PC. No floats, no `sin`/`cos`/`sqrt`, no wall clock, no hash-map
 //! order. Pass world slices in a stable (for example id-sorted) order.
-//! Errors are [`ProbeError`]; per-tick input is clamped, never panics.
+//! Errors are `ProbeError`; per-tick input is clamped, never panics.
 //!
 //! Donor shapes (reimplemented, never vendored): `bevy-tnua` step / slope /
 //! coyote-buffer timing plus moving-platform ride and ledge detect; the
@@ -268,7 +268,7 @@ pub struct Walker {
     /// Remaining jump-buffer ticks.
     pub buffer_ticks: u32,
     /// Travel under one millimetre carried to the next tick, `[x, y, z]` in mm/s units
-    /// (`|lane| < TICKS_PER_S`); see [`travel`].
+    /// (`|lane| < TICKS_PER_S`); see `travel`.
     pub carry: [i32; 3],
 }
 

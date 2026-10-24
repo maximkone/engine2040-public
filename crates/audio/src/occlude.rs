@@ -7,6 +7,15 @@
 //! is the lowest of the crossed walls' material cutoffs and the air cutoff
 //! of the path length ([`Muffle`]); the mixer applies it as a one-pole
 //! lowpass ([`crate::Mixer::set_voice_lowpass`]).
+//!
+//! Soft edges (card §5.1, Steam Audio `path_visibility.cpp`: "a set of
+//! numSamples points are generated ... numVisibleSamples / mSamples.size(0)"):
+//! a voice is a disc of [`SOURCE_RADIUS_CM`], and each wall keeps only the
+//! share of that disc it hides. The share is solved in closed form from the
+//! two boundary rays through the wall's ends, so a voice walking past a
+//! corner fades instead of stepping to the full table loss; a voice deep
+//! behind a wall still reads exactly the table loss. The closed form is the
+//! cheaper of the card's two readings (no 64 ray casts per voice).
 //! Determinism: integer-only query plus slew; same inputs give the same gain
 //! curve (presentation only, never hashed; golden d57b5c8ae3096614 stands).
 //! Errors: typed OccludeError; the per-tick path clamps, setters refuse.
@@ -46,6 +55,12 @@ pub const CUTOFF_RISE_STEP_HZ: u32 = OPEN_CUTOFF_HZ * TICK_US / (RELEASE_MS * 10
 pub const BUDGET_MS_PER_VOICE: f32 = 0.1;
 /// Largest occluder set one query walks; bounds the per-tick cost.
 pub const MAX_WALLS_PER_QUERY: usize = 256;
+/// Source aperture radius in cm: the voice counts as a disc this wide when
+/// the query asks how much of it clears a wall edge. Half a metre covers a
+/// fighter's shoulders plus the spread of a shouted line; it is also the
+/// sampling radius of the card's Steam Audio probe, so the 64-ray reference
+/// and the closed form measure the same disc.
+pub const SOURCE_RADIUS_CM: i64 = 50;
 
 /// Sand absorption in Q16 (0.2): a sand wall passes 0.8 (-1.94 dB).
 pub const SAND_ABSORB_Q16: i32 = 13_107;
@@ -237,10 +252,13 @@ pub fn segments_cross(p: [i32; 2], q: [i32; 2], r: [i32; 2], s: [i32; 2]) -> boo
 
 /// Muffled target for a voice at `voice_cm` heard at `listener_cm`
 /// (integer-cm floor plane, `[x east, z south]`) against `walls`.
-/// Each crossed wall multiplies the running gain (slice order cannot change
-/// the product). Zero-length walls contribute nothing; a voice at the
-/// listener's ears is unoccluded. Same inputs give the same gain on every
-/// call, so replays chart the same curve.
+/// Each wall multiplies the running gain by its material transmission plus
+/// the share of the source disc that clears its edges
+/// ([`SOURCE_RADIUS_CM`], [`wall_shadow_q16`]); a voice deep behind a wall
+/// reads exactly the table loss, and one at a wall's edge reads half of it.
+/// Slice order cannot change the product. Zero-length walls contribute
+/// nothing; a voice at the listener's ears is unoccluded. Same inputs give
+/// the same gain curve on every call, so replays chart the same curve.
 ///
 /// Errors: [`OccludeError::TooManyWalls`] when the set is larger than
 /// [`MAX_WALLS_PER_QUERY`].
@@ -250,6 +268,96 @@ pub fn target_gain_q16(
     walls: &[Wall],
 ) -> Result<i32, OccludeError> {
     Ok(target_muffle(voice_cm, listener_cm, walls)?.gain_q16)
+}
+
+/// |cross| / |edge| in cm: the perpendicular distance from the voice to the
+/// boundary ray through one wall end. Saturates far away, where the caller
+/// has already rejected the wall.
+fn edge_distance_cm(cross: i128, edge_len_sq: i64) -> i64 {
+    let len = crate::isqrt(edge_len_sq.unsigned_abs()).max(1);
+    let quotient = cross.unsigned_abs() / u128::from(len);
+    let Ok(cm) = i64::try_from(quotient) else {
+        return i64::MAX;
+    };
+    cm
+}
+
+/// Q16 share of the source disc of radius [`SOURCE_RADIUS_CM`] that `wall`
+/// hides from `listener_cm`, 0 (disc fully clear) .. [`GAIN_ONE`] (disc fully
+/// hidden). The share is linear in the distance from the voice to the nearest
+/// boundary ray through a wall end: half at the edge (the disc straddles it),
+/// all of it one radius behind. That ramp is the closed form of the card's
+/// sampled visible fraction; it keeps the query continuous as the voice walks
+/// past a corner. A wall crossed far from both ends hides the whole disc.
+fn wall_shadow_q16(voice_cm: [i32; 2], listener_cm: [i32; 2], wall: &Wall) -> i32 {
+    let v = [
+        i64::from(voice_cm[0]) - i64::from(listener_cm[0]),
+        i64::from(voice_cm[1]) - i64::from(listener_cm[1]),
+    ];
+    let ends = [
+        [
+            i64::from(wall.ax_cm) - i64::from(listener_cm[0]),
+            i64::from(wall.az_cm) - i64::from(listener_cm[1]),
+        ],
+        [
+            i64::from(wall.bx_cm) - i64::from(listener_cm[0]),
+            i64::from(wall.bz_cm) - i64::from(listener_cm[1]),
+        ],
+    ];
+    let crossed = segments_cross(
+        voice_cm,
+        listener_cm,
+        [wall.ax_cm, wall.az_cm],
+        [wall.bx_cm, wall.bz_cm],
+    );
+    let mut nearest: Option<i64> = None;
+    for end in ends {
+        let len_sq = end[0]
+            .saturating_mul(end[0])
+            .saturating_add(end[1].saturating_mul(end[1]));
+        if len_sq == 0 {
+            continue;
+        }
+        let cross = i128::from(end[0]) * i128::from(v[1]) - i128::from(end[1]) * i128::from(v[0]);
+        let distance = edge_distance_cm(cross, len_sq);
+        if distance < SOURCE_RADIUS_CM {
+            nearest = Some(nearest.map_or(distance, |known: i64| known.min(distance)));
+        }
+    }
+    let Some(distance) = nearest else {
+        // Both boundary rays are a radius or more away: the wall either
+        // covers the disc or misses it.
+        return if crossed { GAIN_ONE } else { 0 };
+    };
+    let swing = i64::from(GAIN_ONE) * distance / (2 * SOURCE_RADIUS_CM);
+    let half = i64::from(GAIN_ONE / 2);
+    let shadow = if crossed { half + swing } else { half - swing };
+    let Ok(shadow_q16) = i32::try_from(shadow.clamp(0, i64::from(GAIN_ONE))) else {
+        return GAIN_ONE;
+    };
+    shadow_q16
+}
+
+/// Q16 multiply-shift of two gains: `(a * b) >> 16`, clamped into range.
+/// The result of two in-range Q16 values never overflows the i32.
+fn mul_q16(a_q16: i32, b_q16: i32) -> i32 {
+    let product = (i64::from(a_q16) * i64::from(b_q16)) >> 16;
+    let Ok(product_q16) = i32::try_from(product.clamp(0, i64::from(GAIN_ONE))) else {
+        return GAIN_ONE;
+    };
+    product_q16
+}
+
+/// Q16 transmission of one wall over the clear share of the source disc:
+/// `pass + (ONE - pass) * (ONE - shadow)`. A fully shadowed wall is exactly
+/// [`transmission_q16`], so the old table still governs closed rooms.
+fn blend_wall(pass_q16: i32, shadow_q16: i32) -> i32 {
+    let clear = i64::from(GAIN_ONE - shadow_q16.clamp(0, GAIN_ONE));
+    let blended = i64::from(pass_q16) + ((i64::from(GAIN_ONE - pass_q16) * clear) >> 16);
+    let Ok(blended_q16) = i32::try_from(blended.clamp(0, i64::from(GAIN_ONE))) else {
+        return GAIN_ONE;
+    };
+    blended_q16
 }
 
 /// What the path from a voice to the listener leaves of it: level and
@@ -272,8 +380,9 @@ impl Muffle {
 
 /// [`target_gain_q16`] plus the cutoff: the gain is the same product, the
 /// cutoff the lowest of the air cutoff for the path length and the cutoff of
-/// every crossed wall (the darkest wall wins; walls do not stack their
-/// filters). Same errors and the same degenerate cases as the gain query.
+/// every wall that hides at least half the source disc (the darkest wall
+/// wins; walls do not stack their filters). Same errors and the same
+/// degenerate cases as the gain query.
 ///
 /// Errors: [`OccludeError::TooManyWalls`] when the set is larger than
 /// [`MAX_WALLS_PER_QUERY`].
@@ -300,17 +409,16 @@ pub fn target_muffle(
         if wall.ax_cm == wall.bx_cm && wall.az_cm == wall.bz_cm {
             continue;
         }
-        if segments_cross(
-            voice_cm,
-            listener_cm,
-            [wall.ax_cm, wall.az_cm],
-            [wall.bx_cm, wall.bz_cm],
-        ) {
-            gain = apply_wall(gain, wall.material);
+        let shadow = wall_shadow_q16(voice_cm, listener_cm, wall);
+        if shadow == 0 {
+            continue;
+        }
+        gain = mul_q16(gain, blend_wall(transmission_q16(wall.material), shadow));
+        if shadow > GAIN_ONE / 2 {
             cutoff = cutoff.min(cutoff_hz(wall.material));
-            if gain == 0 {
-                break;
-            }
+        }
+        if gain == 0 {
+            break;
         }
     }
     Ok(Muffle {
@@ -522,11 +630,15 @@ mod tests {
 
     #[test]
     fn touching_endpoint_counts_as_blocked() {
-        // Wall corner exactly on the path: inclusive touch still muffles.
+        // Wall corner exactly on the path: the voice disc straddles the edge,
+        // so the touch still muffles, but only by half the table loss
+        // (stone passes 0.4; half the disc clear gives 0.7 -> 45875). The
+        // old hard ray read the full 26214 here, which is the step this row
+        // removes.
         let touch = [Wall::new(250, 0, 250, 500, Material::Stone)];
         assert_eq!(
             target_gain_q16([500, 0], [0, 0], &touch).expect("touch queries"),
-            26_214
+            45_875
         );
     }
 
@@ -931,5 +1043,213 @@ mod tests {
         assert_eq!(occ.current_cutoff_hz(), air_cutoff_hz(500));
         occ.reset_open();
         assert_eq!(occ.current_cutoff_hz(), OPEN_CUTOFF_HZ);
+    }
+
+    // ---- soft edges (card §5.1): the corner fade ------------------------
+
+    /// L corner of 1 m stone arms meeting at the origin: one east (+x), one
+    /// south (+z). The listener sits north-west, the voice 2 m south-east, so
+    /// the straight path crosses the east arm 33 cm from the corner.
+    fn stone_corner() -> [Wall; 2] {
+        [
+            Wall::new(0, 0, 100, 0, Material::Stone),
+            Wall::new(0, 0, 0, 100, Material::Stone),
+        ]
+    }
+    const CORNER_LISTENER: [i32; 2] = [-150, -150];
+    const CORNER_VOICE: [i32; 2] = [180, 120];
+
+    fn gain_db(gain: f64) -> f64 {
+        20.0 * gain.log10()
+    }
+
+    /// The 64-ray reference: 64 points on the [`SOURCE_RADIUS_CM`] circle
+    /// around the voice, each joined to the listener by one straight segment;
+    /// the gain is the mean of the same wall-loss table over those 64 paths
+    /// (the card's `numVisibleSamples / mSamples.size(0)`, sampled densely).
+    fn reference_gain_64(voice: [i32; 2], listener: [i32; 2], walls: &[Wall]) -> f64 {
+        const RAYS: u32 = 64;
+        let radius = f64::from(i32::try_from(SOURCE_RADIUS_CM).expect("radius fits"));
+        let mut sum = 0.0_f64;
+        for ray in 0..RAYS {
+            let turn = std::f64::consts::TAU * f64::from(ray) / f64::from(RAYS);
+            let sample = [
+                voice[0] + (radius * turn.cos()).round() as i32,
+                voice[1] + (radius * turn.sin()).round() as i32,
+            ];
+            let mut gain = 1.0_f64;
+            for wall in walls {
+                if segments_cross(
+                    sample,
+                    listener,
+                    [wall.ax_cm, wall.az_cm],
+                    [wall.bx_cm, wall.bz_cm],
+                ) {
+                    gain *= f64::from(transmission_q16(wall.material)) / f64::from(GAIN_ONE);
+                }
+            }
+            sum += gain;
+        }
+        sum / f64::from(RAYS)
+    }
+
+    #[test]
+    fn corner_fade_is_within_3_db_of_the_64_ray_reference() {
+        let walls = stone_corner();
+        let query = target_muffle(CORNER_VOICE, CORNER_LISTENER, &walls).expect("corner queries");
+        let ours = f64::from(q16_to_gain(query.gain_q16));
+        let reference = reference_gain_64(CORNER_VOICE, CORNER_LISTENER, &walls);
+        let error_db = gain_db(ours) - gain_db(reference);
+        println!(
+            "corner: 64-ray {reference:.4} ({:.2} dB), query {ours:.4} ({:.2} dB), off {error_db:+.2} dB",
+            gain_db(reference),
+            gain_db(ours)
+        );
+        assert!(
+            reference > 0.2 && reference < 0.9,
+            "the reference must sit between the open and full-loss ends, got {reference:.4}"
+        );
+        assert!(
+            error_db.abs() <= 3.0,
+            "corner gain {ours:.4} is {error_db:+.2} dB from the 64-ray reference {reference:.4}"
+        );
+        // Softer than the full stone table loss, well under open.
+        assert!(query.gain_q16 > 26_214 && query.gain_q16 < GAIN_ONE);
+        // Same bar on the way in, where the fade actually lives: voices just
+        // inside the corner's shadow boundary (the fade band), 3 m out.
+        let mut worst = 0.0_f64;
+        for step in 0..8 {
+            let turn = std::f64::consts::FRAC_PI_4 + 0.02 * f64::from(step);
+            let voice = [
+                CORNER_LISTENER[0] + (300.0 * turn.cos()).round() as i32,
+                CORNER_LISTENER[1] + (300.0 * turn.sin()).round() as i32,
+            ];
+            let ours = f64::from(q16_to_gain(
+                target_gain_q16(voice, CORNER_LISTENER, &walls).expect("band queries"),
+            ));
+            let reference = reference_gain_64(voice, CORNER_LISTENER, &walls);
+            let error = gain_db(ours) - gain_db(reference);
+            println!(
+                "corner band {turn:.3} rad: 64-ray {reference:.4} ({:.2} dB), query {ours:.4} ({:.2} dB), off {error:+.2} dB",
+                gain_db(reference),
+                gain_db(ours)
+            );
+            worst = worst.max(error.abs());
+        }
+        assert!(
+            worst <= 3.0,
+            "fade band is {worst:.2} dB from the reference"
+        );
+    }
+
+    #[test]
+    fn walking_past_the_corner_never_steps_to_full_loss() {
+        // The voice walks 64 steps on a 6 m arc around the listener, from the
+        // open east side, past the corner, into the arm-B shadow. The single
+        // straight ray stepped 7.96 dB or more per step here (open 1.0 to the
+        // stone 0.4 table value); the soft edge must stay under 2 dB a step.
+        const STEPS: u32 = 64;
+        const WORST_STEP_DB: f64 = 2.0;
+        let walls = stone_corner();
+        let radius = 600.0_f64;
+        let mut previous: Option<f64> = None;
+        let mut worst = 0.0_f64;
+        let mut lowest = 1.0_f64;
+        for step in 0..=STEPS {
+            let turn = std::f64::consts::FRAC_PI_3 * f64::from(step) / f64::from(STEPS)
+                + std::f64::consts::PI / 9.0;
+            let voice = [
+                CORNER_LISTENER[0] + (radius * turn.cos()).round() as i32,
+                CORNER_LISTENER[1] + (radius * turn.sin()).round() as i32,
+            ];
+            let gain = f64::from(q16_to_gain(
+                target_gain_q16(voice, CORNER_LISTENER, &walls).expect("walk queries"),
+            ));
+            lowest = lowest.min(gain);
+            if let Some(before) = previous {
+                worst = worst.max((gain_db(gain) - gain_db(before)).abs());
+            }
+            previous = Some(gain);
+        }
+        println!("corner walk: worst step {worst:.3} dB, lowest gain {lowest:.4}");
+        assert!(
+            lowest < 0.42,
+            "the walk must reach the full stone table loss (0.4) at least once, got {lowest:.4}"
+        );
+        assert!(
+            worst <= WORST_STEP_DB,
+            "worst step {worst:.2} dB exceeds the {WORST_STEP_DB} dB curve limit"
+        );
+    }
+
+    #[test]
+    fn open_door_around_the_corner_keeps_the_wall_loss() {
+        // A doorway (two stone jambs with a 100 cm opening) sits in a wall
+        // behind the voice, around the corner from the listener. An open door
+        // there must not become a propagation path: the reading stays the
+        // corner's wall loss. A closed leaf in the same opening (the same
+        // geometry, door shut) reads the same, i.e. it attenuates as today.
+        let door_wall = |ax, az, bx, bz| Wall::new(ax, az, bx, bz, Material::Stone);
+        // Doorway in the arm-A line, past the corner from the listener: two
+        // jambs with a 1 m opening between them.
+        let doorway = [door_wall(200, 0, 300, 0), door_wall(400, 0, 500, 0)];
+        let closed_leaf = door_wall(300, 0, 400, 0);
+        let mut open = [Wall::new(0, 0, 0, 0, Material::Stone); 4];
+        open[..2].copy_from_slice(&stone_corner());
+        open[2..].copy_from_slice(&doorway);
+        let mut shut = [Wall::new(0, 0, 0, 0, Material::Stone); 5];
+        shut[..4].copy_from_slice(&open);
+        shut[4] = closed_leaf;
+        let without = target_muffle(CORNER_VOICE, CORNER_LISTENER, &stone_corner())
+            .expect("corner queries")
+            .gain_q16;
+        let door_open = target_muffle(CORNER_VOICE, CORNER_LISTENER, &open)
+            .expect("open doorway queries")
+            .gain_q16;
+        let door_shut = target_muffle(CORNER_VOICE, CORNER_LISTENER, &shut)
+            .expect("closed doorway queries")
+            .gain_q16;
+        println!("corner door: no door {without}, open {door_open}, shut {door_shut}");
+        assert_eq!(door_open, without, "an open door leaks nothing here");
+        assert_eq!(door_shut, without, "a shut door attenuates as today");
+        assert!(door_open < GAIN_ONE, "the corner wall still costs its loss");
+    }
+
+    #[test]
+    fn soft_edge_cost_stays_under_the_voice_budget() {
+        // 64-wall street scene, 10_000 queries: mean time per query must stay
+        // under BUDGET_MS_PER_VOICE. Wall clock lives only in this probe,
+        // never in the query path. The number printed is a mean, not a speed
+        // claim for a particular machine.
+        let mut walls = [Wall::new(0, 0, 0, 0, Material::Stone); 64];
+        for (i, wall) in walls.iter_mut().enumerate() {
+            let x = 100 + (i as i32) * 25;
+            *wall = Wall::new(
+                x,
+                -600,
+                x,
+                600,
+                match i % 4 {
+                    0 => Material::Sand,
+                    1 => Material::Wood,
+                    2 => Material::Stone,
+                    _ => Material::Cloth,
+                },
+            );
+        }
+        let rounds = 10_000u32;
+        let start = std::time::Instant::now();
+        let mut folded = 0i32;
+        for _ in 0..rounds {
+            folded ^= target_gain_q16([900, 40], [0, 0], &walls).expect("64 walls fit the cap");
+        }
+        std::hint::black_box(folded);
+        let mean_ms = start.elapsed().as_secs_f64() * 1000.0 / f64::from(rounds);
+        println!("soft-edge query mean {mean_ms:.5} ms over {rounds} queries (64 walls)");
+        assert!(
+            mean_ms < f64::from(BUDGET_MS_PER_VOICE),
+            "mean {mean_ms:.5} ms per voice over the {} ms budget",
+            BUDGET_MS_PER_VOICE
+        );
     }
 }

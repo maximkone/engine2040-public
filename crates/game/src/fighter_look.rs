@@ -25,7 +25,7 @@ use engine_anim::contract::{skinning_matrices, LocalPose, Skeleton};
 use engine_anim::hit_react::{lean_upper, view_envelope, DIP_M, PEAK_M};
 use engine_anim::inertial::Inertial;
 use engine_anim::pose::sample_pose_with_rots;
-use engine_arena::cloth::{Cloth, ClothCollider, ClothGrid, ClothParams, ClothTier};
+use engine_arena::cloth::{Cloth, ClothCollider, ClothParams, ClothTier};
 use engine_arena::GaitPhase;
 use engine_assets::asset_source::{AssetSource, FsSource};
 use engine_assets::body_import::{
@@ -33,7 +33,6 @@ use engine_assets::body_import::{
 };
 use engine_assets::retarget::{retarget_clip, BoneMap};
 use engine_assets::skin_import::ImportedClip;
-use engine_core::vec3::cross3;
 use engine_core::Fnv64;
 use engine_render::contact_feet::{ContactFoot, CONTACT_FEET_MAX};
 use engine_render::draw::{trail_strip_verts, TrailStripVert};
@@ -255,6 +254,13 @@ struct CapePose {
     bodies: (usize, usize),
 }
 
+/// PX44c: the soft-cloth capes and the switch that draws them instead of the RZ7 chain.
+#[path = "fighter_look_soft_cape.rs"]
+mod fighter_look_soft_cape;
+
+use self::fighter_look_soft_cape::{cape_mesh_at, SOFT_CAPE_COLS, SOFT_CAPE_ROWS};
+use self::fighter_look_soft_cape::{soft_cape_switch, SoftCape};
+
 /// The cape layer of a [`FighterLook`]: one Verlet sheet per look slot.
 struct Capes {
     /// Per rig: the joints its capes pin to, `None` when the rig has none.
@@ -275,6 +281,8 @@ struct Capes {
     stepped: usize,
     /// Cape keys uploaded for the last frame, one per drawn cape.
     published: Vec<MeshKey>,
+    /// PX44c: the soft-cloth capes when the switch is on, `None` on the RZ7 chain.
+    soft: Option<SoftCape>,
 }
 
 impl Capes {
@@ -305,6 +313,11 @@ impl Capes {
             row: Vec::new(),
             stepped: 0,
             published: Vec::new(),
+            soft: if soft_cape_switch() {
+                Some(SoftCape::new())
+            } else {
+                None
+            },
         }
     }
 }
@@ -344,69 +357,6 @@ fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// One unit normal of the cloth at vertex `(c, r)`, turned onto `outward`'s
-/// side so the cape's face points away from the body it hangs behind.
-fn cape_normal(
-    at: impl Fn(usize, usize) -> [f32; 3],
-    cols: usize,
-    rows: usize,
-    c: usize,
-    r: usize,
-    outward: [f32; 3],
-) -> [f32; 3] {
-    let right = sub3(at((c + 1).min(cols - 1), r), at(c.saturating_sub(1), r));
-    let down = sub3(at(c, (r + 1).min(rows - 1)), at(c, r.saturating_sub(1)));
-    let mut n = cross3(right, down);
-    let len2 = dot3(n, n);
-    if len2.is_finite() && len2 > 1e-12 {
-        let inv = 1.0 / len2.sqrt();
-        n = [n[0] * inv, n[1] * inv, n[2] * inv];
-    } else {
-        n = [0.0, 1.0, 0.0];
-    }
-    if dot3(n, outward) < 0.0 {
-        n = [-n[0], -n[1], -n[2]];
-    }
-    n
-}
-
-/// The cape's triangle mesh at its current positions: unit uvs over the grid,
-/// normals on `outward`'s side. Pure; the sheet is a `cols` by `rows` grid hung
-/// from its pinned top row.
-fn cape_mesh(cloth: &Cloth, grid: ClothGrid, outward: [f32; 3]) -> MeshData {
-    let (cols, rows) = (grid.cols, grid.rows);
-    let positions = cloth.positions().to_vec();
-    let at = |c: usize, r: usize| positions[r * cols + c];
-    let mut normals = Vec::with_capacity(positions.len());
-    let mut uvs = Vec::with_capacity(positions.len());
-    for r in 0..rows {
-        for c in 0..cols {
-            normals.push(cape_normal(at, cols, rows, c, r, outward));
-            uvs.push([
-                small_f32(c) / small_f32(cols - 1),
-                small_f32(r) / small_f32(rows - 1),
-            ]);
-        }
-    }
-    let mut indices = Vec::with_capacity((cols - 1) * (rows - 1) * 6);
-    for r in 0..rows - 1 {
-        for c in 0..cols - 1 {
-            let a = u32::try_from(r * cols + c).unwrap_or(u32::MAX);
-            let b = a + 1;
-            let d = a + u32::try_from(cols).unwrap_or(u32::MAX);
-            let e = d + 1;
-            indices.extend_from_slice(&[a, b, d, b, e, d]);
-        }
-    }
-    MeshData {
-        positions,
-        normals,
-        uvs,
-        indices,
-        tangents: Vec::new(),
-    }
-}
-
 impl FighterLook {
     /// Lay and step every seen slot's cape on the pose of the tick just folded.
     /// Call it once per accepted tick, after the act fold (`observe_tick`).
@@ -419,6 +369,12 @@ impl FighterLook {
         }
         for slot in 0..MAX_LOOK_FIGHTERS {
             self.cape_slot(slot);
+        }
+        // PX44c: with the switch on, the same seen slots hang a physfx soft cloth, pinned
+        // to the row just sampled and stepped one fixed tick.
+        let Capes { soft, poses, .. } = &mut self.capes;
+        if let Some(soft) = soft.as_mut() {
+            soft.tick(poses);
         }
     }
 
@@ -549,24 +505,41 @@ impl FighterLook {
         }
     }
 
-    /// Upload the cape mesh of every seen slot that has a sheet, so
+    /// Upload the cape mesh of every seen slot that has a sheet or a cloth, so
     /// [`Self::push_cape_draws`] can draw it. Called from `stage_bodies`.
     fn publish_capes(&mut self, presenter: &mut Presenter) {
         self.capes.published.clear();
-        let grid = CAPE_TIER.knobs().cape;
         for slot in 0..MAX_LOOK_FIGHTERS {
             if !self.slots[slot].seen {
                 continue;
             }
-            let Some(sheet) = self.capes.sheets[slot].as_ref() else {
+            let Some((positions, cols, rows, outward)) = self.cape_draw(slot) else {
                 continue;
             };
             let key = cape_mesh_key(slot);
-            let mesh = cape_mesh(sheet, grid, self.capes.outward[slot]);
+            let mesh = cape_mesh_at(positions, cols, rows, outward);
             if presenter.upload_mesh(key, &mesh).is_ok() {
                 self.capes.published.push(key);
             }
         }
+    }
+
+    /// The cape vertices `publish_capes` draws for `slot` this frame: the physfx soft
+    /// cloth's particles with the switch on, the RZ7 Verlet sheet with it off. `None`
+    /// leaves the slot without a cape draw.
+    fn cape_draw(&self, slot: usize) -> Option<(Vec<[f32; 3]>, usize, usize, [f32; 3])> {
+        if let Some(soft) = self.capes.soft.as_ref() {
+            let positions = soft.positions(slot)?;
+            return Some((
+                positions,
+                SOFT_CAPE_COLS,
+                SOFT_CAPE_ROWS,
+                soft.outward(slot),
+            ));
+        }
+        let grid = CAPE_TIER.knobs().cape;
+        let positions = self.cape_positions(slot)?.to_vec();
+        Some((positions, grid.cols, grid.rows, self.capes.outward[slot]))
     }
 
     /// Push one cloth draw per cape mesh this frame published. Returns draws. A
@@ -3238,7 +3211,7 @@ mod tests {
 
     use crate::FighterView;
 
-    fn content_dir() -> PathBuf {
+    pub(super) fn content_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/fighters")
     }
 
@@ -6565,7 +6538,7 @@ mod tests {
 
     /// Two views: slot 0 at `z` with the rival straight ahead at +Z 40 m, so
     /// the fighter faces the way it runs and slot 1 stands still.
-    fn cape_views(z: f32) -> [FighterView; 2] {
+    pub(super) fn cape_views(z: f32) -> [FighterView; 2] {
         [view(0, 0.0, z), view(1, 0.0, 40.0)]
     }
 
@@ -6707,7 +6680,7 @@ mod tests {
         look.observe_tick(0, &cape_views(0.0), &[1000, 1000], &[]);
         let grid = CAPE_TIER.knobs().cape;
         let sheet = look.capes.sheets[0].as_ref().expect("slot 0 cape");
-        let mesh = cape_mesh(sheet, grid, look.capes.outward[0]);
+        let mesh = super::fighter_look_soft_cape::cape_mesh(sheet, grid, look.capes.outward[0]);
         assert_eq!(mesh.positions.len(), grid.particles());
         assert_eq!(mesh.normals.len(), grid.particles());
         assert_eq!(mesh.indices.len(), (grid.cols - 1) * (grid.rows - 1) * 6);

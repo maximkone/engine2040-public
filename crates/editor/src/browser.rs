@@ -1039,6 +1039,28 @@ mod tests {
         assert_eq!(rows_with_thumbs(&bundle, &mut cache, 3), rows);
     }
 
+    // WG14: a row shows the thumbnail the import cooked, keyed by its digest.
+    #[test]
+    fn a_row_shows_the_import_cooked_thumbnail() {
+        let mut bundle = BundleView::new();
+        bundle
+            .push(entry(AssetKind::Mesh, "banner", &["cloth"]))
+            .unwrap();
+        let source = [30u8, 60, 90, 255].repeat(64);
+        let cooked = engine_assets::thumb_cook::cook_thumbnail(&source, 8, 8).expect("cooks");
+        let mut cache = crate::thumbnail::ThumbnailCache::default();
+        cache.insert_cooked("banner", &cooked, 1).expect("fits");
+        let rows = rows_with_thumbs(&bundle, &mut cache, 2);
+        assert_eq!(
+            rows[0].thumb,
+            RowThumb::Ready {
+                digest: cooked.digest
+            }
+        );
+        assert_eq!(rows[0].thumb.text(), format!("{:016x}", cooked.digest));
+        assert!(cache.missing().is_empty());
+    }
+
     fn small_bundle() -> BundleView {
         let mut bundle = BundleView::new();
         bundle

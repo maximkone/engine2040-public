@@ -335,6 +335,7 @@ test("the commit reaches the module (cargo env) and the page", () => {
     build({ rootDir: s.dir, outDir: s.out, commit: "feedface0001" }, quiet(t.run));
     const cargo = t.calls.find((c) => c.cmd === "cargo");
     assert.equal(cargo.env.ENGINE_WEB_COMMIT, "feedface0001");
+    assert.equal(cargo.env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS, "-C target-feature=+simd128", "the wasm module builds with SIMD128");
     assert.deepEqual(cargo.args, cargoArgs());
     const html = readFileSync(join(s.out, "index.html"), "utf8");
     assert.ok(html.includes('data-commit="feedface0001"'));
@@ -344,13 +345,47 @@ test("the commit reaches the module (cargo env) and the page", () => {
   }
 });
 
+test("BG10: the two arms build one tree, and the receipt names the flag each arm used", () => {
+  const simdTree = scratch();
+  const scalarTree = scratch();
+  try {
+    const simdTools = toolchain(simdTree.dir);
+    const simd = build({ rootDir: simdTree.dir, outDir: simdTree.out, commit: "c" }, quiet(simdTools.run));
+    const cargo = simdTools.calls.find((c) => c.cmd === "cargo");
+    assert.equal(cargo.env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS, "-C target-feature=+simd128", "the shipped arm builds with SIMD128");
+    assert.equal(cargo.env.RUSTFLAGS, undefined, "the flag never rides in RUSTFLAGS");
+    assert.equal(simd.simd, true);
+    assert.equal(simd.wasmRustflags, "-C target-feature=+simd128");
+    const opt = simdTools.calls.find((c) => c.cmd === "wasm-opt" && c.args[0] !== "--version");
+    assert.ok(opt.args.includes("--enable-simd"), "the SIMD arm lets wasm-opt use it");
+
+    const scalarTools = toolchain(scalarTree.dir);
+    const scalar = build({ rootDir: scalarTree.dir, outDir: scalarTree.out, commit: "c", simd: false }, quiet(scalarTools.run));
+    const scalarCargo = scalarTools.calls.find((c) => c.cmd === "cargo");
+    assert.equal(scalarCargo.env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS, undefined, "the scalar arm passes no SIMD flag");
+    assert.equal(scalarCargo.env.RUSTFLAGS, undefined, "the flag never rides in RUSTFLAGS");
+    assert.equal(scalar.simd, false);
+    assert.equal(scalar.wasmRustflags, "");
+    const scalarOpt = scalarTools.calls.find((c) => c.cmd === "wasm-opt" && c.args[0] !== "--version");
+    assert.ok(!scalarOpt.args.includes("--enable-simd"), "the scalar arm does not ask wasm-opt for SIMD");
+    // The dist layout is the same in both arms: only the module inside differs.
+    assert.deepEqual(pinnedDist(scalar), pinnedDist(simd));
+    const receipt = JSON.parse(readFileSync(join(scalarTree.out, BUILD_FILE), "utf8"));
+    assert.equal(receipt.wasmRustflags, "");
+    assert.equal(receipt.simd, false);
+  } finally {
+    simdTree.done();
+    scalarTree.done();
+  }
+});
+
 test("wasm-opt gets the size flag and the instruction-set flags Rust 1.97 needs", () => {
   const s = scratch();
   try {
     const t = toolchain(s.dir);
     const info = build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(t.run));
     const opt = t.calls.find((c) => c.cmd === "wasm-opt" && c.args[0] !== "--version");
-    for (const f of ["-Oz", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-multivalue", "--enable-reference-types"]) assert.ok(opt.args.includes(f), f);
+    for (const f of ["-Oz", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-multivalue", "--enable-reference-types", "--enable-mutable-globals", "--enable-simd"]) assert.ok(opt.args.includes(f), f);
     assert.ok(!opt.args.includes("--all-features"), "only features every WebGPU browser has");
     assert.deepEqual(info.wasmOptFlags, WASM_OPT_FLAGS);
   } finally {
@@ -667,15 +702,19 @@ test("the real inputs build() reads exist: lock, template, crate manifest, web p
 
 test("parseArgs", () => {
   const none = { checkPublic: null, allowDirs: [], allowFiles: [] };
-  assert.deepEqual(parseArgs([]), { out: null, commit: null, optimize: true, ab: false, sweep: null, ...none, error: null });
-  assert.deepEqual(parseArgs(["--out", "x", "--commit", "abc", "--no-opt", "--opt-ab"]), { out: "x", commit: "abc", optimize: false, ab: true, sweep: null, ...none, error: null });
-  assert.deepEqual(parseArgs(["--check-public", "site", "--allow-dir", "docs/", "--allow-file", "llms.txt"]), { out: null, commit: null, optimize: true, ab: false, sweep: null, checkPublic: "site", allowDirs: ["docs/"], allowFiles: ["llms.txt"], error: null });
+  assert.deepEqual(parseArgs([]), { out: null, commit: null, optimize: true, ab: false, sweep: null, ...none, simd: true, error: null });
+  assert.deepEqual(parseArgs(["--out", "x", "--commit", "abc", "--no-opt", "--opt-ab"]), { out: "x", commit: "abc", optimize: false, ab: true, sweep: null, ...none, simd: true, error: null });
+  assert.deepEqual(parseArgs(["--check-public", "site", "--allow-dir", "docs/", "--allow-file", "llms.txt"]), { out: null, commit: null, optimize: true, ab: false, sweep: null, checkPublic: "site", allowDirs: ["docs/"], allowFiles: ["llms.txt"], simd: true, error: null });
   assert.match(parseArgs(["--check-public"]).error, /need a value/);
   assert.deepEqual(parseArgs(["--size-sweep"]).sweep, ["z", "s", "3"]);
   assert.deepEqual(parseArgs(["--size-sweep", "s,2", "--commit", "a"]).sweep, ["s", "2"]);
   assert.match(parseArgs(["--size-sweep", "fast"]).error, /opt-levels/);
   assert.match(parseArgs(["--wat"]).error, /unknown argument/);
   assert.match(parseArgs(["--out"]).error, /need a value/);
+  // BG10: the shipped build is the SIMD arm; --scalar is the arm it is compared against.
+  assert.equal(parseArgs(["--simd"]).simd, true);
+  assert.equal(parseArgs(["--scalar"]).simd, false);
+  assert.match(parseArgs(["--simd", "--scalar"]).error, /pick one/);
 });
 
 test("the workflow file keeps its step names plain YAML and runs the two tools", () => {

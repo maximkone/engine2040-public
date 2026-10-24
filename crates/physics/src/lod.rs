@@ -6,11 +6,11 @@
 //! Integer millimetre thresholds keep tier assignment exact; iteration stays
 //! in slot order, so the same distances plus the same bodies give the same
 //! tiers and the same hash on every PC and in replay. No allocation happens
-//! per tick: every buffer is owned by [`LodWorld`] and reused.
+//! per tick: every buffer is owned by `LodWorld` and reused.
 //!
 //! Consumer: the combined-tick workload (64 fighters plus 500 agents,
 //! physics slice under 4 ms) and the perf workloads call
-//! [`LodWorld::new_army`], [`LodWorld::update_tiers`] and [`LodWorld::step`].
+//! `LodWorld::new_army`, `LodWorld::update_tiers` and `LodWorld::step`.
 //! The full ragdoll solve stays in the rapier path; this module decides who
 //! pays for it. Std-only, deterministic math only (`+ - * /`, comparisons).
 #![forbid(unsafe_code)]
@@ -197,7 +197,7 @@ pub fn ccd_for(kind: AgentKind, motion: Motion, speed_mps: f32, cfg: &LodConfig)
 /// sleeper (`x` non-finite/`-0.0`, signed-zero `y`/`hy` mismatch, large
 /// `hy`) normalizes on step, so staying asleep would fork bytes.
 ///
-/// Consumer: [`LodWorld::step`] fast-paths far still bodies into sleep in one
+/// Consumer: `LodWorld::step` fast-paths far still bodies into sleep in one
 /// tick instead of waiting `sleep_steps`; the 10k static cloud in the perf
 /// harness is this shape once settled. Units: metres, m/s. Determinism: exact
 /// bit compares plus `+ *` only, slot order, no allocation, no wall clock.
@@ -222,9 +222,9 @@ pub fn static_sleep_skip(body: &Body, tier: Tier, asleep: bool, cfg: &LodConfig)
 /// later island fold keeps it asleep; near ([`Tier::Full`]) bodies never
 /// change. A length mismatch is a loud [`LodError::LenMismatch`] so a stale
 /// slice never marks a neighbour. No allocation, `+ *` plus bit compares
-/// only, same bytes as the [`LodWorld::step`] hunk it owns.
+/// only, same bytes as the `LodWorld::step` hunk it owns.
 ///
-/// Consumer: [`LodWorld::step`] calls it for its capsules; the headless
+/// Consumer: `LodWorld::step` calls it for its capsules; the headless
 /// `mixed_space_step_split` prefix in `crates/perf/src/main.rs` adopts it
 /// next for its 1,000 agents (far to capsule plus sleep, near to the full
 /// path) with no hash move. Units: metres, m/s. Determinism: slot order,
@@ -265,7 +265,7 @@ pub fn mark_mixed_sleep(
 
 /// Army LOD world: 500 soldier capsules plus preallocated bone sets, 64
 /// fighter bone sets, tier and sleep state per soldier. Buffers are fixed at
-/// construction; [`LodWorld::step`] allocates nothing.
+/// construction; `LodWorld::step` allocates nothing.
 pub struct LodWorld {
     cfg: LodConfig,
     tiers: Vec<Tier>,
@@ -366,7 +366,7 @@ impl LodWorld {
         Ok(())
     }
 
-    /// Step the world by `dt` (pass [`FIXED_DT`] on the tick):
+    /// Step the world by `dt` (pass `FIXED_DT` on the tick):
     /// rebuild capsule islands from `pairs`, fold sleep, integrate awake
     /// capsules, bones of full-tier soldiers, and all fighter bones.
     /// `pairs` holds soldier-slot contact pairs; canonicalization inside
@@ -374,7 +374,7 @@ impl LodWorld {
     /// makes any input order hash-identical.
     /// The island rebuild reuses this world's [`IslandsScratch`], so the tick
     /// allocates nothing; the scratch is moved out for the shared
-    /// [`Self::advance`] so that step keeps the whole world mutable.
+    /// `Self::advance` so that step keeps the whole world mutable.
     /// A bad `dt` (zero, negative, NaN, infinite) is a loud [`LodError::BadDt`]:
     /// silently skipping the tick would fork replay.
     pub fn step(&mut self, dt: f32, pairs: &[(usize, usize)]) -> Result<(), LodError> {

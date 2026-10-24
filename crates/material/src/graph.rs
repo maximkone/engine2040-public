@@ -344,8 +344,11 @@ pub enum GraphErrorKind {
         /// The keys that are legal here.
         legal: Vec<&'static str>,
     },
-    /// A node kind that does not exist; legal kinds carried.
-    UnknownKind,
+    /// A node kind that does not exist; the kind as written is carried.
+    UnknownKind {
+        /// The kind text the document wrote.
+        kind: String,
+    },
     /// A port that does not exist on this kind, or a type mismatch.
     UnknownPort {
         /// The node the port was written on.
@@ -447,7 +450,11 @@ impl fmt::Display for GraphErrorKind {
             Self::UnknownKey { legal } => {
                 write!(f, "unknown key; the keys here are {}", legal.join(", "))
             }
-            Self::UnknownKind => write!(f, "unknown node kind; the kinds are {}", KINDS.join(", ")),
+            Self::UnknownKind { kind } => write!(
+                f,
+                "unknown node kind `{kind}`; the kinds are {}",
+                KINDS.join(", ")
+            ),
             Self::UnknownPort { node, kind } => write!(
                 f,
                 "node {node} is `{kind}` and does not take this port; next: read the \
@@ -711,7 +718,7 @@ fn node_of(value: &Value, path: &str) -> Result<Node, GraphError> {
         .and_then(Value::as_str)
         .ok_or_else(|| GraphError::at(&join(path, "kind"), GraphErrorKind::Missing))?;
     let kind = NodeKind::from_name(kind_text)
-        .ok_or_else(|| GraphError::at(&join(path, "kind"), GraphErrorKind::UnknownKind))?;
+        .ok_or_else(|| GraphError::at(&join(path, "kind"), GraphErrorKind::UnknownKind { kind: kind_text.to_owned() }))?;
     let mut inputs = [None; 3];
     if let Some(block) = value.get("inputs") {
         let block_path = join(path, "inputs");
@@ -1560,7 +1567,7 @@ mod tests {
         );
         let unknown = BRICK.replace(r#""kind": "tile""#, r#""kind": "voronoi""#);
         let err = Graph::parse(&unknown).expect_err("an unknown kind is refused");
-        assert!(matches!(err.kind, GraphErrorKind::UnknownKind));
+        assert!(matches!(err.kind, GraphErrorKind::UnknownKind { .. }));
         assert!(err
             .to_string()
             .contains("noise, tile, gradient, curve, warp, blend"));

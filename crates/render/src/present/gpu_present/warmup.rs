@@ -36,8 +36,10 @@ impl Presenter {
     /// caller can print `pipelines=<n>`. Idempotent. Load path only.
     pub fn warm_pipelines(&self) -> usize {
         let _ = self.overlay_pipeline_for(OUTPUT_FORMAT);
+        let _ = self.lut_pass.pipeline_for(&self.device, OUTPUT_FORMAT);
         if let Some(format) = self.surface_format() {
             let _ = self.overlay_pipeline_for(format);
+            let _ = self.lut_pass.pipeline_for(&self.device, format);
         }
         crate::pipeline_warmup::snapshot().total()
     }

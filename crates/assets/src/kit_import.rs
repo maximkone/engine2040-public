@@ -286,6 +286,13 @@ pub struct KitPiece {
     pub material: CookedMaterial,
     /// Source triangle count of the merged mesh.
     pub triangles: u64,
+    /// The import's 128 px RGBA8 thumbnail, cooked from its base-colour map
+    /// (else its first map) at [`THUMB_EDGE`] px.
+    /// [`THUMB_EDGE`]: crate::thumb_cook::THUMB_EDGE
+    /// `None` when the piece carries no map, or when the codec refuses the one
+    /// it carries: a preview never fails an import, and the browser draws its
+    /// placeholder instead of a fake image.
+    pub thumb: Option<crate::thumb_cook::CookedThumb>,
 }
 
 /// One encoded image the native kit dresses a file with, plus the slot it
@@ -346,6 +353,17 @@ fn dressed_images(imported: &mesh_import::GltfImport) -> Vec<KitImage> {
         .collect()
 }
 
+/// The import's one thumbnail: cooked from the base-colour map, else the first
+/// map the file dresses with. `None` when it carries no map or the codec
+/// refuses it, so a preview never fails an import.
+fn thumb_of(images: &[KitImage]) -> Option<crate::thumb_cook::CookedThumb> {
+    images
+        .iter()
+        .find(|image| image.slot == TextureSlot::BaseColor)
+        .or_else(|| images.first())
+        .and_then(|image| crate::thumb_cook::cook_thumbnail_image(&image.bytes).ok())
+}
+
 /// [`import_kit_gltf`] plus the encoded images of the material the native kit
 /// dresses the file with, in that material's texture order.
 ///
@@ -395,6 +413,7 @@ pub fn import_kit_gltf_full(
     validate_mesh(&mesh).map_err(|err| cook_err(&err))?;
     let base = imported.materials.first().cloned().unwrap_or_default();
     let images = dressed_images(&imported);
+    let thumb = thumb_of(&images);
     let set = kit_set(file);
     let material = kit_material(base, set);
     validate_material(&material).map_err(|err| cook_err(&err))?;
@@ -405,6 +424,7 @@ pub fn import_kit_gltf_full(
             triangles: u64::try_from(mesh.indices.len() / 3).unwrap_or(u64::MAX),
             mesh,
             material,
+            thumb,
         },
         images,
     ))
@@ -795,6 +815,32 @@ mod tests {
         }
         assert_eq!(triangles, 7_472, "kit source triangles");
         assert_eq!(vertices, 5_724, "kit source vertices");
+    }
+
+    // WG14 F2P: the import itself cooks one 128 px thumbnail, and a second
+    // import of the same content gives the same bytes.
+    #[test]
+    fn banner_import_cooks_one_128_px_thumbnail() {
+        let root = arena_root();
+        let Some(bytes) = present(&root.join("src").join("banner.gltf")) else {
+            return;
+        };
+        let (piece, images) = import_kit_gltf_full("banner.gltf", &bytes).expect("imports");
+        assert!(!images.is_empty(), "banner carries its cloth maps");
+        let thumb = piece.thumb.as_ref().expect("the import cooks a thumbnail");
+        assert_eq!((thumb.width(), thumb.height()), (128, 128));
+        assert_eq!(thumb.rgba.len(), crate::thumb_cook::THUMB_BYTES);
+        assert_eq!(thumb.digest, crate::registry::content_hash(&thumb.rgba));
+        // Not a blank body: the cloth map's texels differ and are opaque.
+        let colours: std::collections::BTreeSet<&[u8]> = thumb.rgba.chunks_exact(4).collect();
+        assert!(colours.len() > 8, "one flat colour is not a preview");
+        assert!(
+            thumb.rgba.chunks_exact(4).filter(|t| t[3] > 0).count() > 128 * 128 / 2,
+            "the body stays visible"
+        );
+        let again = import_kit_gltf("banner.gltf", &bytes).expect("imports twice");
+        let second = again.thumb.expect("second import cooks one too");
+        assert_eq!(*thumb, second, "same content, byte-identical thumbnail");
     }
 
     #[test]

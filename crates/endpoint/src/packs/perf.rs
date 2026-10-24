@@ -43,6 +43,8 @@ pub const PACK: &str = "perf";
 pub const TOOL_PERF_TABLE: &str = "perf.table";
 /// Verb: the preflight receipt, one line per check with its fix.
 pub const TOOL_DOCTOR: &str = "perf.doctor";
+/// Verb: one capture written as a Chrome-trace JSON document.
+pub const TOOL_PERF_TRACE: &str = "perf.trace";
 
 /// Longest csv argument in chars.
 const MAX_CSV_CHARS: usize = 512;
@@ -61,6 +63,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<DoctorTool>(
         TOOL_DOCTOR,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<PerfTraceTool>(
+        TOOL_PERF_TRACE,
         PACK,
         CapabilityCard::Observe,
     )?);
@@ -1113,6 +1120,120 @@ impl SyncTool<McpServer> for DoctorTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// trace: one capture as a Chrome-trace document.
+// ---------------------------------------------------------------------------
+
+/// Frames one `perf.trace` capture may ask for; the writer's own cap is higher.
+const MAX_TRACE_FRAMES: u32 = 8;
+
+/// How many frames `perf.trace` captures.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PerfTraceArgs {
+    /// Frames to capture, 1..=8; default 1.
+    pub frames: Option<u32>,
+}
+
+/// What `perf.trace` answers: the trace document and what it carries.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PerfTraceOutput {
+    /// Frames captured.
+    pub frames: u32,
+    /// `ph: "X"` slices in the document, one per measured phase per frame.
+    pub slices: u32,
+    /// Phase names the document carries, sorted: the tick systems and the GPU
+    /// passes the capture measures.
+    pub phases: Vec<String>,
+    /// Document length in microseconds: the last slice end.
+    pub duration_us: u64,
+    /// FNV-1a over the document text, 16 hex digits.
+    pub digest: String,
+    /// The Chrome-trace JSON document, `process_name` metadata row first.
+    pub trace: String,
+}
+
+/// `perf.trace` tool: one capture written as a Chrome-trace JSON document.
+pub struct PerfTraceTool;
+
+impl ToolBase for PerfTraceTool {
+    type Parameter = PerfTraceArgs;
+    type Output = PerfTraceOutput;
+    type Error = McpToolError;
+
+    fn name() -> Cow<'static, str> {
+        TOOL_PERF_TRACE.into()
+    }
+
+    fn description() -> Option<Cow<'static, str>> {
+        Some(
+            "Capture the profiled tick once more and answer it as one Chrome-trace JSON \
+             document: a process_name metadata row, then one `ph: \"X\"` slice per measured \
+             phase with ts and dur in microseconds, timestamps accumulated from zero so the \
+             write reads no clock. Open it in a trace viewer. Read-only."
+                .into(),
+        )
+    }
+
+    fn annotations() -> Option<rmcp::model::ToolAnnotations> {
+        crate::mcp::read_only_annotations()
+    }
+}
+
+impl SyncTool<McpServer> for PerfTraceTool {
+    fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
+        service.dispatch(TOOL_PERF_TRACE, |_state| run_perf_trace(&param))
+    }
+}
+
+/// Capture `frames` and fold the rows into the answer: one slice per span, the
+/// distinct phase names, the document length and the document itself.
+fn run_perf_trace(args: &PerfTraceArgs) -> Result<PerfTraceOutput, McpToolError> {
+    let frames = args.frames.unwrap_or(1);
+    if frames == 0 || frames > MAX_TRACE_FRAMES {
+        return Err(McpToolError::new(
+            "bad_frames",
+            format!(
+                "{frames} frames is outside 1..={MAX_TRACE_FRAMES}; recovery: ask for a smaller \
+                 capture"
+            ),
+        ));
+    }
+    let file = engine_perf::trace_file::capture_trace(frames).map_err(|error| {
+        McpToolError::new(
+            "trace_failed",
+            format!("the capture refused ({error}); recovery: re-run with fewer frames"),
+        )
+    })?;
+    let mut phases: Vec<String> = Vec::new();
+    let mut slices: u32 = 0;
+    let mut duration_us: u64 = 0;
+    for row in file.rows() {
+        if row.cat() == engine_perf::trace_file::CAT_COUNTER {
+            continue;
+        }
+        slices = slices.saturating_add(1);
+        duration_us = duration_us.max(row.ts_us().saturating_add(row.dur_us()));
+        let name = row.name().to_owned();
+        if !phases.contains(&name) {
+            phases.push(name);
+        }
+    }
+    phases.sort();
+    let trace = file.to_json_with_process();
+    Ok(PerfTraceOutput {
+        frames,
+        slices,
+        phases,
+        duration_us,
+        digest: format!("{:016x}", engine_core::hash_bytes(trace.as_bytes())),
+        trace,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1506,5 +1627,39 @@ mod tests {
         assert_eq!(described.path, TOOL_DOCTOR);
         assert!(described.docs.contains("broken"));
         assert!(described.signature.contains("perf"));
+    }
+
+    #[test]
+    fn trace_writes_a_chrome_trace_with_a_process_row_and_phase_slices() {
+        let out = PerfTraceTool::invoke(&server(), PerfTraceArgs { frames: Some(1) })
+            .expect("one frame captures");
+        assert_eq!(out.frames, 1);
+        assert_eq!(out.digest.len(), 16);
+        assert!(
+            out.trace.starts_with("{\"traceEvents\":["),
+            "{}",
+            &out.trace[..40.min(out.trace.len())]
+        );
+        // One process_name metadata row, and the row is the first event.
+        assert!(out.trace.contains("\"name\":\"process_name\""), "metadata");
+        assert!(out.trace.contains("\"ph\":\"M\""), "metadata phase");
+        assert!(out.trace.contains(engine_perf::trace_file::PROCESS_NAME));
+        // One `ph: "X"` slice per measured phase, at least the eight phases of
+        // a tick, and the document carries exactly the slices it reports.
+        assert!(out.slices >= 8, "{} slices", out.slices);
+        assert!(out.phases.len() >= 8, "{:?}", out.phases);
+        let slices = out.trace.matches("\"ph\":\"X\"").count();
+        assert_eq!(slices, usize::try_from(out.slices).expect("slices fit"), "{slices}");
+        // Timestamps run from zero and every duration is a whole number.
+        assert!(out.trace.contains("\"ts\":0,"), "timestamps start at zero");
+        for chunk in out.trace.split("\"dur\":").skip(1) {
+            let digits: String = chunk.chars().take_while(char::is_ascii_digit).collect();
+            assert!(!digits.is_empty(), "a duration is a number: {chunk}");
+        }
+        assert!(out.duration_us > 0, "the document has length");
+        // A bad frame count refuses before any capture runs.
+        let refused = PerfTraceTool::invoke(&server(), PerfTraceArgs { frames: Some(0) })
+            .expect_err("zero frames refuses");
+        assert_eq!(refused.code, "bad_frames");
     }
 }

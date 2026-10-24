@@ -13,6 +13,10 @@
 //! from a fixture ramp: each verb returns the same `qclip_hash` the library
 //! call gives on the same fixture, keeps the last good clip on a refusal, and
 //! is undoable.
+//!
+//! The retarget verbs score a third-party skeleton onto the 17 bone roles of
+//! `engine_anim::contract`; `anim.retarget.preview` (in [`preview`]) draws one
+//! scored map as a real PNG frame under the project root.
 //! Errors: [`McpToolError`] with the machine's own code (`bad_document`,
 //! `invalid_machine`, `no_graph`, `bad_script`, `preview_failed`,
 //! `nothing_to_undo`), the document path and one recovery step.
@@ -22,6 +26,10 @@ use std::sync::{Mutex, OnceLock};
 
 use engine_anim::clip::{bake_clip, bake_track, qclip_hash, QClip, TICK_DT};
 use engine_anim::clip_rot::{bake_rot_blob, rot_blob_hash, sample_rot_blob};
+use engine_anim::contract::{
+    bone_coverage, bone_role_for_name, AnimError, BoneMapping, BoneRole, MAX_JOINTS,
+    REQUIRED_BONE_ROLES,
+};
 use engine_anim::edit;
 use engine_anim::pose::QuatTrack;
 use engine_anim::state_machine::anim_door::{AnimDoor, DoorRefusal};
@@ -35,6 +43,8 @@ use rmcp::serde_json::Value;
 use super::{PackDef, PackError, VerbSpec};
 use crate::mcp::{McpServer, McpToolError};
 use crate::tool_capabilities::CapabilityCard;
+
+mod preview;
 
 /// Pack name.
 pub const PACK: &str = "anim";
@@ -56,6 +66,8 @@ pub const TOOL_ANIM_CLIP_MIRROR: &str = "anim.clip.mirror";
 pub const TOOL_ANIM_CLIP_UNDO: &str = "anim.clip.undo";
 /// Verb: bake and sample a joint's rotation sidecar from a clip JSON.
 pub const TOOL_ANIM_ROT_PREVIEW: &str = "anim.rot.preview";
+/// Verb: map a third-party skeleton onto the 17 bone roles.
+pub const TOOL_ANIM_RETARGET: &str = "anim.retarget";
 
 /// Args for `anim.graph.set`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
@@ -1020,14 +1032,306 @@ crate::e2_tool!(
     invoke = timeline_set
 );
 
-/// The anim pack: state machine and clip verbs, loaded on demand.
+// ---------------------------------------------------------------------------
+// anim.retarget: a third-party skeleton onto our 17 bone roles
+// ---------------------------------------------------------------------------
+
+/// The only profile this door scores: the 17 required roles.
+const RETARGET_PROFILE: &str = "humanoid";
+/// Most source bones one call may name: the contract's own joint cap.
+const MAX_RETARGET_BONES: usize = MAX_JOINTS;
+/// Confidence of a name read straight from a role, in per-mille.
+const EXACT_CONFIDENCE: u16 = 1000;
+/// Confidence of a family alias (`mixamorig_Hips`, `upperarm_l`), in per-mille.
+const ALIAS_CONFIDENCE: u16 = 900;
+
+/// One hand-written source bone to role pair.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct BoneOverrideDto {
+    /// Source bone name, as the third-party rig authors it.
+    pub source: String,
+    /// Role name from the 17: `root`, `pelvis`, `spine_lower`, `spine_upper`,
+    /// `head`, `upper_arm_l`, `upper_arm_r`, `lower_arm_l`, `lower_arm_r`,
+    /// `hand_l`, `hand_r`, `upper_leg_l`, `upper_leg_r`, `lower_leg_l`,
+    /// `lower_leg_r`, `foot_l`, `foot_r`.
+    pub role: String,
+}
+
+/// Args for `anim.retarget`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RetargetArgs {
+    /// Profile to score against: only `humanoid`.
+    pub profile: String,
+    /// Source bone names of the rig, in any order; the answer sorts them. A
+    /// name no family table knows refuses `unknown_bone`, so leave a bone out
+    /// when it has no role of its own, such as `clavicle_l`.
+    pub bones: Vec<String>,
+    /// Hand-written roles for names the alias table does not know. A manual
+    /// row wins over a guess for the same source, so one override per source;
+    /// overriding the same source twice refuses `duplicate_bone`.
+    #[serde(default)]
+    pub overrides: Vec<BoneOverrideDto>,
+}
+
+/// One source bone with the role it landed on.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct BoneMapDto {
+    /// Role name from the 17.
+    pub role: String,
+    /// Source bone name as authored.
+    pub source: String,
+    /// Match confidence in per-mille: 1000 for `exact` and `manual`, 900 for
+    /// an alias.
+    pub confidence_permille: u16,
+    /// How the row was built: `exact` (the name is the role), `alias` (a
+    /// Mixamo or Unreal family name) or `manual` (an override).
+    pub method: String,
+}
+
+/// Result of `anim.retarget`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RetargetOutput {
+    /// Profile the map was scored against.
+    pub profile: String,
+    /// One row per source bone, sorted by role then source.
+    pub mappings: Vec<BoneMapDto>,
+    /// Coverage of the 17 required roles in per-mille. A success is always
+    /// 1000: a partial map refuses `missing_roles` and names the roles.
+    pub coverage_permille: u16,
+    /// Map digest (16 hex digits) over the sorted rows: equal on every replay
+    /// of the same names.
+    pub digest: String,
+}
+
+/// The role whose name is `name`, for an override.
+fn role_by_name(name: &str) -> Option<BoneRole> {
+    REQUIRED_BONE_ROLES
+        .iter()
+        .copied()
+        .find(|role| role.name() == name)
+}
+
+/// The 17 role names, for a refusal that has to list them.
+fn role_names() -> String {
+    REQUIRED_BONE_ROLES
+        .iter()
+        .map(|role| role.name())
+        .collect::<Vec<&'static str>>()
+        .join(", ")
+}
+
+/// The alias-table row for one source name, refusing a bone no table knows.
+fn alias_row(source: &str, profile: &str) -> Result<BoneMapping, McpToolError> {
+    let role = bone_role_for_name(source).map_err(|_| {
+        McpToolError::new(
+            "unknown_bone",
+            format!(
+                "`{source}` maps to no role in profile `{profile}`; recovery: leave the bone out \
+                 (a bone with no role of its own, such as `clavicle_l`, is not mapped) or submit \
+                 an override for it. Roles: {}",
+                role_names()
+            ),
+        )
+    })?;
+    let exact = role.name() == source;
+    Ok(BoneMapping {
+        source: source.to_owned(),
+        role,
+        confidence_permille: if exact {
+            EXACT_CONFIDENCE
+        } else {
+            ALIAS_CONFIDENCE
+        },
+        method: if exact { "exact" } else { "alias" },
+    })
+}
+
+/// A hand-written row: the caller named the role, so it scores full.
+fn manual_row(source: &str, role: BoneRole) -> BoneMapping {
+    BoneMapping {
+        source: source.to_owned(),
+        role,
+        confidence_permille: EXACT_CONFIDENCE,
+        method: "manual",
+    }
+}
+
+/// Read the alias table over the named bones, then apply the hand-written
+/// overrides, so a manual row always wins over a guess. An override whose
+/// source is not in the bone list still adds its row.
+fn mapping_rows(args: &RetargetArgs) -> Result<Vec<BoneMapping>, McpToolError> {
+    let mut manual: Vec<(&str, BoneRole)> = Vec::with_capacity(args.overrides.len());
+    for over in &args.overrides {
+        let role = role_by_name(&over.role).ok_or_else(|| {
+            McpToolError::new(
+                "bad_override",
+                format!(
+                    "`{}` is not a role; recovery: name one of the 17 for source `{}`. Roles: {}",
+                    over.role,
+                    over.source,
+                    role_names()
+                ),
+            )
+        })?;
+        if manual.iter().any(|(name, _)| *name == over.source.as_str()) {
+            return Err(McpToolError::new(
+                "duplicate_bone",
+                format!(
+                    "source `{}` is overridden twice; recovery: keep one override per source",
+                    over.source
+                ),
+            ));
+        }
+        manual.push((over.source.as_str(), role));
+    }
+    let mut rows: Vec<BoneMapping> = Vec::with_capacity(args.bones.len() + manual.len());
+    for source in &args.bones {
+        match manual.iter().find(|(name, _)| *name == source.as_str()) {
+            Some((_, role)) => rows.push(manual_row(source, *role)),
+            None => rows.push(alias_row(source, &args.profile)?),
+        }
+    }
+    for (source, role) in &manual {
+        if !args.bones.iter().any(|name| name == source) {
+            rows.push(manual_row(source, *role));
+        }
+    }
+    Ok(rows)
+}
+
+/// Turn a scoring refusal into the door's own code, naming the bone.
+fn coverage_refusal(error: &AnimError, rows: &[BoneMapping]) -> McpToolError {
+    match error {
+        AnimError::UnknownRole(index) => {
+            let source = rows
+                .get(*index)
+                .map_or("?".to_owned(), |row| row.source.clone());
+            McpToolError::new(
+                "unknown_bone",
+                format!("`{source}` maps to no role; recovery: leave it out or override it"),
+            )
+        }
+        AnimError::DuplicateBone(index) => {
+            let source = rows
+                .get(*index)
+                .map_or("?".to_owned(), |row| row.source.clone());
+            McpToolError::new(
+                "duplicate_bone",
+                format!(
+                    "source `{source}` is submitted twice; recovery: keep one row for it, or \
+                     rename the override"
+                ),
+            )
+        }
+        AnimError::MissingRoles(roles) => McpToolError::new(
+            "missing_roles",
+            format!(
+                "the map leaves {} roles empty: {}; recovery: add an override for each",
+                roles.len(),
+                roles
+                    .iter()
+                    .map(|role| role.name())
+                    .collect::<Vec<&'static str>>()
+                    .join(", ")
+            ),
+        ),
+        other => McpToolError::new(
+            "internal",
+            format!("the role map failed with {other:?}; report this retarget"),
+        ),
+    }
+}
+
+fn retarget(_server: &McpServer, args: &RetargetArgs) -> Result<RetargetOutput, McpToolError> {
+    if args.profile != RETARGET_PROFILE {
+        return Err(McpToolError::new(
+            "bad_profile",
+            format!(
+                "`{}` is not a profile; recovery: run with profile `{RETARGET_PROFILE}",
+                args.profile
+            ),
+        ));
+    }
+    if args.bones.is_empty() && args.overrides.is_empty() {
+        return Err(McpToolError::new(
+            "bad_args",
+            "anim.retarget needs work: submit bones, or overrides that name a role".to_owned(),
+        ));
+    }
+    if args.bones.len() > MAX_RETARGET_BONES {
+        return Err(McpToolError::new(
+            "too_many_inputs",
+            format!(
+                "{} bones is past the cap {MAX_RETARGET_BONES}; recovery: retarget a rig with at \
+                 most {MAX_RETARGET_BONES} named bones",
+                args.bones.len()
+            ),
+        ));
+    }
+    let mut rows = mapping_rows(args)?;
+    // Canonical order, so the same names always give the same digest.
+    rows.sort_by(|left, right| {
+        left.role
+            .index()
+            .cmp(&right.role.index())
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    let coverage_permille =
+        bone_coverage(&rows).map_err(|error| coverage_refusal(&error, &rows))?;
+    let mut text = String::new();
+    for row in &rows {
+        text.push_str(row.role.name());
+        text.push('\0');
+        text.push_str(&row.source);
+        text.push('\0');
+    }
+    let digest = format!("{:016x}", engine_core::hash_bytes(text.as_bytes()));
+    Ok(RetargetOutput {
+        profile: args.profile.clone(),
+        mappings: rows
+            .iter()
+            .map(|row| BoneMapDto {
+                role: row.role.name().to_owned(),
+                source: row.source.clone(),
+                confidence_permille: row.confidence_permille,
+                method: row.method.to_owned(),
+            })
+            .collect(),
+        coverage_permille,
+        digest,
+    })
+}
+
+crate::e2_tool!(
+    /// `anim.retarget`: map a third-party skeleton onto the 17 bone roles.
+    RetargetTool,
+    name = TOOL_ANIM_RETARGET,
+    description = "Retarget a third-party rig: name the profile and the source bone names, and the call answers one row per bone (role, confidence in per-mille, method exact/alias/manual) over the 17 roles plus a map digest. Bones named by the Mixamo and Unreal families resolve without help; an unknown bone, a repeated source or an empty role list refuses and names what to fix. Nothing is written.",
+    readonly = true,
+    args = RetargetArgs,
+    output = RetargetOutput,
+    invoke = retarget
+);
+
+/// The anim pack: state machine, clip, timeline and retarget verbs, loaded on
+/// demand. Every verb in this file, each with its capability card, in the
+/// order `anim.<verb>` names them.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
         "animation: the state machine as versioned data (set, undo, get, preview on a tape), \
          clip edits (trim, retime, mirror, undo) over the session clip, a cutscene keyframe \
-         timeline that compiles onto the same clip sampler, and a read-only rotation sidecar \
-         preview per joint",
+         timeline that compiles onto the same clip sampler, a read-only rotation sidecar \
+         preview per joint, a bone retarget onto the 17 roles, and that map drawn
+         as one PNG frame",
         false,
     );
     pack.add(VerbSpec::of::<GraphSetTool>(
@@ -1080,6 +1384,16 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         CapabilityCard::Commit,
     )?);
+    pack.add(VerbSpec::of::<RetargetTool>(
+        TOOL_ANIM_RETARGET,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<preview::RetargetPreviewTool>(
+        preview::TOOL_ANIM_RETARGET_PREVIEW,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
     Ok(pack)
 }
 
@@ -1110,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_registers_ten_annotated_verbs() {
+    fn pack_registers_twelve_annotated_verbs() {
         let pack = pack().expect("registers");
         assert_eq!(
             pack.verb_names(),
@@ -1124,7 +1438,9 @@ mod tests {
                 TOOL_ANIM_CLIP_MIRROR,
                 TOOL_ANIM_CLIP_UNDO,
                 TOOL_ANIM_ROT_PREVIEW,
-                TOOL_ANIM_TIMELINE_SET
+                TOOL_ANIM_TIMELINE_SET,
+                TOOL_ANIM_RETARGET,
+                preview::TOOL_ANIM_RETARGET_PREVIEW
             ]
         );
         for verb in pack.verbs() {
@@ -1451,6 +1767,7 @@ mod tests {
 
 #[cfg(test)]
 mod clip_tests {
+    use super::preview::{preview_frame, RetargetPreviewArgs, PREVIEW_MAX_SIZE};
     use super::*;
     use engine_editor::capability::Capability;
     use rmcp::handler::server::router::tool::SyncTool;
@@ -1663,5 +1980,391 @@ mod clip_tests {
         )
         .expect_err("no timeline refuses");
         assert_eq!(refused.code, "no_timeline");
+    }
+
+    /// The 17 bones of an Unreal-mannequin rig, as that family names them.
+    fn unreal_bones() -> Vec<String> {
+        [
+            "root",
+            "pelvis",
+            "spine_01",
+            "spine_03",
+            "head",
+            "upperarm_l",
+            "upperarm_r",
+            "lowerarm_l",
+            "lowerarm_r",
+            "hand_l",
+            "hand_r",
+            "thigh_l",
+            "thigh_r",
+            "calf_l",
+            "calf_r",
+            "foot_l",
+            "foot_r",
+        ]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
+    }
+
+    /// The same body from a Mixamo export.
+    fn mixamo_bones() -> Vec<String> {
+        [
+            "Root",
+            "mixamorig_Hips",
+            "mixamorig_Spine",
+            "mixamorig_Spine1",
+            "mixamorig_Head",
+            "mixamorig_LeftArm",
+            "mixamorig_RightArm",
+            "mixamorig_LeftForeArm",
+            "mixamorig_RightForeArm",
+            "mixamorig_LeftHand",
+            "mixamorig_RightHand",
+            "mixamorig_LeftUpLeg",
+            "mixamorig_RightUpLeg",
+            "mixamorig_LeftLeg",
+            "mixamorig_RightLeg",
+            "mixamorig_LeftFoot",
+            "mixamorig_RightFoot",
+        ]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
+    }
+
+    fn retarget_args(bones: Vec<String>) -> RetargetArgs {
+        RetargetArgs {
+            profile: "humanoid".to_owned(),
+            bones,
+            overrides: Vec::new(),
+        }
+    }
+
+    fn map_ok(args: RetargetArgs) -> RetargetOutput {
+        RetargetTool::invoke(&server(), args).expect("the bone map runs")
+    }
+
+    fn map_err(args: RetargetArgs) -> McpToolError {
+        RetargetTool::invoke(&server(), args).expect_err("the bone map refuses")
+    }
+
+    #[test]
+    fn an_unreal_named_rig_retargets_to_full_coverage() {
+        let out = map_ok(retarget_args(unreal_bones()));
+        assert_eq!(out.coverage_permille, 1000, "coverage is per-mille");
+        assert_eq!(out.mappings.len(), 17);
+        // Sorted by role, so the first row is always the root.
+        assert_eq!(out.mappings[0].role, "root");
+        assert_eq!(out.mappings[5].role, "upper_arm_l");
+        assert_eq!(out.mappings[13].role, "lower_leg_l");
+        // A family alias scores 900; a name that is the role scores 1000.
+        let thigh = out
+            .mappings
+            .iter()
+            .find(|row| row.source == "thigh_l")
+            .expect("thigh_l mapped");
+        assert_eq!(
+            (thigh.role.as_str(), thigh.method.as_str()),
+            ("upper_leg_l", "alias")
+        );
+        assert_eq!(thigh.confidence_permille, 900);
+        let pelvis = out
+            .mappings
+            .iter()
+            .find(|row| row.source == "pelvis")
+            .expect("pelvis mapped");
+        assert_eq!(
+            (pelvis.role.as_str(), pelvis.method.as_str()),
+            ("pelvis", "exact")
+        );
+        assert_eq!(pelvis.confidence_permille, 1000);
+        let replay = map_ok(retarget_args(unreal_bones()));
+        assert_eq!(out.digest, replay.digest, "the map moved between runs");
+        assert_eq!(out.digest.len(), 16, "16 hex digits");
+    }
+
+    #[test]
+    fn a_mixamo_rig_lands_the_same_roles() {
+        let unreal = map_ok(retarget_args(unreal_bones()));
+        let mixamo = map_ok(retarget_args(mixamo_bones()));
+        let roles = |out: &RetargetOutput| -> Vec<String> {
+            out.mappings
+                .iter()
+                .map(|row| row.role.clone())
+                .collect::<Vec<String>>()
+        };
+        assert_eq!(roles(&unreal), roles(&mixamo), "two families, one body");
+        assert_eq!(mixamo.coverage_permille, 1000);
+        assert_ne!(unreal.digest, mixamo.digest, "sources reach the digest");
+    }
+
+    #[test]
+    fn a_manual_override_names_a_bone_no_table_knows() {
+        let mut bones = unreal_bones();
+        bones.retain(|name| name != "pelvis");
+        bones.push("hips_custom".to_owned());
+        let out = map_ok(RetargetArgs {
+            overrides: vec![BoneOverrideDto {
+                source: "hips_custom".to_owned(),
+                role: "pelvis".to_owned(),
+            }],
+            ..retarget_args(bones)
+        });
+        assert_eq!(out.coverage_permille, 1000);
+        let row = out
+            .mappings
+            .iter()
+            .find(|row| row.source == "hips_custom")
+            .expect("the custom bone mapped");
+        assert_eq!(
+            (row.role.as_str(), row.method.as_str()),
+            ("pelvis", "manual")
+        );
+        assert_eq!(row.confidence_permille, 1000);
+        // An override for a source the bone list does not name still maps.
+        let extra = map_ok(RetargetArgs {
+            overrides: vec![BoneOverrideDto {
+                source: "hips_custom".to_owned(),
+                role: "pelvis".to_owned(),
+            }],
+            ..retarget_args(unreal_bones())
+        });
+        assert_eq!(extra.coverage_permille, 1000, "one role, two sources");
+        assert_eq!(extra.mappings.len(), 18, "both pelvis rows stay");
+    }
+
+    #[test]
+    fn refusals_name_the_bone_the_role_or_the_empty_roles() {
+        let mut unknown = unreal_bones();
+        unknown.push("bone_007".to_owned());
+        let refused = map_err(retarget_args(unknown));
+        assert_eq!(refused.code, "unknown_bone");
+        assert!(refused.message.contains("bone_007"), "{}", refused.message);
+        assert!(
+            refused.message.contains("foot_r"),
+            "the 17 roles are listed"
+        );
+
+        let mut half = unreal_bones();
+        half.retain(|name| name != "calf_l");
+        let refused = map_err(retarget_args(half));
+        assert_eq!(refused.code, "missing_roles");
+        assert!(
+            refused.message.contains("lower_leg_l"),
+            "{}",
+            refused.message
+        );
+
+        let refused = map_err(RetargetArgs {
+            profile: "quadruped".to_owned(),
+            ..retarget_args(unreal_bones())
+        });
+        assert_eq!(refused.code, "bad_profile");
+
+        let refused = map_err(RetargetArgs {
+            overrides: vec![BoneOverrideDto {
+                source: "tail".to_owned(),
+                role: "wing".to_owned(),
+            }],
+            ..retarget_args(unreal_bones())
+        });
+        assert_eq!(refused.code, "bad_override");
+        assert!(refused.message.contains("tail"), "{}", refused.message);
+
+        let refused = map_err(RetargetArgs {
+            overrides: vec![
+                BoneOverrideDto {
+                    source: "hips_custom".to_owned(),
+                    role: "pelvis".to_owned(),
+                },
+                BoneOverrideDto {
+                    source: "hips_custom".to_owned(),
+                    role: "head".to_owned(),
+                },
+            ],
+            ..retarget_args(unreal_bones())
+        });
+        assert_eq!(refused.code, "duplicate_bone");
+        assert!(
+            refused.message.contains("hips_custom"),
+            "{}",
+            refused.message
+        );
+
+        let refused = map_err(retarget_args(Vec::new()));
+        assert_eq!(refused.code, "bad_args");
+    }
+
+    /// A fresh directory under the system temp dir, one per call site.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("e2040-retarget-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn preview_args(map: RetargetArgs, out: &str) -> RetargetPreviewArgs {
+        RetargetPreviewArgs {
+            map,
+            dir: "frames".to_owned(),
+            out: out.to_owned(),
+            width: Some(128),
+            height: Some(128),
+        }
+    }
+
+    #[test]
+    fn the_preview_is_a_real_frame_with_pixels() {
+        let root = scratch("frame");
+        let out = preview_frame(
+            &root,
+            &server(),
+            &preview_args(retarget_args(unreal_bones()), "rig.png"),
+        )
+        .expect("the frame writes");
+        assert_eq!((out.width, out.height), (128, 128), "the asked size");
+        assert_eq!(out.edges, 16, "the whole humanoid tree drew");
+        assert_eq!(out.coverage_permille, 1000);
+        assert!(
+            out.lit_pixels > 500,
+            "the bones lit only {}",
+            out.lit_pixels
+        );
+        let bytes = std::fs::read(root.join("frames").join("rig.png")).expect("the PNG is there");
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a][..],
+            "PNG magic"
+        );
+        assert_eq!(
+            bytes.len(),
+            usize::try_from(out.bytes).expect("a 4 GiB PNG"),
+            "byte count"
+        );
+        // The IHDR chunk holds the frame size, so the file really is the frame.
+        let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        assert_eq!((width, height), (128, 128), "the PNG header size");
+        let replay = preview_frame(
+            &root,
+            &server(),
+            &preview_args(retarget_args(unreal_bones()), "rig.png"),
+        )
+        .expect("a replay writes");
+        assert_eq!(out.digest, replay.digest, "the frame moved between runs");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_manual_row_colours_the_frame() {
+        let root = scratch("manual");
+        let plain = preview_frame(
+            &root,
+            &server(),
+            &preview_args(retarget_args(unreal_bones()), "plain.png"),
+        )
+        .expect("the plain frame writes");
+        let mut bones = unreal_bones();
+        bones.retain(|name| name != "pelvis");
+        bones.push("hips_custom".to_owned());
+        let hinted = preview_frame(
+            &root,
+            &server(),
+            &preview_args(
+                RetargetArgs {
+                    overrides: vec![BoneOverrideDto {
+                        source: "hips_custom".to_owned(),
+                        role: "pelvis".to_owned(),
+                    }],
+                    ..retarget_args(bones)
+                },
+                "hinted.png",
+            ),
+        )
+        .expect("the manual frame writes");
+        assert_eq!(plain.edges, hinted.edges, "one body, one tree");
+        assert_eq!(
+            plain.lit_pixels, hinted.lit_pixels,
+            "same bones, same pixels"
+        );
+        assert_ne!(
+            plain.digest, hinted.digest,
+            "the manual colour missed the frame"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_refused_map_writes_no_frame() {
+        let root = scratch("refused");
+        let mut bones = unreal_bones();
+        bones.push("bone_007".to_owned());
+        let refused = preview_frame(
+            &root,
+            &server(),
+            &preview_args(retarget_args(bones), "none.png"),
+        )
+        .expect_err("an unknown bone refuses");
+        assert_eq!(refused.code, "unknown_bone");
+        assert!(
+            !root.join("frames").join("none.png").exists(),
+            "a refusal wrote a frame"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_frame_stays_under_the_root_at_a_legal_size() {
+        let root = scratch("paths");
+        let good = retarget_args(unreal_bones());
+        let escaping = RetargetPreviewArgs {
+            out: "../evil.png".to_owned(),
+            ..preview_args(good.clone(), "ok.png")
+        };
+        let refused = preview_frame(&root, &server(), &escaping).expect_err("escaping out");
+        assert_eq!(refused.code, "bad_args");
+        assert!(refused.message.contains("out"), "{}", refused.message);
+
+        let absolute = RetargetPreviewArgs {
+            dir: "/etc".to_owned(),
+            ..preview_args(good.clone(), "ok.png")
+        };
+        assert_eq!(
+            preview_frame(&root, &server(), &absolute)
+                .expect_err("absolute dir")
+                .code,
+            "bad_args"
+        );
+
+        let not_png = RetargetPreviewArgs {
+            out: "ok.jpg".to_owned(),
+            ..preview_args(good.clone(), "ok.png")
+        };
+        assert_eq!(
+            preview_frame(&root, &server(), &not_png)
+                .expect_err("no png suffix")
+                .code,
+            "bad_args"
+        );
+
+        for side in [0u32, PREVIEW_MAX_SIZE + 1] {
+            let sized = RetargetPreviewArgs {
+                width: Some(side),
+                ..preview_args(good.clone(), "ok.png")
+            };
+            let refused = preview_frame(&root, &server(), &sized).expect_err("side {side}");
+            assert_eq!(refused.code, "bad_size");
+            assert!(refused.message.contains("width"), "{}", refused.message);
+        }
+        assert!(
+            !root.join("frames").join("ok.png").exists(),
+            "a refused call wrote a frame"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

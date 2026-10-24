@@ -254,6 +254,22 @@ impl ServerHandler for McpServer {
                 vec![crate::resources::scene_contents(text)],
             )));
         }
+        // OPT58: a receipt row a verb printed the URI of. The body lives in
+        // the session, so the link is a real fetch and not a dead end.
+        if crate::resources::is_receipt_uri(uri) {
+            return match self.receipt_text(uri) {
+                Some(text) => Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+                    vec![crate::resources::receipt_contents(uri, text)],
+                ))),
+                None => Err(ErrorData::invalid_params(
+                    format!(
+                        "no receipt at `{uri}`; the door keeps the last {} published rows, so re-run the verb that printed it",
+                        crate::resources::RECEIPT_ROWS
+                    ),
+                    None,
+                )),
+            };
+        }
         match crate::resources::read_resource(uri, &self.tool_reference_rows()) {
             Ok(contents) => Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
                 vec![contents],
