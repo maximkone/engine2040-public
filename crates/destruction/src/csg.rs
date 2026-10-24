@@ -209,7 +209,9 @@ pub(crate) fn validate_mesh(mesh: &PropMesh) -> Result<(), CsgError> {
         return Err(CsgError::BadTopology);
     }
     for index in &mesh.indices {
-        if (*index as usize) >= mesh.positions.len() {
+        // A u32 vertex id always fits usize on the targets we ship; a target too small to hold
+        // it reads as out of range instead of addressing a wrapped slot.
+        if usize::try_from(*index).map_or(true, |i| i >= mesh.positions.len()) {
             return Err(CsgError::BadIndex(*index));
         }
     }
@@ -261,6 +263,12 @@ fn push_tri(
     b: [f32; 3],
     c: [f32; 3],
 ) {
+    // `MAX_BAKE_TRIS` (262_144) caps the live triangle count, so the emitted vertex count
+    // stays far below `u32::MAX` and this base cannot truncate.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "MAX_BAKE_TRIS caps the emitted vertex count below u32::MAX"
+    )]
     let base = out_pos.len() as u32;
     out_pos.extend_from_slice(&[a, b, c]);
     out_idx.extend_from_slice(&[base, base + 1, base + 2]);
@@ -319,11 +327,12 @@ fn split_mesh(mesh: &PropMesh, plane: &NormPlane) -> (PropMesh, PropMesh) {
     let mut back_idx = Vec::new();
     let mut scratch: Vec<[f32; 3]> = Vec::with_capacity(8);
     for tri in mesh.indices.chunks_exact(3) {
-        // Callers validate shells, and splits only emit resolved corners.
+        // Callers validate shells, and splits only emit resolved corners; the u32 ids always
+        // fit usize on the targets we ship, so the fallback only names that invariant.
         let (pa, pb, pc) = (
-            mesh.positions[tri[0] as usize],
-            mesh.positions[tri[1] as usize],
-            mesh.positions[tri[2] as usize],
+            mesh.positions[usize::try_from(tri[0]).unwrap_or(usize::MAX)],
+            mesh.positions[usize::try_from(tri[1]).unwrap_or(usize::MAX)],
+            mesh.positions[usize::try_from(tri[2]).unwrap_or(usize::MAX)],
         );
         let ds = [plane.dist_to(&pa), plane.dist_to(&pb), plane.dist_to(&pc)];
         if ds[0].abs() <= COPLANAR_EPS && ds[1].abs() <= COPLANAR_EPS && ds[2].abs() <= COPLANAR_EPS
@@ -437,13 +446,24 @@ fn inside_brush(frag: &PropMesh, brush: &[NormPlane]) -> bool {
         sum[1] += v[1];
         sum[2] += v[2];
     }
-    // Fragments always carry vertices, so the divisor is non-zero.
+    // Fragments always carry vertices, so the divisor is non-zero. A fragment comes from a
+    // mesh validated at or below MAX_CSG_TRIS, and clipping adds at most one corner per edge,
+    // so the count stays far below 2^24 and is exact in f32.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a fragment vertex count stays far below 2^24 (MAX_CSG_TRIS plus clip corners)"
+    )]
     let n = frag.positions.len() as f32;
     let center = [sum[0] / n, sum[1] / n, sum[2] / n];
     brush.iter().all(|p| p.dist_to(&center) <= COPLANAR_EPS)
 }
 
 fn append_mesh(out_pos: &mut Vec<[f32; 3]>, out_idx: &mut Vec<u32>, mesh: &PropMesh) {
+    // `MAX_BAKE_TRIS` caps the live count, so the appended base cannot truncate.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "MAX_BAKE_TRIS caps the live vertex count below u32::MAX"
+    )]
     let base = out_pos.len() as u32;
     out_pos.extend_from_slice(&mesh.positions);
     out_idx.extend(mesh.indices.iter().map(|i| base + i));
@@ -680,21 +700,28 @@ pub fn bake(mesh: &PropMesh, cuts: &[CutPlane]) -> Result<Vec<FractureChunk>, Cs
     Ok(chunks)
 }
 
+/// Length word of the bake encoder. A `Vec` length is a `usize`, which always fits `u64` on the
+/// targets we ship, so the checked form never takes its fallback; it is written out loud rather
+/// than truncated with a cast.
+fn len_word(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
 /// Canonical bake bytes: chunk count plus, per chunk, name plus bit-exact
 /// vertices and indices, all in bake order.
 pub fn csg_bake_bytes(chunks: &[FractureChunk]) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(&(chunks.len() as u64).to_le_bytes());
+    out.extend_from_slice(&len_word(chunks.len()).to_le_bytes());
     for chunk in chunks {
-        out.extend_from_slice(&(chunk.name.len() as u64).to_le_bytes());
+        out.extend_from_slice(&len_word(chunk.name.len()).to_le_bytes());
         out.extend_from_slice(chunk.name.as_bytes());
-        out.extend_from_slice(&(chunk.mesh.positions.len() as u64).to_le_bytes());
+        out.extend_from_slice(&len_word(chunk.mesh.positions.len()).to_le_bytes());
         for v in &chunk.mesh.positions {
             for f in v {
                 out.extend_from_slice(&f.to_bits().to_le_bytes());
             }
         }
-        out.extend_from_slice(&(chunk.mesh.indices.len() as u64).to_le_bytes());
+        out.extend_from_slice(&len_word(chunk.mesh.indices.len()).to_le_bytes());
         for index in &chunk.mesh.indices {
             out.extend_from_slice(&index.to_le_bytes());
         }
@@ -716,13 +743,16 @@ pub fn to_bonded_desc(
     break_threshold: f32,
 ) -> Result<BondedDesc, BreakError> {
     let boxes: Vec<Chunk3> = chunks.iter().map(|c| c.to_chunk3()).collect();
+    // `validate` below refuses past MAX_BONDED_CHUNKS, so an id always fits u32; the checked
+    // form routes an impossible overflow to that same refusal instead of wrapping.
+    let id = |i: usize| u32::try_from(i).map_err(|_| BreakError::TooManyChunks);
     let mut bonds = Vec::new();
     for a in 0..boxes.len() {
         for b in (a + 1)..boxes.len() {
             if in_contact(&boxes[a], &boxes[b]) {
                 bonds.push(Bond {
-                    a: a as u32,
-                    b: b as u32,
+                    a: id(a)?,
+                    b: id(b)?,
                     breaking_strain,
                 });
             }
@@ -736,7 +766,7 @@ pub fn to_bonded_desc(
     let mut anchors = Vec::new();
     for (i, c) in boxes.iter().enumerate() {
         if (c.y - c.hy) - bottom <= CSG_ANCHOR_EPS_M {
-            anchors.push(i as u32);
+            anchors.push(id(i)?);
         }
     }
     let desc = BondedDesc {
@@ -847,6 +877,25 @@ mod tests {
         assert_eq!(&reused, "FRAC_0007");
         frac_name_into(12345, &mut reused);
         assert_eq!(&reused, "FRAC_12345");
+    }
+
+    #[test]
+    fn casts_keep_the_csg_bake_digest() {
+        // Pinned from the code before the CQ10 cast pass on `csg.rs`: the canonical bake bytes
+        // (length words, vertices, indices) must not move.
+        let chunks = bake(&box_mesh(), &[center_blade()]).expect("single cut bakes");
+        assert_eq!(csg_bake_digest(&chunks), 17103417725578125922u64);
+        // The chunk-count length word decodes back to the live count: the encoder writes the
+        // same bytes a bare `as u64` did.
+        let bytes = csg_bake_bytes(&chunks);
+        let head = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        assert_eq!(
+            head,
+            u64::try_from(chunks.len()).expect("chunk count fits"),
+            "chunk-count length word"
+        );
     }
 
     #[test]

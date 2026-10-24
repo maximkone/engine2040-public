@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, buildBase, classify, closureDirs, crateGraph, idAgeMs, isThrowawayBranch, keepResult, keptResult, localOnly, main, newId, okCmd, parseArgs, pushNote, raceLost, reuseKey, route, runLocal, runnerOs, testsRan, words } from "./gh-check.mjs";
+import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, afterRemote, buildBase, changesOf, classify, closureDirs, commandLines, compileRedOf, crateGraph, declaredModFiles, haveParent, headRedFor, idAgeMs, isMutants, isThrowawayBranch, keepResult, keptResult, localOnly, main, masterRedLine, modFileOf, newId, noteHeadRed, okCmd, okMutants, parseArgs, pickedText, preflightOnly, pushLaps, knownRedsNote, pushLock, pushUnlock, pushLockPath, pushNote, raceLost, rateLimited, reuseKey, route, runFromList, runLocal, runnerOs, testsRan, withNoDeps, withRateRetry, words } from "./gh-check.mjs";
+import { changeOf } from "./commit-mine.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -24,12 +25,33 @@ test("only one plain cargo check, test or clippy line goes to the runner", () =>
   for (const bad of ["cargo build -p x", "cargo test -p x && curl evil", "cargo test -p x; ls", "cargo test -p x | cat", "cargo test $(id)", "rm -rf /", "cargo test -p x > f"]) assert.equal(okCmd(bad), false, bad);
 });
 
+test("cargo mutants: one crate and one slice (--shard k/n or -f) goes to the runner; the whole workspace, no slice, a shell line or an unlisted flag never does", () => {
+  for (const ok of ["cargo mutants -p engine-core --shard 1/8 --timeout 120", "cargo mutants -p engine-core --shard 0/20", "cargo mutants --package engine-combat --shard=19/20", "cargo mutants -p engine-core -f crates/core/src/lib.rs", "cargo mutants -p engine-core --file crates/core/src/x.rs -t 60"]) assert.equal(okCmd(ok), true, ok);
+  assert.equal(isMutants("cargo mutants -p engine-core --shard 1/8"), true);
+  assert.equal(isMutants("cargo test -p engine-core"), false);
+  for (const bad of ["cargo mutants", "cargo mutants --shard 1/8", "cargo mutants -p engine-core", "cargo mutants --workspace", "cargo mutants --all -p engine-core --shard 1/8", "cargo mutants -p engine-core --workspace --shard 1/8", "cargo mutants -p engine-core -p engine-combat --shard 1/8", "cargo mutants -p engine-core --shard 9/8", "cargo mutants -p engine-core --shard 8/8", "cargo mutants -p engine-core --shard 1", "cargo mutants -p engine-core -f ../../x.rs", "cargo mutants -p engine-core -f crates/core/src/*.rs", "cargo mutants -p engine-core --shard 1/8 --output /tmp/x", "cargo mutants -p engine-core --shard 1/8 --in-place", "cargo mutants -p engine-core --shard 1/8 -- --nocapture", "cargo mutants -p engine-core --shard 1/8 --timeout 0", "cargo mutants -p engine-core --shard 1/8; rm -rf x", "cargo mutants -p engine-core --shard 1/8 | tee log", "cargo mutants -p engine-core --shard $(id)"]) assert.equal(okCmd(bad), false, bad);
+  assert.equal(okMutants("cargo mutants -p engine-core --shard 1/8 --timeout 120"), true);
+});
+
+test("cargo mutants never runs on this PC: --local refuses it, and a GitHub failure never falls back to the PC", async () => {
+  const mutants = "cargo mutants -p engine-core --shard 1/8";
+  const said = [];
+  assert.equal(runLocal(mutants, (s) => said.push(s)), 2, "refused before any build starts");
+  assert.match(said.join("\n"), /never runs on this PC/);
+  let ranHere = false;
+  const local = async () => { ranHere = true; return 0; };
+  assert.equal(await afterRemote({ res: { code: 2, retry: false }, cmd: mutants, mode: "auto", local, say: () => {} }), 2);
+  assert.equal(ranHere, false, "no PC fallback for a mutants line");
+  const log = console.log; console.log = () => {};
+  try { assert.equal(await main(["--local", "cargo", "mutants", "-p", "engine-core", "--shard", "1/8"], {}), 2); } finally { console.log = log; }
+});
+
 test("words keep a quoted run as one word", () => {
   assert.deepEqual(words('cargo test -p x -- --exact "a b"'), ["cargo", "test", "-p", "x", "--", "--exact", "a b"]);
 });
 
 test("flags come before the cargo line; a long check returns instead of dying at the 120 s tool timeout", () => {
-  assert.deepEqual(parseArgs(["cargo", "test", "-p", "x"], {}), { cmd: "cargo test -p x", wait: null, mode: "auto", fresh: false, only: null, budget: DEFAULT_BUDGET_S, error: null });
+  assert.deepEqual(parseArgs(["cargo", "test", "-p", "x"], {}), { cmd: "cargo test -p x", wait: null, mode: "auto", fresh: false, only: null, at: null, budget: DEFAULT_BUDGET_S, error: null });
   assert.ok(DEFAULT_BUDGET_S < 120, "the default budget must end before OpenCode's and Claude Code's 120 s tool timeout");
   assert.equal(parseArgs(["--budget", "840", "cargo", "test", "-p", "x"], {}).budget, 840);
   assert.equal(parseArgs(["--budget", "99999", "cargo", "test"], {}).budget, 1740, "capped under the 30 minute run cap");
@@ -213,6 +235,37 @@ test("route: a pass with 0 tests is rerun on the PC, or refused under --remote-o
   assert.equal(f.calls.local.length, 0);
 });
 
+test("route: 0 tests on a feature-gated crate reruns once with its test feature, on the right runner", async () => {
+  const { withTestFeatures } = await import("./gh-check.mjs");
+  assert.equal(withTestFeatures("cargo test -p engine-physfx --lib hit"), "cargo test -p engine-physfx --lib hit --features rapier");
+  assert.equal(withTestFeatures("cargo test -p engine-game --lib spear_look -- --nocapture"), "cargo test -p engine-game --lib spear_look --features app -- --nocapture");
+  assert.equal(withTestFeatures("cargo test -p engine-physfx --features rapier --lib"), null, "a line that names features is left alone");
+  assert.equal(withTestFeatures("cargo test -p engine-net --lib x"), null, "only the listed crates");
+  assert.equal(withTestFeatures("cargo check -p engine-physfx"), null, "only test lines");
+  const f = fakes([{ code: 0, noTests: true }, { code: 0 }]);
+  const line = "cargo test -p engine-game --lib spear_look";
+  assert.equal(await route({ cmd: line, remote: f.remote, local: f.local, say: f.say }), 0);
+  assert.deepEqual([f.calls.remote, f.calls.local.length], [2, 0], "the rerun is remote, not the PC");
+  assert.deepEqual(f.calls.os, ["ubuntu-latest", "windows-latest"], "app goes to the Windows runner");
+  assert.ok(f.calls.said.some((s) => /keeps its tests behind a feature/.test(s)));
+  const g = fakes([{ code: 0, noTests: true }], 0);
+  await route({ cmd: CMD, remote: g.remote, local: g.local, say: g.say });
+  assert.deepEqual([g.calls.remote, g.calls.local], [1, [CMD]], "other crates keep the PC fallback");
+});
+
+test("a failed tail names the files its errors point at", async () => {
+  const { errorFiles } = await import("./gh-check.mjs");
+  const tail = [
+    "error[E0432]: unresolved import `crate::vfx_soft`",
+    "  --> crates\\render\\src\\particle_draw_gpu.rs:12:12",
+    "error[E0308]: mismatched types",
+    "   --> crates/endpoint/src/packs/view/scene.rs:161:13",
+    "  --> crates\\render\\src\\particle_draw_gpu.rs:40:1",
+  ].join("\n");
+  assert.deepEqual(errorFiles(tail), ["crates/render/src/particle_draw_gpu.rs", "crates/endpoint/src/packs/view/scene.rs"]);
+  assert.deepEqual(errorFiles("test result: ok. 3 passed"), []);
+});
+
 test("route: --remote-only never falls back, and a check still running is neither a pass nor a fall back", async () => {
   let f = fakes([{ code: 2, retry: true }]);
   assert.equal(await route({ cmd: CMD, mode: "remote", remote: f.remote, local: f.local, say: f.say }), 2);
@@ -349,6 +402,8 @@ test("a failed push names its reason, not git's 'To <url>' header", async () => 
 test("--only takes comma-separated paths (backslashes become slashes) and refuses an empty list", () => {
   assert.deepEqual(parseArgs(["--only", "crates\\game\\src\\a.rs, crates/game/src/b.rs", "cargo", "test", "-p", "x"]).only, ["crates/game/src/a.rs", "crates/game/src/b.rs"]);
   assert.match(parseArgs(["--only", "", "cargo", "test", "-p", "x"]).error ?? "", /--only needs paths/);
+  const spaced = parseArgs(["--only", "a.rs", "b.rs#2", "--budget", "60", "cargo", "test", "-p", "x"]);
+  assert.deepEqual([spaced.only, spaced.budget, spaced.cmd, spaced.error], [["a.rs", "b.rs#2"], 60, "cargo test -p x", null], "space-separated paths up to the next flag or cargo");
   assert.equal(parseArgs(["cargo", "test", "-p", "x"]).only, null);
 });
 
@@ -413,4 +468,261 @@ test("a new HEAD's snapshot built on the old base is the tree a whole build give
     assert.equal(git("show", `${inc.tree}:crlf.txt`).includes("\r"), false, "the text rule stores the CRLF file as LF");
     assert.ok(!names(a.tree).includes("team/roster.md"), "a denied path is out of the first base too");
   } finally { rmSync(root, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
+test("a rate-limited GitHub call waits and tries again; any other error and the last limited try still throw", async () => {
+  const limit = Object.assign(new Error("gh failed"), { stderr: "HTTP 403: API rate limit exceeded for user ID 1." });
+  assert.ok(rateLimited(limit) && rateLimited("You have exceeded a secondary rate limit") && !rateLimited(new Error("HTTP 404: Not Found")));
+  const waited = [];
+  const wait = async (ms) => { waited.push(ms); };
+  let tries = 0;
+  assert.equal(await withRateRetry(async () => { tries++; if (tries < 3) throw limit; return "sent"; }, [1, 2, 3], wait), "sent");
+  assert.deepEqual(waited, [1, 2], "one wait per limited try, in order");
+  await assert.rejects(withRateRetry(async () => { throw new Error("HTTP 404: Not Found"); }, [1], wait), /404/, "a real error is not retried");
+  await assert.rejects(withRateRetry(async () => { throw limit; }, [5], wait), /gh failed/, "the limit still holding after the last wait throws");
+  assert.deepEqual(waited, [1, 2, 5]);
+});
+test("one shared run list answers each waiting call by its own branch", () => {
+  const runs = [{ headBranch: "wip-b", databaseId: 2, status: "in_progress" }, { headBranch: "wip-a", databaseId: 1, status: "completed", conclusion: "success" }];
+  assert.equal(runFromList(runs, "wip-a").databaseId, 1);
+  assert.equal(runFromList(runs, "wip-b").status, "in_progress");
+  assert.equal(runFromList(runs, "wip-c"), null, "a run not listed yet is not started, not lost");
+});
+test("--only <path>#N proves HEAD plus that hunk alone: another writer's hunk in the same file stays out", () => {
+  const repo = mkdtempSync(join(tmpdir(), "ghpick-"));
+  const git = (...args) => execFileSync("git", ["-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", "-c", "user.name=ghcheck", "-c", "user.email=ghcheck@example.invalid", ...args], { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  try {
+    git("init", "-q");
+    const lines = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`);
+    writeFileSync(join(repo, "a.rs"), `${lines.join("\n")}\n`);
+    git("add", "a.rs"); git("commit", "-q", "-m", "base");
+    const dirty = [...lines]; dirty[1] = "theirs"; dirty[7] = "mine";
+    writeFileSync(join(repo, "a.rs"), `${dirty.join("\n")}\n`);
+    const want = [...lines]; want[7] = "mine";
+    assert.equal(pickedText("a.rs", [2], repo), `${want.join("\n")}\n`, "hunk 2 (line 8) only, trailing newline kept");
+    assert.throws(() => pickedText("a.rs", [3], repo), /has 2 hunks/);
+  } finally { rmSync(repo, { recursive: true, force: true, maxRetries: 3 }); }
+});
+test("--at <sha> builds one commit alone: a sha, never with --only, and never after the cargo line", () => {
+  const a = parseArgs(["--at", "e2f172fcf", "cargo", "test", "-p", "engine-game", "--lib", "x"]);
+  assert.equal(a.error, null);
+  assert.equal(a.at, "e2f172fcf");
+  assert.equal(a.cmd, "cargo test -p engine-game --lib x");
+  assert.match(parseArgs(["--at", "HEAD~3", "cargo", "check", "-p", "x"]).error, /commit sha/);
+  assert.match(parseArgs(["--at", "e2f172fcf", "--only", "a.rs", "cargo", "check", "-p", "x"]).error, /no --only/);
+  assert.match(parseArgs(["cargo", "test", "-p", "x", "--at", "e2f172fcf"]).error, /--at is a gh-check flag/);
+});
+test("the command step is found when GitHub serves the job without step names", () => {
+  const unknown = [
+    "run\tUNKNOWN STEP\t2026-10-24T16:58:57Z ##[group]Run actions/checkout@v5",
+    "run\tUNKNOWN STEP\t2026-10-24T16:59:32Z ##[group]Run case \"$CMD\" in",
+    "run\tUNKNOWN STEP\t2026-10-24T17:04:03Z test result: ok. 3 passed; 0 failed",
+    "run\tUNKNOWN STEP\t2026-10-24T17:04:05Z Post job cleanup.",
+  ].join("\n");
+  assert.equal(commandLines(unknown).length, 2);
+  assert.match(commandLines(unknown)[1], /3 passed/);
+  const named = "run\tset up\tx\nrun\trun the command\ttest result: ok. 1 passed\nrun\tPost\ty";
+  assert.deepEqual(commandLines(named), ["run\trun the command\ttest result: ok. 1 passed"]);
+  assert.deepEqual(commandLines("run\tUNKNOWN STEP\tno step here"), []);
+});
+// ---- preflight: the two --only mistakes that used to cost a whole remote run ----
+
+test("--only refuses a directory with the fix in the message, and passes a file list", () => {
+  const dir = "crates/game/src";
+  const bad = preflightOnly([dir, "crates/gone/src/none.rs"], { headPaths: new Set() });
+  assert.equal(bad.length, 1, "one problem, not one per path");
+  assert.match(bad[0], /is a directory: --only takes files/);
+  assert.match(bad[0], /git status --short/, "the message names how to get the file list");
+  // A path that is gone is a removal, not a directory mistake.
+  assert.deepEqual(preflightOnly(["crates/gone/src/none.rs"], { headPaths: new Set() }), []);
+});
+
+test("a new mod file neither in --only nor at HEAD is refused with the add line; either one alone is enough", () => {
+  const root = mkdtempSync(join(tmpdir(), "gh-only-"));
+  try {
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src/lib.rs"), "mod depth;\npub mod kept;\n");
+    writeFileSync(join(root, "src/depth.rs"), "");
+    const from = "src/lib.rs", dep = "src/depth.rs", at = new Set([from, "src/kept.rs"]);
+    const missing = preflightOnly([from], { root, headPaths: at });
+    assert.equal(missing.length, 1, "the new file only, not the sibling that is already at HEAD");
+    assert.match(missing[0], /declares a module at src\/depth\.rs, which is in neither --only nor HEAD/);
+    assert.match(missing[0], /--only src\/lib\.rs,src\/depth\.rs/, "the fix is the full --only line");
+    assert.deepEqual(preflightOnly([from, dep], { root, headPaths: at }), [], "listed in --only: fine");
+    assert.deepEqual(preflightOnly([from], { root, headPaths: new Set([...at, dep]) }), [], "already at HEAD: fine");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a module file resolves the way rustc resolves it: sibling folder, mod.rs, and an explicit #[path]", () => {
+  assert.deepEqual(modFileOf("crates/a/src/lib.rs", "b"), ["crates/a/src/b.rs", "crates/a/src/b/mod.rs"]);
+  assert.deepEqual(modFileOf("crates/a/src/b.rs", "c"), ["crates/a/src/b/c.rs", "crates/a/src/b/c/mod.rs"]);
+  assert.deepEqual(modFileOf("crates/a/src/b/mod.rs", "c"), ["crates/a/src/b/c.rs", "crates/a/src/b/c/mod.rs"]);
+  // One candidate list per declaration: `mod f {}` is an inline module, `// mod g;` is a comment.
+  assert.deepEqual(declaredModFiles("crates/a/src/b.rs", "pub mod c;\nmod d;\npub(crate) mod e;\nmod f {}\n// mod g;"), [
+    ["crates/a/src/b/c.rs", "crates/a/src/b/c/mod.rs"],
+    ["crates/a/src/b/d.rs", "crates/a/src/b/d/mod.rs"],
+    ["crates/a/src/b/e.rs", "crates/a/src/b/e/mod.rs"],
+  ]);
+  assert.deepEqual(declaredModFiles("crates/a/src/lib.rs", '#[path = "odd/place.rs"]\nmod weird;'), [["crates/a/src/odd/place.rs"]]);
+});
+
+// ---- clippy: a dependency's lint is not this crate's ----
+
+test("clippy with -p adds --no-deps once, before the -- that starts the lint flags", () => {
+  assert.deepEqual(withNoDeps("cargo clippy -p engine-ai -- -D warnings"), { cmd: "cargo clippy -p engine-ai --no-deps -- -D warnings", added: true });
+  assert.deepEqual(withNoDeps("cargo clippy --package engine-ai --all-targets"), { cmd: "cargo clippy --package engine-ai --all-targets --no-deps", added: true });
+  assert.equal(withNoDeps("cargo clippy -p engine-ai --no-deps").added, false, "already there");
+  assert.equal(withNoDeps("cargo clippy --all-targets").added, false, "no -p: --no-deps would be refused by cargo");
+  assert.equal(withNoDeps("cargo test -p engine-ai").added, false, "not clippy");
+  assert.equal(withNoDeps("cargo clippy -p a --no-deps -- -D warnings").added, false, "added once, not twice");
+});
+
+// ---- the push slots: a few pushes at a time, never a failed run ----
+
+test("full push slots make the next push wait and say so, then push without one; a dead slot is taken over", async () => {
+  const lock = pushLockPath();
+  mkdirSync(dirname(lock), { recursive: true });
+  const said = []; const say = (m) => said.push(m);
+  const slots = [lock, `${lock}.1`];
+  // Our own pid is alive, so both slots are held: the wait says so once, and past the cap it pushes anyway.
+  for (const s of slots) writeFileSync(s, String(process.pid));
+  try {
+    assert.equal(typeof (await pushLock({ capMs: 600, say, slots: 2 })), "number", "past the cap it resolves, never rejects");
+    assert.equal(said.length, 2, "one wait line, then one 'without one' line, not one per poll");
+    assert.match(said[0], /waiting for a push slot \(2 pushes at a time/);
+    assert.match(said[1], /pushing without one/);
+    pushUnlock();
+    for (const s of slots) assert.ok(existsSync(s), "a push without a slot frees nobody else's slot");
+  } finally { for (const s of slots) rmSync(s, { force: true }); }
+  // A slot whose owner is gone is cleared and taken at once.
+  writeFileSync(lock, "999999");
+  try { assert.equal(typeof (await pushLock({ say, slots: 1 })), "number", "acquired, and it reports the wait in ms"); pushUnlock(); assert.ok(!existsSync(lock), "unlock frees the slot it took"); }
+  finally { rmSync(lock, { force: true }); }
+});
+
+test("the local line reports the push transfer, and the lock wait only when it was over a second", () => {
+  assert.deepEqual(pushLaps({ seconds: 29.54, waitedMs: 120 }), ["push 29.5"], "no wait line under a second");
+  assert.deepEqual(pushLaps({ seconds: 5.04, waitedMs: 12_600 }), ["push 5.0", "pushwait 12.6"], "a waited turn is named");
+});
+
+test("a wip commit built after a HAVE push lists HAVE_PUSHED as its second parent", () => {
+  // A bare temp repo stands in for the mirror: the point is the shape of commit-tree's -p list, not a network call.
+  const dir = mkdtempSync(join(tmpdir(), "gh-have-"));
+  try {
+    execFileSync("git", ["init", "-q", "--bare", dir]);
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@e", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@e" };
+    const git = (args, input) => execFileSync("git", ["--git-dir", dir, ...args], { encoding: "utf8", input, env }).trim();
+    const tree = git(["hash-object", "-w", "-t", "tree", "--stdin"], "");
+    const first = git(["commit-tree", tree, "-m", "main"]);
+    assert.equal(haveParent(first, dir), "", "nothing pushed yet: one parent");
+    const pushed = git(["commit-tree", tree, "-m", "an earlier wip"]);
+    git(["update-ref", "refs/gh-check/have-pushed", pushed]);
+    assert.equal(haveParent(first, dir), pushed, "the earlier wip is the second parent");
+    assert.equal(haveParent(pushed, dir), "", "never its own parent");
+    // The exact call startRemote makes, so the parent order is the one git records.
+    const wip = git(["commit-tree", tree, "-p", first, ...(haveParent(first, dir) ? ["-p", haveParent(first, dir)] : []), "-m", "wip"]);
+    assert.deepEqual(git(["rev-list", "--parents", "-n", "1", wip]).split(" ").slice(1), [first, pushed], "parent 1 is the mirror's main, parent 2 is HAVE_PUSHED");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a wasm check line installs the wasm32 target before the command runs", () => {
+  // Runs 40125053939 and 40125845878 died on E0463 `can't find crate for core`: the
+  // runner image has the native rust-std only, so a --target wasm32 line needs the add.
+  const wf = readFileSync(join(ROOT, ".github", "workflows", "check.yml"), "utf8").replace(/\r\n/g, "\n");
+  const add = wf.indexOf("rustup target add wasm32-unknown-unknown");
+  assert.ok(add > 0, "check.yml adds the wasm32 target");
+  assert.match(wf, /if: contains\(inputs\.cmd, '--target wasm32-unknown-unknown'\)/, "only when the command asks for it");
+  assert.ok(add < wf.indexOf("- name: run the command"), "installed before the step that runs the command");
+});
+
+test("a mod inside an inline mod block resolves one folder down, and the block's closing brace restores the top", () => {
+  const src = ["mod a;", "#[cfg(test)]", "mod tests {", "    mod b;", "    #[path = \"c_t.rs\"]", "    mod c;", "}", "mod d;", ""].join("\n");
+  assert.deepEqual(declaredModFiles("crates/physics/src/ragdoll.rs", src), [
+    ["crates/physics/src/ragdoll/a.rs", "crates/physics/src/ragdoll/a/mod.rs"],
+    ["crates/physics/src/ragdoll/tests/b.rs", "crates/physics/src/ragdoll/tests/b/mod.rs"],
+    ["crates/physics/src/ragdoll/tests/c_t.rs"],
+    ["crates/physics/src/ragdoll/d.rs", "crates/physics/src/ragdoll/d/mod.rs"],
+  ]);
+  assert.deepEqual(declaredModFiles("crates/x/src/lib.rs", "mod tests {\n    mod b;\n}\n"), [["crates/x/src/tests/b.rs", "crates/x/src/tests/b/mod.rs"]]);
+});
+
+test("a failed run whose every failure is a known master red says so; a new failure is named as the caller's", () => {
+  const dir = mkdtempSync(join(tmpdir(), "reds-")); const file = join(dir, "r.json");
+  writeFileSync(file, JSON.stringify({ head: "abc1234", at: Date.now(), tests: ["hit_track::tests::a", "outline::tests::b"] }));
+  const log = "test hit_track::tests::a ... FAILED\ntest x::y ... ok\n";
+  try {
+    assert.match(knownRedsNote(log, { file }), /every failure here is a known master red at abc1234/);
+    assert.match(knownRedsNote(`${log}test mine::t ... FAILED\n`, { file }), /1 of these 2 failures .*yours: mine::t/);
+    assert.equal(knownRedsNote("test mine::t ... FAILED\n", { file }), "", "nothing known failed: no note");
+    assert.equal(knownRedsNote(log, { file, now: Date.now() + 7 * 3600_000 }), "", "a list older than 6 h says nothing");
+    assert.deepEqual(parseArgs(["--master-reds", "123", "abc1234"]).masterReds, { run: "123", head: "abc1234" });
+    assert.match(parseArgs(["--master-reds", "x", "y"]).error, /run id/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+const tmpRepo = (prefix) => {
+  const repo = mkdtempSync(join(tmpdir(), prefix));
+  const git = (...args) => execFileSync("git", ["-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", "-c", "user.name=ghcheck", "-c", "user.email=ghcheck@example.invalid", ...args], { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-q");
+  return { repo, git };
+};
+
+test("a green --only run records what each code path changes, so commit-mine can match a commit to it", () => {
+  const { repo, git } = tmpRepo("ghchg-");
+  try {
+    writeFileSync(join(repo, "a.rs"), "line 1\nline 2\nline 3\n");
+    writeFileSync(join(repo, "notes.md"), "x\n");
+    git("add", "-A"); git("commit", "-q", "-m", "base");
+    writeFileSync(join(repo, "a.rs"), "theirs\nline 1\nline 2\nmine\nline 3\n");
+    writeFileSync(join(repo, "b.rs"), "pub fn b() {}\n");
+    writeFileSync(join(repo, "notes.md"), "y\n");
+    const ch = changesOf(["a.rs#2", "b.rs", "notes.md"], git("rev-parse", "HEAD"), repo);
+    assert.deepEqual(Object.keys(ch).sort(), ["a.rs", "b.rs"], "only the files a build compiles");
+    assert.equal(ch["a.rs"].a, changeOf("x\n", "x\nmine\n").a, "a.rs#2 is the picked hunk alone, not the other writer's");
+    assert.deepEqual([ch["a.rs"].na, ch["a.rs"].nd, ch["b.rs"].na, ch["b.rs"].nd], [1, 0, 1, 0], "a new file adds its lines and drops none");
+  } finally { rmSync(repo, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
+test("a compile error two runs with other --only sets did not carry refuses the lines that build that crate, until it changes", () => {
+  const { repo, git } = tmpRepo("ghred-");
+  const file = join(repo, "head-reds.json");
+  try {
+    const crate = (dir, name, deps = "") => {
+      mkdirSync(join(repo, "crates", dir, "src"), { recursive: true });
+      writeFileSync(join(repo, "crates", dir, "Cargo.toml"), `[package]\nname = "${name}"\n\n[dependencies]\n${deps}`);
+      writeFileSync(join(repo, "crates", dir, "src", "lib.rs"), "pub fn x() {}\n");
+    };
+    crate("render", "engine-render"); crate("game", "engine-game", 'engine-render = { path = "../render" }\n'); crate("combat", "engine-combat");
+    writeFileSync(join(repo, "Cargo.toml"), "[workspace]\n"); writeFileSync(join(repo, "Cargo.lock"), "# lock\n");
+    git("add", "-A"); git("commit", "-q", "-m", "base");
+    const full = git("rev-parse", "HEAD");
+    const out = ["error[E0583]: file not found for module `weather`", "   --> crates\\render\\src\\lib.rs:261:1", "    |", "error: could not compile `engine-render` (lib) due to 3 previous errors"].join("\n");
+    const red = compileRedOf(out);
+    assert.deepEqual([red.code, red.file, red.line, red.dir], ["E0583", "crates/render/src/lib.rs", 261, "crates/render"]);
+    assert.equal(compileRedOf("test a ... FAILED\nthread 'a' panicked at crates/x/src/a.rs:1:1"), null, "a test failure is not a compile red");
+    const job = (only, rid) => ({ full, head: "abc1234", only, rid });
+    assert.equal(noteHeadRed(job(["crates/game/src/a.rs"], 1), red, { file, root: repo }).sets.length, 1);
+    const gameLine = "cargo test -p engine-game --lib x";
+    assert.equal(headRedFor(full, gameLine, ["crates/game/src/b.rs"], { file, root: repo }), null, "one run alone may be its own change breaking a caller");
+    noteHeadRed(job(["crates/game/src/a.rs#2"], 1), red, { file, root: repo });
+    assert.equal(headRedFor(full, gameLine, ["crates/game/src/b.rs"], { file, root: repo }), null, "the same files again confirm nothing");
+    noteHeadRed(job(["crates/combat/src/c.rs"], 2), red, { file, root: repo });
+    const hit = headRedFor(full, gameLine, ["crates/game/src/b.rs"], { file, root: repo });
+    assert.equal(hit?.crate, "engine-render", "confirmed: game builds on render's lib");
+    assert.match(masterRedLine(hit), /MASTER IS RED, NOT YOURS: engine-render does not compile at master \(since abc1234\): crates\/render\/src\/lib\.rs:261 error\[E0583\] file not found for module `weather` \(runs 1, 2 /);
+    assert.equal(headRedFor(full, "cargo test -p engine-combat --lib", null, { file, root: repo }), null, "a crate that does not build on render runs");
+    assert.equal(headRedFor(full, "cargo check -p engine-game", ["crates/render/src/lib.rs"], { file, root: repo }), null, "carrying the red file is fixing it");
+    assert.equal(headRedFor(full, "cargo test --workspace --lib", null, { file, root: repo })?.wide, true, "a workspace line is told, not refused");
+    writeFileSync(join(repo, "crates", "game", "src", "lib.rs"), "pub fn y() {}\n"); git("commit", "-q", "-am", "game");
+    assert.equal(headRedFor(git("rev-parse", "HEAD"), "cargo check -p engine-render", null, { file, root: repo })?.crate, "engine-render", "a commit elsewhere leaves it red");
+    writeFileSync(join(repo, "crates", "render", "src", "lib.rs"), "pub fn fixed() {}\n"); git("commit", "-q", "-am", "fix");
+    const fixed = git("rev-parse", "HEAD");
+    assert.equal(headRedFor(fixed, "cargo check -p engine-render", null, { file, root: repo }), null, "the fix moves render's tree: lines run again");
+    const testRed = compileRedOf(out.replace("(lib)", "(lib test)"));
+    noteHeadRed({ full: fixed, head: "def5678", only: ["x.rs"], rid: 3 }, testRed, { file, root: repo });
+    noteHeadRed({ full: fixed, head: "def5678", only: ["y.rs"], rid: 4 }, testRed, { file, root: repo });
+    assert.equal(headRedFor(fixed, "cargo test -p engine-render --lib", null, { file, root: repo })?.lib, false, "a red in render's tests refuses render's test lines");
+    assert.equal(headRedFor(fixed, gameLine, null, { file, root: repo }), null, "game builds render's lib, not its tests");
+    assert.equal(headRedFor(fixed, "cargo check -p engine-render", null, { file, root: repo }), null, "a check without --tests does not build them");
+  } finally { rmSync(repo, { recursive: true, force: true, maxRetries: 3 }); }
 });
