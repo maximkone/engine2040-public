@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::godray::GodrayConfig;
+use crate::heat_shimmer::ShimmerConfig;
 use engine_core::Fnv64;
 
 // ---------------------------------------------------------------------------
@@ -239,6 +241,12 @@ pub struct PostChain {
     /// RCAS sharpen strength on the graded display image, `0..=1`
     /// ([`FSR_SHARPEN_MAX`]); 0 is the identity.
     pub sharpen: f32,
+    /// Sun shafts on the fogged HDR frame, before exposure (SW91). Off adds
+    /// nothing, so a chain with shafts off keeps its exact bytes.
+    pub godray: GodrayConfig,
+    /// Heat shimmer over the brazier and the hot-sand patches (QA9). Off at the
+    /// potato tier; off adds nothing.
+    pub shimmer: ShimmerConfig,
 }
 
 impl Default for PostChain {
@@ -249,6 +257,8 @@ impl Default for PostChain {
             aces_white: 11.2,
             grade: GradeConfig::default(),
             sharpen: DEFAULT_CHAIN_SHARPEN,
+            godray: GodrayConfig::off(),
+            shimmer: ShimmerConfig::off(),
         }
     }
 }
@@ -265,6 +275,16 @@ impl PostChain {
             )));
         }
         self.grade.validate()?;
+        if !self.godray.is_off() {
+            self.godray
+                .validate()
+                .map_err(|e| PostError::Invalid(format!("godray: {e}")))?;
+        }
+        if !self.shimmer.is_off() {
+            self.shimmer
+                .validate()
+                .map_err(|e| PostError::Invalid(format!("shimmer: {e}")))?;
+        }
         if !self.sharpen.is_finite() || !(FSR_SHARPEN_MIN..=FSR_SHARPEN_MAX).contains(&self.sharpen)
         {
             return Err(PostError::Invalid(format!(
@@ -273,6 +293,24 @@ impl PostChain {
             )));
         }
         Ok(())
+    }
+
+    /// Chain with the heat shimmer configured (QA9): validates the grid, the
+    /// cap and every source through [`Self::validate`]. `ShimmerConfig::off()`
+    /// is the default and adds nothing.
+    pub fn with_shimmer(&self, shimmer: ShimmerConfig) -> Result<PostChain, PostError> {
+        let next = PostChain { shimmer, ..*self };
+        next.validate()?;
+        Ok(next)
+    }
+
+    /// Chain with the shaft pass configured (SW91): validates the mask grid and
+    /// constants through [`Self::validate`] so the returned chain always passes.
+    /// `GodrayConfig::off()` is the default and adds nothing.
+    pub fn with_godray(&self, godray: GodrayConfig) -> Result<PostChain, PostError> {
+        let next = PostChain { godray, ..*self };
+        next.validate()?;
+        Ok(next)
     }
 
     /// Chain with the sharpen finish set: validates the strength through
@@ -978,6 +1016,16 @@ pub(super) fn run_chain_core(
     let started = Instant::now();
     let flared = apply_bloom(hdr, width, height, &chain.bloom)?;
     let bloom_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // Sun shafts (SW91) ride the fogged HDR frame before exposure and the tone
+    // map; `GodrayConfig::off()` hands the frame back untouched.
+    let flared = crate::godray::composite(flared, width, height, &chain.godray);
+    // Heat shimmer (QA9) rides the same fogged frame, before exposure: the
+    // half-res pass only touches pixels inside a heat source's soft mask. The
+    // shimmer receipt carries the shafts' ms too: both are look-only adds here.
+    let started = Instant::now();
+    let (flared, shimmer_texels) =
+        crate::heat_shimmer::apply(flared, width, height, &chain.shimmer);
+    let shimmer_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     // Fused exposure plus ACES plus grade in one pass over the flared
     // frame: `tonemap_aces(p, mult, white)` repeats the old `p * mult`
@@ -1022,6 +1070,7 @@ pub(super) fn run_chain_core(
             taa: receipt("taa-resolve", 0, 0.0),
             upsample: receipt("taau", 0, 0.0),
             bloom: receipt("bloom", pixels, bloom_ms),
+            shimmer: receipt("shimmer", shimmer_texels, shimmer_ms),
             exposure: receipt("exposure", pixels, exposure_ms),
             aces: receipt("aces", pixels, aces_ms),
             // The display pass receipt carries grade plus the RCAS finish:
@@ -1106,6 +1155,101 @@ mod tests {
             cluster_ms: 0.0,
             ibl_ms: 0.0,
         }
+    }
+
+    /// QA9: the shimmer pass rides the fogged frame before exposure, touches
+    /// only the heat sources' soft mask, and posts its half-res texels and ms.
+    #[test]
+    fn chain_shimmer_touches_only_the_brazier() {
+        let plain = PostChain::default();
+        let (w, h) = (16u32, 8u32);
+        let hdr: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                [
+                    0.20 + f32::from(u16::try_from(i % 8).expect("fits")) * 0.01,
+                    0.4,
+                    0.3,
+                ]
+            })
+            .collect();
+        let mut cfg = crate::heat_shimmer::ShimmerConfig::for_frame(w, h);
+        cfg.sources[0] = Some(crate::heat_shimmer::HeatSource {
+            center_px: [2.0, 2.0],
+            radius_px: 3.0,
+        });
+        cfg.phase = 3;
+        let chain = plain
+            .with_shimmer(cfg)
+            .expect("the shimmer config is valid");
+        let off = run_chain(&hdr, w, h, &plain, &lights()).expect("off runs");
+        let on = run_chain(&hdr, w, h, &chain, &lights()).expect("on runs");
+        assert_eq!(off.receipt.shimmer.pixels, 0, "off posts no texels");
+        assert_eq!(on.receipt.shimmer.pixels, 8 * 4, "half-res texels ride");
+        assert!(on.receipt.shimmer.ms >= 0.0, "the receipt carries ms");
+        let outside = usize::try_from(w - 1).expect("fits");
+        assert_eq!(
+            off.ldr[outside], on.ldr[outside],
+            "a pixel outside the mask keeps its bytes"
+        );
+        let inside = 2 * usize::try_from(w).expect("fits");
+        assert_ne!(off.ldr[inside], on.ldr[inside], "the brazier texel moves");
+    }
+
+    #[test]
+    fn chain_shimmer_bad_grid_fails_loudly() {
+        let bad = crate::heat_shimmer::ShimmerConfig {
+            strength_px: 1.0,
+            sources: [Some(crate::heat_shimmer::HeatSource {
+                center_px: [1.0, 1.0],
+                radius_px: 2.0,
+            }); 4],
+            ..crate::heat_shimmer::ShimmerConfig::for_frame(0, 0)
+        };
+        let err = PostChain::default()
+            .with_shimmer(bad)
+            .expect_err("an empty grid is refused");
+        assert!(format!("{err}").contains("shimmer"), "{err}");
+    }
+
+    /// SW91 composite slice: the shaft pass sits on the fogged HDR frame
+    /// before exposure. Off keeps the chain's bytes; on adds light along rays
+    /// that reach a bright texel, and a dark frame gains nothing.
+    #[test]
+    fn chain_godray_off_keeps_the_bytes_and_on_adds_light() {
+        let plain = PostChain::default();
+        assert!(plain.godray.is_off(), "the default chain runs no shafts");
+        let cfg = crate::godray::GodrayConfig {
+            sun_px: [1.0, 1.0],
+            ..crate::godray::GodrayConfig::for_frame(4, 4, 4)
+        };
+        let shafts = plain.with_godray(cfg).expect("the config validates");
+        let dark = vec![[0.02f32, 0.02, 0.02]; 16];
+        let bright = vec![[1.2f32, 1.2, 1.2]; 16];
+        let off_dark = run_chain(&dark, 4, 4, &plain, &lights()).expect("off runs");
+        let on_dark = run_chain(&dark, 4, 4, &shafts, &lights()).expect("on runs");
+        assert_eq!(off_dark.ldr, on_dark.ldr, "a dark frame gains nothing");
+        let off_bright = run_chain(&bright, 4, 4, &plain, &lights()).expect("off runs");
+        let on_bright = run_chain(&bright, 4, 4, &shafts, &lights()).expect("on runs");
+        assert!(
+            on_bright
+                .ldr
+                .iter()
+                .zip(off_bright.ldr.iter())
+                .any(|(on, off)| on != off),
+            "a bright frame gains shafts"
+        );
+    }
+
+    #[test]
+    fn chain_godray_bad_mask_fails_loudly() {
+        let bad = crate::godray::GodrayConfig {
+            quarter_w: 0,
+            ..crate::godray::GodrayConfig::for_frame(4, 4, 4)
+        };
+        let err = PostChain::default()
+            .with_godray(bad)
+            .expect_err("an empty mask grid is refused");
+        assert!(format!("{err}").contains("godray"), "{err}");
     }
 
     /// Digest over display pixels: the replay proof for one chain run.
