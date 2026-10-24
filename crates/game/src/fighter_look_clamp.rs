@@ -49,6 +49,10 @@ pub(super) struct LimitLane {
     pos_ready: bool,
     /// True when `cur_pos` must move into `prev_pos` at the next tick.
     shift_pending: bool,
+    /// True when the slot was held on the last tick that advanced this lane:
+    /// a hitstop's impact tick advances like any other, the held ticks after
+    /// it keep every sample still.
+    held_last: bool,
 }
 
 impl LimitLane {
@@ -69,6 +73,7 @@ impl LimitLane {
             pos_seeded: false,
             pos_ready: false,
             shift_pending: false,
+            held_last: false,
         }
     }
 }
@@ -119,6 +124,24 @@ impl FighterLook {
         let dt = f32::from(u16::try_from(elapsed).unwrap_or(u16::MAX)) / TICK_HZ;
         for index in 0..MAX_LOOK_FIGHTERS {
             let slot = self.slots[index];
+            // LF10 hold: the impact pair shows the impact tick's pose at every
+            // frame of the freeze. The impact tick itself advances like any
+            // other (the lane has not seen a held tick yet); every held tick
+            // after it keeps the lane's samples as they are, because a limiter
+            // still easing toward the frozen clip, and the clamp's own shift of
+            // its previous sample, would each creep the drawn joints by a hair
+            // at alpha 0. `cur_tick` stays live so the position clamp keeps
+            // writing the frozen mid-tick sample at every frame.
+            let was_held = self.limit.get(index).is_some_and(|lane| lane.held_last);
+            if let Some(lane) = self.limit.get_mut(index) {
+                lane.held_last = slot.held;
+            }
+            if slot.held && was_held {
+                if let Some(lane) = self.limit.get_mut(index) {
+                    lane.cur_tick = self.tick;
+                }
+                continue;
+            }
             // Move last tick's clamped sample into the previous slot before
             // this tick takes a new one. A reset below clears the shift.
             if elapsed > 0 {
@@ -285,6 +308,74 @@ impl FighterLook {
         lane.span = elapsed.max(1);
         lane.cur_tick = self.tick;
         lane.shift_pending = true;
+    }
+
+    /// Retake this tick's clamped mid sample once the layers that run behind
+    /// [`observe_tick`](Self::observe_tick) have moved the pose: the throw clock, the
+    /// carry, and the balance poll with its ragdoll step (get-up age, standing hit reaction).
+    /// The clamp's memory must be the pose that was drawn, or the next tick caps its miss
+    /// against a pose nobody saw, and a joint pops past the budget by the distance the late
+    /// layers moved it (the showcase tour read 10-24 cm toe and forearm pops after every
+    /// get-up). A lane that took no sample this tick has nothing to replace. Presentation
+    /// only; the sim hash never reads it.
+    pub(super) fn resample_limit_positions(&mut self) {
+        for index in 0..MAX_LOOK_FIGHTERS {
+            let slot = self.slots[index];
+            let ramp = slot.seen
+                && !self.ragdolled(index)
+                && matches!(slot.balance, GaitPhase::Steady | GaitPhase::Stumbling);
+            // A lane that sampled earlier this tick replaces that sample; a lane with none at
+            // all is a slot that only now stands (a ragdoll stood up behind `observe_tick`):
+            // it starts here, on the frame the pop law starts its own track, or the first
+            // two samples would cap against a zero velocity the law never saw.
+            let Some((seeded, sampled)) = self
+                .limit
+                .get(index)
+                .map(|lane| (lane.pos_seeded, lane.pos_seeded && lane.cur_tick == self.tick))
+            else {
+                continue;
+            };
+            if !ramp || (seeded && !sampled) {
+                continue;
+            }
+            let raw = self.rigs.get(self.rig_for_slot(index)).and_then(|rig| {
+                let sample = self.slot_sample_raw(rig, index, &slot, 0.5, false).ok()?;
+                Some(
+                    sample
+                        .world
+                        .iter()
+                        .map(|m| [m[3][0], m[3][1], m[3][2]])
+                        .collect::<Vec<_>>(),
+                )
+            });
+            let (Some(mut raw), Some(lane)) = (raw, self.limit.get_mut(index)) else {
+                continue;
+            };
+            if raw.len() != lane.cur_pos.len() {
+                continue;
+            }
+            if !seeded {
+                lane.pos_seeded = true;
+                lane.pos_ready = false;
+                lane.span = 1;
+                lane.cur_tick = self.tick;
+                lane.shift_pending = true;
+            }
+            // The first sample of a lane lands whole; every later one is capped against the
+            // previous tick's, exactly as `advance_limit_positions` capped it.
+            if lane.pos_ready && lane.prev_pos.len() == raw.len() {
+                let dt = f32::from(u16::try_from(lane.span.max(1)).unwrap_or(u16::MAX)) / TICK_HZ;
+                clamp_world_joints(
+                    &mut raw,
+                    Some(lane.parents.as_slice()),
+                    &lane.prev_pos,
+                    &lane.prev_vel,
+                    dt,
+                    LOOK_POP_CAP_M,
+                );
+            }
+            lane.cur_pos.copy_from_slice(&raw);
+        }
     }
 
     /// Write this tick's final joint positions into `world`: the exact clamped
