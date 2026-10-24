@@ -27,7 +27,7 @@
 
 use crate::fight::{
     step_with_tables, try_step_with_tables, CombatError, FightEvent, FightState, Tables,
-    MAX_HP_PERMILLE, MAX_STAMINA, TABLES_V1, TABLES_V2,
+    FIGHT_RULES_V3, MAX_HP_PERMILLE, MAX_STAMINA, TABLES_V1, TABLES_V2,
 };
 use engine_input::FighterInput;
 
@@ -350,14 +350,15 @@ impl SwapInput {
 }
 
 /// Resolve a replay version tag to its static rows: 1 and legacy 0 give
-/// the shipped V1 row; 2 gives the readable-timing V2 row; anything else
-/// is unknown. Replacement sets are not
+/// the shipped V1 row; 2 gives the readable-timing V2 row; fight rules 3
+/// plays v2's rows (append-only, no rule change yet); anything else is
+/// unknown. Replacement sets are not
 /// statics: they travel as [`SwapInput`] and step via
 /// [`step_with_tables`].
 pub fn tables_for_version(version: u32) -> Option<&'static Tables> {
     match version {
         0 | TABLES_VERSION_V1 => Some(&TABLES_V1),
-        TABLES_VERSION_V2 => Some(&TABLES_V2),
+        TABLES_VERSION_V2 | FIGHT_RULES_V3 => Some(&TABLES_V2),
         _ => None,
     }
 }
@@ -766,6 +767,17 @@ mod tests {
             Err(CombatError::UnknownTableVersion(7))
         );
         assert_eq!(state, before);
+    }
+
+    /// SW27: fight rules 3 is append-only and plays v2's rows; 4 stays unknown.
+    #[test]
+    fn fight_rules_v3_resolves_to_the_v2_rows() {
+        let v3 = tables_for_version(crate::fight::FIGHT_RULES_V3).expect("v3 resolves");
+        assert!(core::ptr::eq(v3, &TABLES_V2), "v3 plays v2's rows");
+        assert!(
+            tables_for_version(crate::fight::FIGHT_RULES_V3 + 1).is_none(),
+            "v4 is unknown"
+        );
     }
 
     #[test]
