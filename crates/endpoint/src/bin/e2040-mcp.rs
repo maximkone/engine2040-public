@@ -103,11 +103,18 @@ async fn run(args: &[String], http: Option<SocketAddr>) -> i32 {
         return 1;
     }
     // AIN3: the door hosts `view.laws` by spawning the windowless arena. One
-    // registration, at start; a refused slot is a start failure. `view.observe`
-    // stays unsupported: the CPU pose supplies no camera and no picture share,
-    // and the door never fakes them.
+    // registration, at start; a refused slot is a start failure.
     if let Err(error) = engine_endpoint::packs::view::register_view_laws_source(
         engine_endpoint::packs::view::arena_view_line,
+    ) {
+        eprintln!("e2040-mcp: {error}");
+        return 1;
+    }
+    // SP62: `view.observe` reads the same windowless arena through its scene
+    // report (`--scene-report`): the camera, every drawn body with its screen
+    // rect and cover, and the laws line, all from the renderer-side truth.
+    if let Err(error) = engine_endpoint::packs::view::register_view_source(
+        engine_endpoint::packs::view::scene::scene_view_frame,
     ) {
         eprintln!("e2040-mcp: {error}");
         return 1;
