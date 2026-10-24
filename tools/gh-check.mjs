@@ -29,6 +29,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { applyHunks, changeOf, CODE_PATH, parseDiff } from "./commit-mine.mjs";
 import { lowerPriority, poolEnv } from "./jobserver.mjs";
 // Public-gate safe (2026-10-16): no static import of ./public-export.mjs here.
 // That file is in its own export DENY list, so the public checkout lacks it and
@@ -59,8 +60,56 @@ const run = (cmd, args, o = {}) => execFileSync(cmd, args, { encoding: "utf8", m
 const gdir = () => join(CLONE, ".git");
 const g = (args, o = {}) => run("git", ["--git-dir", gdir(), "-c", "core.autocrlf=false", ...args], o).trim();
 
-// Only one plain cargo check, test or clippy line goes to the runner (the workflow refuses the rest again).
-export const okCmd = (cmd) => /^cargo (check|test|clippy) /.test(cmd) && !/[&;|`<>]|\$\(/.test(cmd);
+// GitHub's rate limits (owner 2026-10-24: 20 agents dispatching at once got "HTTP 403: API rate limit exceeded"). A limited call
+// is not a broken check: wait and try again. RATE_WAITS_MS are the waits between tries; POLL_MS is one run-status read.
+export const RATE_WAITS_MS = [30_000, 60_000, 120_000];
+const POLL_MS = 20_000;
+export const rateLimited = (e) => /rate limit|secondary rate|HTTP 429|abuse detection/i.test(String(e?.stderr ?? e?.message ?? e));
+export const withRateRetry = async (call, waits = RATE_WAITS_MS, wait = sleep) => {
+  for (let i = 0; ; i++) {
+    try { return await call(); } catch (e) {
+      if (!rateLimited(e) || i >= waits.length) throw e;
+      console.log(`GitHub rate limit; trying again in ${waits[i] / 1000} s`);
+      await wait(waits[i]);
+    }
+  }
+};
+
+// One plain cargo check, test or clippy line, or one cargo-mutants slice (okMutants), goes to the runner; the workflow refuses the rest again.
+export const okCmd = (cmd) => (/^cargo (check|test|clippy) /.test(cmd) || okMutants(cmd)) && !/[&;|`<>]|\$\(/.test(cmd);
+
+// cargo-mutants (AF5, owner 2026-10-24): one crate and one slice of its mutants per line, never the whole workspace. The slice is
+// --shard k/n or -f <file> (a plain path); -t/--timeout takes seconds. Anything else is refused: --workspace, --all, -o (the workflow
+// reads mutants.out in the checkout), --in-place, a bare word, a `--` for the test binary.
+const MUTANTS_FLAGS = new Set(["-p", "--package", "--shard", "-f", "--file", "-t", "--timeout"]);
+export const okMutants = (cmd) => {
+  const w = words(cmd);
+  if (w.length < 4 || w[0] !== "cargo" || w[1] !== "mutants") return false;
+  const pkgs = [];
+  let slices = 0;
+  for (let i = 2; i < w.length; i++) {
+    const eq = /^(--[a-z]+)=(.*)$/.exec(w[i]); // --shard=1/8 is --shard 1/8
+    const flag = eq ? eq[1] : w[i];
+    if (!MUTANTS_FLAGS.has(flag)) return false;
+    const val = eq ? eq[2] : w[++i];
+    if (val === undefined || val.startsWith("-")) return false;
+    if (flag === "-p" || flag === "--package") {
+      if (!/^[a-z][a-z0-9_-]*$/.test(val)) return false;
+      pkgs.push(val);
+    } else if (flag === "--shard") {
+      // cargo-mutants counts shards from 0: k/n with k < n (0/20 .. 19/20); 20/20 is its own error
+      const s = /^(\d+)\/([1-9]\d*)$/.exec(val);
+      if (!s || Number(s[1]) >= Number(s[2]) || Number(s[2]) > 256) return false;
+      slices++;
+    } else if (flag === "-f" || flag === "--file") {
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(val) || val.split("/").includes("..")) return false;
+      slices++;
+    } else if (!/^[1-9]\d*$/.test(val)) return false;
+  }
+  return pkgs.length === 1 && slices > 0;
+};
+// A cargo-mutants line is heavy: it goes to a GitHub runner, never to this PC (not even as the fallback).
+export const isMutants = (cmd) => words(cmd)[0] === "cargo" && words(cmd)[1] === "mutants";
 
 // The words of a plain command line (a quoted run is one word, quotes removed).
 export const words = (s) => (String(s).match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((w) => w.replace(/^(["'])(.*)\1$/, "$2"));
@@ -69,14 +118,17 @@ export const DEFAULT_BUDGET_S = 100;
 // Printed by --help: every helper asks for the flags, so they are one command
 // away instead of a read of this file.
 export const USAGE = [
-  "gh-check: run ONE cargo check|test|clippy line on a GitHub runner (or this PC) against your working tree.",
+  "gh-check: run ONE cargo check|test|clippy line on a GitHub runner (or this PC) against your working tree, or one cargo mutants slice on GitHub.",
   "",
   "  node tools/gh-check.mjs [flags] cargo <check|test|clippy> <a cargo line>",
+  "  node tools/gh-check.mjs [flags] cargo mutants -p <crate> --shard <k/n> | -f <file>   (one slice of one crate's mutants: GitHub only)",
   "  node tools/gh-check.mjs --wait wip-xxxx [--budget <s>]   pick up a check that was still running",
   "",
   "Flags (all before the cargo word):",
   "  --budget <s>     how long one call waits (default 100, max 1740). A short call returns exit 3 and a --wait line.",
-  "  --only <paths>   build HEAD plus just these comma-separated paths; other writers' dirty files stay out",
+  "  --only <paths>   build HEAD plus just these comma-separated paths; other writers' dirty files stay out.",
+  "                   <path>#N takes only that hunk of a shared file (commit-mine --list numbers them): prove what you --pick",
+  "  --at <sha>       build that commit alone, no working-tree file: bisect a test that is red on master",
   "  --fresh          run again instead of returning the kept result",
   "  --remote-only    never fall back to this PC (exit 2 instead)",
   "  --local          run on this PC in the shared compile pool, no GitHub",
@@ -89,7 +141,7 @@ export const USAGE = [
 ].join("\n");
 // node tools/gh-check.mjs [--budget <s>] [--remote-only | --local] [--fresh] [--only <path,path>] cargo <check|test|clippy> ...   |   --wait <job> [--budget <s>]
 export const parseArgs = (argv, env = {}) => {
-  const out = { cmd: "", wait: null, mode: "auto", fresh: false, only: null, budget: Number(env.GH_CHECK_BUDGET) >= 1 ? Math.min(Number(env.GH_CHECK_BUDGET), 1740) : DEFAULT_BUDGET_S, error: null };
+  const out = { cmd: "", wait: null, mode: "auto", fresh: false, only: null, at: null, budget: Number(env.GH_CHECK_BUDGET) >= 1 ? Math.min(Number(env.GH_CHECK_BUDGET), 1740) : DEFAULT_BUDGET_S, error: null };
   let i = 0;
   for (; i < argv.length && argv[i].startsWith("-"); i++) {
     const a = argv[i];
@@ -98,15 +150,129 @@ export const parseArgs = (argv, env = {}) => {
     else if (a === "--remote-only") out.mode = "remote";
     else if (a === "--local") out.mode = "local";
     else if (a === "--fresh") out.fresh = true;
-    else if (a === "--only") { out.only = String(argv[++i] ?? "").split(",").map((x) => x.trim().split("\\").join("/")).filter(Boolean); if (!out.only.length) out.error = "--only needs paths, comma-separated"; }
+    else if (a === "--only") {
+      // Comma- or space-separated: every bare word up to `cargo` is a path (a space list was refused as the cargo line).
+      const words = [String(argv[++i] ?? "")];
+      while (i + 1 < argv.length && !argv[i + 1].startsWith("-") && argv[i + 1] !== "cargo") words.push(argv[++i]);
+      out.only = words.flatMap((w) => w.split(",")).map((x) => x.trim().split("\\").join("/")).filter(Boolean);
+      if (!out.only.length) out.error = "--only needs paths, comma-separated";
+    }
+    else if (a === "--at") { out.at = argv[++i] ?? ""; if (!/^[0-9a-f]{7,40}$/.test(out.at)) out.error = "--at needs a commit sha (7 to 40 hex)"; }
+    else if (a === "--master-reds") { out.masterReds = { run: argv[++i] ?? "", head: argv[++i] ?? "" }; if (!/^\d+$/.test(out.masterReds.run) || !/^[0-9a-f]{7,40}$/.test(out.masterReds.head)) out.error = "--master-reds needs the run id of a whole-workspace test run and the HEAD sha it built"; }
     else { out.error = `unknown flag ${a}`; break; }
   }
+  if (out.at && out.only && !out.error) out.error = "--at builds that commit alone; it takes no --only";
   out.cmd = argv.slice(i).join(" ").trim();
   // cargo has none of these, so one after the cargo line is ours put in the wrong place: cargo would only fail on it remotely
   const rest = argv.slice(i); const dash = rest.indexOf("--");
-  const late = (dash < 0 ? rest : rest.slice(0, dash)).find((a) => /^--(?:budget|fresh|only|wait|remote-only)$/.test(a));
+  const late = (dash < 0 ? rest : rest.slice(0, dash)).find((a) => /^--(?:at|budget|fresh|only|wait|remote-only)$/.test(a));
   if (late && !out.error) out.error = `${late} is a gh-check flag: put it before the cargo line (node tools/gh-check.mjs ${late} ... cargo ...)`;
   return out;
+};
+
+// ---- preflight: what --only cannot know until the remote build fails ----
+// Two --only mistakes cost a whole remote run (minutes) to learn, so both are refused here in under a second:
+// a directory (an overlay entry must be a file), and a `mod x;` / `#[path = ".."]` whose file is in neither
+// the --only list nor HEAD (the overlay then builds HEAD's copy without it and cargo fails with E0583).
+
+// The file a `mod name;` in `file` resolves to, in Rust's own order: `dir/name.rs` then `dir/name/mod.rs`,
+// where `dir` is the declaring file's folder except for `mod.rs`, `lib.rs` and `main.rs`, which own theirs.
+export const modFileOf = (file, name) => {
+  const p = file.split("\\").join("/");
+  const base = /(?:^|\/)(?:mod|lib|main)\.rs$/.test(p) ? p.replace(/[^/]+$/, "") : `${p.replace(/\.rs$/, "")}/`;
+  return [`${base}${name}.rs`, `${base}${name}/mod.rs`];
+};
+
+// Every module file a changed .rs declares, one candidate list per declaration: `mod x;` accepts `dir/x.rs`
+// then `dir/x/mod.rs` (rustc's own order), and only both missing is a missing module. A comment line is
+// skipped, so a commented-out `mod x;` is not a missing file.
+// A `mod x;` inside an inline `mod tests { ... }` lives one folder down (`ragdoll/tests/x.rs`): the open inline
+// blocks are tracked by indentation (rustfmt closes each with a `}` at its own indent), 2026-10-24: ragdoll.rs's
+// `mod tests { mod joint_table; }` was refused as a missing ragdoll/joint_table.rs.
+export const declaredModFiles = (file, text) => {
+  const out = [];
+  const src = String(text).split("\n");
+  const dir = file.split("\\").join("/").replace(/[^/]+$/, "");
+  const inline = []; // { name, indent } of the inline `mod name {` blocks around the current line
+  let pending = null; // a `#[path = "..."]` on its own line applies to the next `mod x;`
+  for (let i = 0; i < src.length; i++) {
+    const line = src[i].replace(/\r$/, "");
+    if (/^\s*(?:\/\/|\/\*|\*)/.test(line)) continue;
+    const indent = /^\s*/.exec(line)[0].length;
+    if (inline.length && /^\s*\}\s*$/.test(line) && indent === inline.at(-1).indent) { inline.pop(); continue; }
+    const block = /^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*$/.exec(line);
+    if (block) { inline.push({ name: block[1], indent }); pending = null; continue; }
+    const pathed = /#\[path\s*=\s*"([^"]+)"\]/.exec(line);
+    const decl = /(?:^|\s)(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/.exec(line);
+    if (!decl) { if (pathed) pending = pathed[1]; continue; }
+    const path = pathed?.[1] ?? pending; pending = null;
+    const nest = inline.map((m) => `${m.name}/`).join("");
+    // Inside inline blocks a #[path] counts from the module's own folder (`ragdoll/tests/` for ragdoll.rs), at the top from the file's.
+    const own = /(?:^|\/)(?:mod|lib|main)\.rs$/.test(file.split("\\").join("/")) ? dir : `${file.split("\\").join("/").replace(/\.rs$/, "")}/`;
+    if (path) { out.push([(nest ? own + nest : dir) + path.replace(/^\.\//, "")]); continue; }
+    out.push(modFileOf(file, decl[1]).map((p) => (nest ? p.replace(/[^/]+(?:\/mod)?\.rs$/, (leaf) => nest + leaf) : p)));
+  }
+  return out;
+};
+
+// Problems that make an --only set fail remotely, each with the fix in the message. `headPaths` is the set of
+// paths at HEAD (a null means read them from `root`). One git call, and only when a declaration names
+// something the --only list does not already cover.
+export const preflightOnly = (only, { root = ROOT, headPaths = null } = {}) => {
+  const problems = [];
+  const listed = (only ?? []).map((o) => String(o).replace(/#\d+$/, ""));
+  for (const p of listed) {
+    const abs = join(root, p);
+    // A path that is gone is the caller's `D` entry, not a directory mistake.
+    if (existsSync(abs) && statSync(abs).isDirectory()) {
+      problems.push(`--only ${p} is a directory: --only takes files, so name the files you changed (git status --short ${p} lists them, and every new .rs your mod line needs)`);
+    }
+  }
+  // Module files: only the changed .rs of this overlay can declare one, and only one the overlay lacks matters.
+  const rs = [...new Set(listed.filter((p) => p.endsWith(".rs")))];
+  if (!rs.length) return problems;
+  // A `<path>#N` entry ships HEAD plus those hunks (pickedText), so only their `mod` lines count: the working-tree file also holds
+  // other writers' `mod` lines, whose untracked files this overlay never carries (the preflight demanded them all, 2026-10-24).
+  const picks = new Map();
+  for (const o of only ?? []) { const m = /^(.*)#(\d+)$/.exec(String(o)); if (m) picks.set(m[1], [...(picks.get(m[1]) ?? []), Number(m[2])]); }
+  const groups = [];
+  for (const p of rs) {
+    if (!existsSync(join(root, p)) || statSync(join(root, p)).isDirectory()) continue; // a removed or directory entry has no modules
+    let text; try { text = picks.has(p) ? pickedText(p, picks.get(p), root) : readFileSync(join(root, p), "utf8"); } catch { continue; } // a bad #N fails later with its own message
+    for (const deps of declaredModFiles(p, text)) {
+      if (!deps.some((d) => listed.includes(d)) && !groups.some((g) => g.from === p && g.deps.join() === deps.join())) groups.push({ from: p, deps });
+    }
+  }
+  if (!groups.length) return problems;
+  const head = headPaths ?? headSet(root);
+  for (const { from, deps } of groups) {
+    if (deps.some((d) => head.has(d))) continue; // HEAD supplies it and the overlay leaves it alone
+    problems.push(`--only ${from} declares a module at ${deps[0]}, which is in neither --only nor HEAD: add it (--only ${[...(only ?? []).map(String), deps[0]].join(",")})`);
+  }
+  return problems;
+};
+
+// Every path at HEAD, one call. A file only has to exist there: the overlay updates the listed ones and
+// buildBase supplies the rest of HEAD.
+let headCache = null;
+const headSet = (root = ROOT) => {
+  if (headCache && headCache.root === root) return headCache.set;
+  const set = new Set(run("git", ["ls-tree", "-r", "--name-only", "HEAD"], { cwd: root }).split("\n").filter(Boolean));
+  headCache = { root, set };
+  return set;
+};
+
+// clippy without --no-deps lints every dependency too, so a foreign crate's warning turns a crate's own
+// clippy line red. `-p` names the crate, so the flag is safe exactly there.
+export const withNoDeps = (cmd) => {
+  const c = String(cmd);
+  if (!/^cargo\s+clippy\b/.test(c.trim())) return { cmd: c, added: false };
+  const parts = c.trim().split(/\s+/);
+  if (parts.includes("--no-deps")) return { cmd: c, added: false };
+  if (!parts.some((w) => w === "-p" || w === "--package" || /^--package=|^-p./.test(w))) return { cmd: c, added: false };
+  const dash = parts.indexOf("--");
+  if (dash >= 0) parts.splice(dash, 0, "--no-deps"); else parts.push("--no-deps");
+  return { cmd: parts.join(" "), added: true };
 };
 
 // ---- where a line runs: the Linux runner, the Windows runner, or the PC ----
@@ -195,6 +361,36 @@ export const testsRan = (log) => {
   return n;
 };
 
+// The source files a cargo error tail points at (`--> path:line`), slash-normalized, in order.
+export const errorFiles = (text) => [...new Set([...String(text).matchAll(/-->\s+([^\s:]+\.rs):\d+/g)].map((m) => m[1].split("\\").join("/")))];
+// Those of them that are dirty (uncommitted) in this tree: the likely cause when someone
+// else's half-done edit broke the build of everyone's line (owner 2026-10-24: most runs that
+// day failed on other agents' work in progress).
+export const dirtyErrorFiles = (text, root = ROOT) => {
+  const files = errorFiles(text);
+  if (!files.length) return [];
+  let status = "";
+  try { status = run("git", ["-C", root, "status", "--porcelain", "--", ...files]); } catch { return []; }
+  const dirty = new Set(status.split("\n").filter(Boolean).map((l) => l.slice(3).trim().split("\\").join("/")));
+  return files.filter((f) => dirty.has(f));
+};
+
+// Crates that keep their tests behind a feature (owner 2026-10-24: a "PASS, 0 tests ran" on these
+// crates was the usual trap). Kept small on purpose: `app` sends a line to the slower Windows
+// runner, so the feature is added only after a run without it proved nothing.
+export const TEST_FEATURES = { "engine-physfx": "rapier", "engine-game": "app", "engine-endpoint": "mcp" };
+// The same `cargo test` line with its crate's test feature added, or null when the line already
+// names features, is not a test of one of those crates, or has nothing to add.
+export const withTestFeatures = (cmd) => {
+  const w = words(cmd);
+  if (w[0] !== "cargo" || w[1] !== "test" || w.some((t) => /^(?:--features|-F|--all-features)(?:=|$)|^-F./.test(t))) return null;
+  const at = w.findIndex((t) => t === "-p" || t === "--package");
+  const feat = at >= 0 ? TEST_FEATURES[w[at + 1]] : undefined;
+  if (!feat) return null;
+  const dash = cmd.indexOf(" -- ");
+  return dash >= 0 ? `${cmd.slice(0, dash)} --features ${feat}${cmd.slice(dash)}` : `${cmd} --features ${feat}`;
+};
+
 // ---- the route: GitHub first, the PC second ----
 // remote(cmd, os) -> { code, retry?, why?, noTests? }; local(cmd) -> code. Pure over those two, so the tests fake them.
 export const route = async ({ cmd, mode = "auto", remote, local, say = console.log, root = ROOT }) => {
@@ -209,6 +405,13 @@ export const route = async ({ cmd, mode = "auto", remote, local, say = console.l
     if (res.code !== 2 || !res.retry) break;
     if (attempt < 2) say(`the check could not run${res.why ? ` (${res.why})` : ""}; trying once more`);
   }
+  // 0 tests ran on a crate whose tests sit behind a feature: run the line once more with it.
+  const featured = res.code === 0 && res.noTests ? withTestFeatures(cmd) : null;
+  if (featured) {
+    say(`0 tests ran: this crate keeps its tests behind a feature; running \`${featured}\``);
+    const again = await remote(featured, runnerOs(featured, root));
+    return afterRemote({ res: again, cmd: featured, mode, local, say });
+  }
   return afterRemote({ res, cmd, mode, local, say });
 };
 // A finished remote result into the exit code: a vacuous pass or a run that could not happen goes to the PC unless --remote-only.
@@ -218,13 +421,17 @@ export const afterRemote = async ({ res, cmd, mode, local, say }) => {
     if (mode === "remote") return 2;
     say("running it on the PC instead"); return local(cmd);
   }
-  if (res.code === 2 && mode !== "remote") { say("GitHub could not run it; running it on the PC instead"); return local(cmd); }
+  if (res.code === 2 && mode !== "remote") {
+    if (isMutants(cmd)) { say("GitHub could not run it; cargo mutants never runs on this PC"); return 2; }
+    say("GitHub could not run it; running it on the PC instead"); return local(cmd);
+  }
   return res.code;
 };
 
 // The same line on this PC: stdio straight through, cargo's own lock decides when it runs. Never workspace-wide.
 // A kept result of the same line on the same inputs answers at once; the same line already building here is waited for.
 export const runLocal = (cmd, say = console.log, { fresh = false, root = ROOT } = {}) => {
+  if (isMutants(cmd)) { say("refused: cargo mutants never runs on this PC (it is heavy): it goes to a GitHub runner, one -p crate and one --shard k/n per line"); return 2; }
   if (/\s--(?:workspace|all)(?=\s|$)/.test(cmd)) { say("refused: a workspace-wide cargo line never runs on this PC; give one crate (-p <crate>) or fix what stopped GitHub"); return 2; }
   const key = reuseKey(cmd, "pc", root);
   const lock = key && join(RESULTS, `${key}.lock`);
@@ -487,11 +694,24 @@ export const buildBase = async (head, full, ctx = ctxNow(), say = console.log) =
   } finally { rmSync(lock, { force: true }); }
 };
 
-// Dirty and untracked files of the working tree as index lines "mode sha<TAB>path" (mode 0 = removed); only: just these paths.
+// HEAD plus just the numbered hunks of one file, numbered as `commit-mine --list` numbers them: `--only <path>#N` proves exactly
+// what `commit-mine --pick <path>#N` commits, while other writers' hunks in the same file stay out.
+export const pickedText = (p, ns, cwd = ROOT) => {
+  const { hunks } = parseDiff(run("git", ["diff", "-U0", "--no-color", "--no-ext-diff", "HEAD", "--", p], { cwd }));
+  const chosen = ns.map((n) => hunks[n - 1]);
+  if (chosen.some((h) => !h)) throw new Error(`--only ${p}#N: the file has ${hunks.length} hunks (node tools/commit-mine.mjs --list ${p})`);
+  return applyHunks(run("git", ["show", `HEAD:${p}`], { cwd }), chosen);
+};
+
+// Dirty and untracked files of the working tree as index lines "mode sha<TAB>path" (mode 0 = removed); only: just these paths,
+// where an entry `<path>#N` takes that file as HEAD plus its picked hunks (pickedText).
 // All the blobs go through ONE git call (a process per file took 20 s for 270 files); a file with CRLF is hashed from an LF copy.
 const overlayLines = (only = null) => {
   const raw = run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: ROOT }).split("\0");
-  const want = (p) => !only || only.includes(p); const rm = (p) => `0 ${"0".repeat(40)}\t${p}`;
+  const picks = new Map();
+  for (const o of only ?? []) { const m = /^(.*)#(\d+)$/.exec(o); if (m) picks.set(m[1], [...(picks.get(m[1]) ?? []), Number(m[2])]); }
+  const paths = only?.map((o) => o.replace(/#\d+$/, ""));
+  const want = (p) => !paths || paths.includes(p); const rm = (p) => `0 ${"0".repeat(40)}\t${p}`;
   const lines = [], todo = []; const tmp = join(WORK, `ov-${process.pid}`);
   try {
     for (let i = 0; i < raw.length; i++) {
@@ -501,7 +721,8 @@ const overlayLines = (only = null) => {
       if (denied(p) || !want(p)) continue;
       const src = join(ROOT, p);
       if (x === "D" || y === "D" || !existsSync(src) || statSync(src).isDirectory()) { lines.push(rm(p)); continue; }
-      let buf = readFileSync(src), file = src;
+      let buf = picks.has(p) ? Buffer.from(pickedText(p, picks.get(p))) : readFileSync(src), file = src;
+      if (picks.has(p)) { mkdirSync(tmp, { recursive: true }); file = join(tmp, `pick-${todo.length}`); writeFileSync(file, buf); }
       if (!buf.includes(0) && buf.includes(13)) { mkdirSync(tmp, { recursive: true }); file = join(tmp, String(todo.length)); writeFileSync(file, buf.toString("utf8").replace(/\r\n/g, "\n")); }
       if (/[\n"]/.test(file)) { lines.push(`100644 ${g(["hash-object", "-w", "--stdin"], { input: readFileSync(file) })}\t${p}`); continue; } // --stdin-paths cannot spell this name
       lines.push({ p, at: todo.length }); todo.push(file.split("\\").join("/"));
@@ -509,6 +730,24 @@ const overlayLines = (only = null) => {
     const shas = todo.length ? g(["hash-object", "-w", "--no-filters", "--stdin-paths"], { input: `${todo.join("\n")}\n` }).split("\n") : [];
     return lines.map((l) => (typeof l === "string" ? l : `100644 ${shas[l.at].trim()}\t${l.p}`));
   } finally { rmSync(tmp, { recursive: true, force: true }); }
+};
+
+// What each code path of an --only set changes against the snapshot's HEAD (commit-mine's changeOf). A green run records
+// it, and commit-mine refuses a commit whose change to a code file no green run built.
+export const changesOf = (only, full, root = ROOT) => {
+  const picks = new Map();
+  for (const o of only ?? []) { const m = /^(.*)#(\d+)$/.exec(o); if (m) picks.set(m[1], [...(picks.get(m[1]) ?? []), Number(m[2])]); }
+  const out = {};
+  for (const p of new Set((only ?? []).map((o) => o.replace(/#\d+$/, "")))) {
+    if (!CODE_PATH.test(p)) continue;
+    try {
+      let head = ""; try { head = run("git", ["show", `${full}:${p}`], { cwd: root }); } catch { /* a new file */ }
+      const src = join(root, p);
+      const now = picks.has(p) ? pickedText(p, picks.get(p), root) : existsSync(src) && !statSync(src).isDirectory() ? readFileSync(src, "utf8") : "";
+      out[p] = changeOf(head, now);
+    } catch { /* a path that cannot be read fails the overlay with its own message */ }
+  }
+  return out;
 };
 
 // ---- jobs: a check that outlives one call keeps its state in target/gh-check/jobs/<id>.json ----
@@ -560,6 +799,31 @@ const sweep = () => {
 };
 
 const lapOf = (job) => `${Math.round((Date.now() - job.startedAt) / 1000)}s`;
+// One status read serves every waiting call on this PC (13 calls each reading their own branch every 10 s ran the repo's Actions
+// API out of its hourly quota): the newest check.yml runs are kept in RUNS for POLL_MS and each call finds its branch there.
+// A run missing from that list two minutes after its dispatch (it fell past the newest 100) is read by its branch.
+const RUNS = join(WORK, "runs.json");
+export const runFromList = (runs, branch) => runs.find((r) => r.headBranch === branch) ?? null;
+const recentRuns = () => {
+  try { const kept = JSON.parse(readFileSync(RUNS, "utf8")); if (Date.now() - kept.at < POLL_MS) return kept.runs; } catch { /* nothing kept yet */ }
+  const runs = JSON.parse(run("gh", ["run", "list", "-R", PUBLIC_REPO, "--workflow", "check.yml", "--json", "databaseId,status,conclusion,headBranch", "-L", "100"]) || "[]");
+  try { mkdirSync(WORK, { recursive: true }); const tmp = `${RUNS}.${process.pid}`; writeFileSync(tmp, JSON.stringify({ at: Date.now(), runs })); renameSync(tmp, RUNS); } catch { /* another call wrote it first */ }
+  return runs;
+};
+const runOf = (job) => runFromList(recentRuns(), job.id)
+  ?? (Date.now() - job.startedAt > 120_000 ? JSON.parse(run("gh", ["run", "list", "-R", PUBLIC_REPO, "--workflow", "check.yml", "--branch", job.id, "--json", "databaseId,status,conclusion", "-L", "1"]) || "[]")[0] ?? null : null);
+// The log lines of check.yml's "run the command" step. 2026-10-24: GitHub served jobs with no steps, so
+// `gh run view --log` named every line "UNKNOWN STEP" and every run read as "no command output"; the step
+// is then found by its script's first line (`case "$CMD" in`) up to the next step or the job cleanup.
+export const commandLines = (log) => {
+  const lines = log.split("\n");
+  const named = lines.filter((l) => l.includes("\trun the command\t"));
+  if (named.length) return named;
+  const start = lines.findIndex((l) => l.includes('##[group]Run case "$CMD" in'));
+  if (start < 0) return [];
+  const end = lines.findIndex((l, i) => i > start && (l.includes("##[group]Run ") || /Z Post job cleanup\./.test(l)));
+  return lines.slice(start, end < 0 ? lines.length : end);
+};
 // Wait for the run of a job until it completes or the call's budget (counted from the start of this process) ends.
 // Returns { code, retry?, why?, noTests? }; code 3 = still running (the branch and job file stay).
 const settle = async (job, budgetMs) => {
@@ -572,27 +836,159 @@ const settle = async (job, budgetMs) => {
       console.log(`[${lapOf(job)}] STILL RUNNING on the runner, not a failure (${job.cmd}). Do other work, then run: node tools/gh-check.mjs --wait ${job.id}`);
       return { code: 3 };
     }
-    await sleep(10_000);
+    await sleep(POLL_MS);
     try {
-      const list = JSON.parse(run("gh", ["run", "list", "-R", PUBLIC_REPO, "--workflow", "check.yml", "--branch", job.id, "--json", "databaseId,status,conclusion", "-L", "1"]) || "[]");
-      lost = 0; last = list[0] ?? null; job.rid = last?.databaseId ?? job.rid;
+      last = runOf(job); lost = 0; job.rid = last?.databaseId ?? job.rid;
       if (last?.status === "completed") break;
-    } catch { lost++; }
+    } catch (e) { if (rateLimited(e)) await sleep(RATE_WAITS_MS[0]); else lost++; }
   }
   let log = ""; try { log = run("gh", ["run", "view", String(job.rid), "-R", PUBLIC_REPO, "--log"]); } catch (e) { log = String(e.stdout ?? ""); }
-  const mine = log.split("\n").filter((l) => l.includes("\trun the command\t")).map((l) => l.split("\t").slice(2).join("\t").replace(/^\S+Z\s/, "").replace(/\x1b\[[0-9;]*m/g, ""));
+  const mine = commandLines(log).map((l) => l.split("\t").slice(2).join("\t").replace(/^\S+Z\s/, "").replace(/\x1b\[[0-9;]*m/g, ""));
   const url = `https://github.com/${PUBLIC_REPO}/actions/runs/${job.rid}`;
   if (!mine.length || last.conclusion === "cancelled") { console.log(`[${lapOf(job)}] the runner gave no command output (${last.conclusion}; setup failed or the run was cancelled): ${url}`); return { code: 2, why: `run ${last.conclusion} with no command output`, retry: true }; }
   const tail = mine.slice(-70).join("\n");
   console.log(tail);
   const ok = last.conclusion === "success";
   console.log(`[${lapOf(job)}] ${ok ? "PASS" : "FAIL"} on the runner: ${job.cmd} (run ${url})`);
+  if (!ok && !job.only && !job.at) {
+    const dirty = dirtyErrorFiles(tail);
+    if (dirty.length) console.log(`note: the errors point at files that are uncommitted in the shared tree (${dirty.join(", ")}). If they are not yours, another AI is mid-edit: prove yours with node tools/gh-check.mjs --only <your,paths> ${job.cmd}`);
+  }
+  if (!ok) { const note = knownRedsNote(mine.join("\n")); if (note) console.log(note); }
+  if (!ok && job.only && !job.at && job.full) {
+    try {
+      const red = compileRedOf(mine.join("\n"));
+      const carried = new Set(job.only.map((o) => String(o).replace(/#\d+$/, "")));
+      const r = red && !carried.has(red.file) ? noteHeadRed(job, red) : null;
+      if (r) console.log(r.sets.length >= 2
+        ? `note: ${masterRedLine(r)} Lines that build ${r.crate} are now refused at once until it changes.`
+        : `note: the first error is in ${r.file}:${r.line}, a file your --only did not carry: either your change breaks a caller there (then carry and fix it), or master is red there (a second run with other files that hits it confirms that, and the lead hears of it).`);
+    } catch { /* the note never fails a check */ }
+  }
   const res = { code: ok ? 0 : 1, noTests: ok && /^cargo test /.test(job.cmd) && !/\s--no-run(?=\s|$)/.test(job.cmd) && testsRan(mine.join("\n")) === 0 };
+  if (job.only && (ok || onlyKnownReds(mine.join("\n")))) recordProof({ t: Date.now(), head: job.head, only: job.only, cmd: job.cmd, run: job.rid, ...(ok ? {} : { knownReds: true }), ...(job.changes ? { changes: job.changes } : {}) });
   // Kept only when nothing the line builds changed while it ran (the key read again now).
   if (job.key && reuseKey(job.cmd, job.os ?? "ubuntu-latest") === job.key) keepResult(job.key, { ...res, where: job.os ?? "ubuntu-latest", cmd: job.cmd, url, tail: mine.slice(-30).join("\n") });
   return res;
 };
 const finish = (job, res) => { if (res.code !== 3) { dropBranch(job.id); dropJob(job.id); } return res; };
+// Known master reds: the failing tests of the lead's whole-workspace test run at a recent HEAD (`--master-reds <run> <head>`
+// writes them). A failed run whose every failure is on that list says so, so nobody re-runs for a red that is not theirs
+// (2026-10-24: whole-crate runs dying on other agents' reds were 20 of 53 failures in 45 minutes).
+export const MASTER_REDS = join(WORK, "master-reds.json");
+export const failedTests = (text) => [...new Set([...String(text).matchAll(/^test (\S+) \.\.\. FAILED\s*$/gm)].map((m) => m[1]))];
+export const knownRedsNote = (text, { file = MASTER_REDS, now = Date.now() } = {}) => {
+  let known; try { known = JSON.parse(readFileSync(file, "utf8")); } catch { return ""; }
+  if (!known?.tests?.length || now - (known.at ?? 0) > 6 * 3600_000) return "";
+  const failed = failedTests(text); if (!failed.length) return "";
+  const red = new Set(known.tests); const yours = failed.filter((t) => !red.has(t));
+  if (yours.length === failed.length) return "";
+  if (yours.length) return `note: ${failed.length - yours.length} of these ${failed.length} failures are known master reds at ${known.head} (not yours); yours: ${yours.join(", ")}`;
+  return `note: every failure here is a known master red at ${known.head} (${failed.join(", ")}), not yours: your change is green apart from them. Name them in your report; do not re-run for them.`;
+};
+// True when the run failed only on known master reds: no compile error, every failed test on the list. Such a run
+// counts as a proof (the change is green apart from reds that are not the change's), so commit-mine may commit it.
+export const onlyKnownReds = (text, { file = MASTER_REDS, now = Date.now() } = {}) => {
+  let known; try { known = JSON.parse(readFileSync(file, "utf8")); } catch { return false; }
+  if (!known?.tests?.length || now - (known.at ?? 0) > 6 * 3600_000) return false;
+  if (/could not compile|^error(\[E\d+\])?: /m.test(String(text).replace(/^error: test failed.*$/gm, ""))) return false;
+  const failed = failedTests(text); if (!failed.length) return false;
+  const red = new Set(known.tests);
+  return failed.every((t) => red.has(t));
+};
+const writeMasterReds = ({ run: rid, head }) => {
+  let log = ""; try { log = run("gh", ["run", "view", String(rid), "-R", PUBLIC_REPO, "--log"]); } catch (e) { log = String(e.stdout ?? ""); }
+  const tests = failedTests(commandLines(log).map((l) => l.split("\t").slice(2).join("\t").replace(/^\S+Z\s/, "").replace(/\x1b\[[0-9;]*m/g, "")).join("\n"));
+  mkdirSync(WORK, { recursive: true }); writeFileSync(MASTER_REDS, JSON.stringify({ head, run: Number(rid), at: Date.now(), tests }, null, 1));
+  console.log(`known master reds at ${head} (run ${rid}): ${tests.length}${tests.length ? `\n  ${tests.join("\n  ")}` : ""}`);
+  return 0;
+};
+// ---- master red: a compile error in a file an --only run did not carry is HEAD's own ----
+// 2026-10-24: one broken render lib.rs on master was 43 of 70 sampled failed runs in two hours: each of ~40 agents found
+// it alone, with up to three runs each. One run alone can be its own change breaking a caller, so a second run with
+// another --only set hitting the same error confirms it; after that a line that builds that crate is refused at once
+// with the cause. The record holds while the crate and every crate it builds on are the same trees as at the red:
+// a commit to any of them (the fix) lets the next line run again.
+export const HEAD_REDS = join(WORK, "head-reds.json");
+// The first compile error of a cargo output: { code, msg, file, line, dir, failed: [{ crate, target }] }, or null.
+export const compileRedOf = (text) => {
+  const lines = String(text).split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^error\[(E\d{4})\]: (.*)$/.exec(lines[i].trim());
+    if (!m) continue;
+    for (let k = i + 1; k < Math.min(lines.length, i + 8); k++) {
+      const at = /^\s*-->\s+(.+?):(\d+):\d+/.exec(lines[k]);
+      if (!at) continue;
+      const file = at[1].split("\\").join("/");
+      const dir = /^(crates\/[^/]+)\//.exec(file)?.[1];
+      if (!dir) return null;
+      const failed = [...String(text).matchAll(/could not compile `([\w-]+)` \(([^)]+)\)/g)].map((x) => ({ crate: x[1], target: x[2] }));
+      return { code: m[1], msg: m[2].slice(0, 160), file, line: Number(at[2]), dir, failed };
+    }
+    return null;
+  }
+  return null;
+};
+// The trees of a crate and every crate it builds on (dev deps included) at a commit, plus the root manifest and lock, hashed.
+export const closureKey = (name, commit, g, root = ROOT) => {
+  const dirs = closureDirs([name], g);
+  if (!dirs) return null;
+  const specs = [...dirs, "Cargo.toml", "Cargo.lock"].map((d) => `${commit}:${d}`);
+  return createHash("sha256").update(run("git", ["rev-parse", ...specs], { cwd: root })).digest("hex").slice(0, 24);
+};
+export const noteHeadRed = (job, red, { file = HEAD_REDS, now = Date.now(), root = ROOT, graph = null } = {}) => {
+  const g = graph ?? crateGraph(root);
+  const name = [...g].find(([, v]) => v.dir === red.dir)?.[0];
+  if (!name) return null;
+  const key = closureKey(name, job.full, g, root);
+  if (!key) return null;
+  let all = []; try { all = JSON.parse(readFileSync(file, "utf8")); } catch { /* the first one */ }
+  all = all.filter((r) => now - r.at < 6 * 3600_000);
+  const id = `${key}:${red.file}:${red.line}:${red.code}`;
+  let r = all.find((x) => x.id === id);
+  if (!r) { r = { id, key, file: red.file, line: red.line, code: red.code, msg: red.msg, crate: name, dir: red.dir, lib: false, head: job.head, sets: [], runs: [], at: now }; all.push(r); }
+  r.lib ||= red.failed.some((f) => f.crate === name && f.target === "lib");
+  const set = [...new Set(job.only.map((o) => String(o).replace(/#\d+$/, "")))].sort().join(",");
+  if (!r.sets.includes(set)) { r.sets.push(set); r.runs.push(job.rid); }
+  mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(all.slice(-30), null, 1));
+  return r;
+};
+// The confirmed red this line would build at HEAD `full`, or null. wide: a --workspace line (told, not refused: its other
+// crates still test). A line whose --only carries the red file is fixing it and runs.
+export const headRedFor = (full, cmd, only, { file = HEAD_REDS, root = ROOT, graph = null } = {}) => {
+  let all; try { all = JSON.parse(readFileSync(file, "utf8")); } catch { return null; }
+  const reds = all.filter((r) => r.sets?.length >= 2);
+  if (!reds.length) return null;
+  const carried = new Set((only ?? []).map((o) => String(o).replace(/#\d+$/, "")));
+  const w = words(cmd); const pkgs = []; let wide = false;
+  for (let i = 2; i < w.length && w[i] !== "--"; i++) {
+    if (w[i] === "-p" || w[i] === "--package") pkgs.push(w[++i] ?? "");
+    else if (/^--package=/.test(w[i])) pkgs.push(w[i].slice(10));
+    else if (/^--(?:workspace|all)$/.test(w[i])) wide = true;
+  }
+  const tests = w[1] === "test" || w.some((t) => /^--(?:all-targets|tests)$/.test(t));
+  const g = graph ?? crateGraph(root);
+  for (const r of reds) {
+    if (carried.has(r.file)) continue;
+    const hits = wide || (r.lib ? closureDirs(pkgs, g)?.includes(r.dir) : tests && pkgs.includes(r.crate));
+    if (!hits) continue;
+    let now; try { now = closureKey(r.crate, full, g, root); } catch { continue; }
+    if (now === r.key) return { ...r, wide };
+  }
+  return null;
+};
+export const masterRedLine = (r) => `MASTER IS RED, NOT YOURS: ${r.crate}${r.lib ? "" : "'s tests"} does not compile at master (since ${r.head}): ${r.file}:${r.line} error[${r.code}] ${r.msg} (runs ${r.runs.join(", ")} with different --only sets).`;
+
+// Every green --only set, newest last: commit-mine refuses a commit that leaves out a still-dirty file the proof carried
+// (2026-10-24: proofs passed on overlays whose new files the commits left behind, and HEAD stopped compiling for everyone).
+export const PROVED = join(WORK, "proved.jsonl");
+export const recordProof = (row, file = PROVED) => {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    const old = existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
+    writeFileSync(file, [...old.slice(-499), JSON.stringify(row)].join("\n") + "\n");
+  } catch { /* a lost row only skips one guard */ }
+};
 // A run of the same line on the same inputs that another call started and that is still going.
 const liveJob = (key) => {
   for (const f of existsSync(JOBS) ? readdirSync(JOBS) : []) {
@@ -636,16 +1032,61 @@ const mirrorParent = () => {
 
 // The newest pushed tree also stays on the mirror under HAVE: a wip branch is deleted at once, and a git push sends everything the remote
 // does not advertise, so the dirty files of other sessions (95 MB of generated assets at times) went up again on every call (60 to 170 s,
-// HTTP 408). With HAVE the next push sends only what changed since. One local pusher moves it at a time (a lock); ci.yml runs on main only.
+// HTTP 408). One local pusher moves it at a time (a lock); ci.yml runs on main only. HAVE saves bytes only as a PARENT of the wip commit:
+// git push leaves out what the new commit's parents reach, not what every advertised ref reaches (pack-objects marks edge trees only), so
+// a HAVE beside the commit still sent 865 objects / 87 MB a push, and 9 with it as the second parent (lead 2026-10-24).
+// HAVE_PUSHED is this PC's note of the last commit it moved HAVE to; the next wip commit takes it as that second parent.
 const HAVE = "refs/gh-check/have";
-export const transient = (why) => /RPC failed|HTTP [45]\d\d|returned error: [45]\d\d|Could not (?:connect|resolve)|timed out|reset by peer|connection reset|hung up|early EOF|unexpected disconnect|cannot lock ref|failed to update ref|remote unpack|unable to write file|could not write pack|index-pack|pack-objects/i.test(String(why));
+const HAVE_PUSHED = "refs/gh-check/have-pushed";
+/** The second parent for the next wip commit: HAVE_PUSHED, unless there is none or it is the first parent. */
+export const haveParent = (first, dir = gdir()) => {
+  try { const sha = run("git", ["--git-dir", dir, "rev-parse", "--verify", "--quiet", `${HAVE_PUSHED}^{commit}`]).trim(); return sha && sha !== first ? sha : ""; }
+  catch { return ""; }
+};
+export const transient = (why) => /RPC failed|REFUSED_STREAM|stream error|HTTP [45]\d\d|returned error: [45]\d\d|Could not (?:connect|resolve)|timed out|reset by peer|connection reset|hung up|early EOF|unexpected disconnect|cannot lock ref|failed to update ref|remote unpack|unable to write file|could not write pack|index-pack|pack-objects/i.test(String(why));
 // A lost pack race prints a 150-character GitHub object path that reads like a
 // failure and fills the caller's context; the retry line says what happened,
 // and only the last attempt (which throws) keeps git's own words.
 export const pushNote = (why) => /unable to write file|could not write pack|index-pack|pack-objects|remote unpack/i.test(String(why))
   ? "the mirror lost the pack race (GitHub side); trying again"
   : `the push failed (${why}); trying again`;
+/** The `[local ...]` entries for one push: the transfer's own seconds, then the wait when it was over a second. */
+export const pushLaps = ({ seconds, waitedMs }) => [`push ${seconds.toFixed(1)}`, ...(waitedMs >= 1000 ? [`pushwait ${(waitedMs / 1000).toFixed(1)}`] : [])];
+
+// One push at a time. With 19 checks pushing together the mirror took the pack race and every call paid
+// 5 to 170 s (2.1 GB of pack-objects on this PC, 2026-10-24); a waiter says so once, then waits its turn.
+// The wait is not charged to the push's own seconds, so the lap line still measures the transfer.
+// One push at a time, and a waiter waits instead of failing. The uplink is a phone hotspot: 76 MB of new
+// content plus 81 parallel pushes meant no push finished, so HAVE never moved and every push re-sent it all
+// (HTTP 408, 650-800 s, lead 2026-10-24). One at a time, the first push lands the big delta once and the rest
+// are small. A wait past the cap (a holder hung for 20 min) pushes without a slot; it never fails a run.
+const PUSH_SLOTS = 1;
+const PUSH_LOCK_CAP_MS = 1_200_000;
+let heldSlot = null;
+/** Where the first push slot lives under `dir` (target/gh-check unless a caller names another), so a test
+ *  can hold slots in its own directory instead of the fleet's. */
+export const pushLockPath = (dir = WORK) => join(dir, "push.lock");
+export const pushLock = async ({ capMs = PUSH_LOCK_CAP_MS, say = console.log, slots = PUSH_SLOTS, dir = WORK } = {}) => {
+  mkdirSync(dir, { recursive: true });
+  const lock = pushLockPath(dir);
+  const slotPath = (i) => (i === 0 ? lock : `${lock}.${i}`);
+  const t0 = Date.now(); let said = false;
+  for (;;) {
+    for (let i = 0; i < slots; i++) {
+      const p = slotPath(i);
+      if (existsSync(p) && !ownerAlive(p)) rmSync(p, { force: true });
+      try { writeFileSync(p, String(process.pid), { flag: "wx" }); heldSlot = p; return Date.now() - t0; } catch { /* slot taken */ }
+    }
+    if (!said) { say(`waiting for a push slot (${slots} pushes at a time, so the mirror does not lose the pack race)`); said = true; }
+    if (Date.now() - t0 > capMs) { say(`no push slot after ${Math.round(capMs / 1000)} s: pushing without one`); heldSlot = null; return Date.now() - t0; }
+    await sleep(250);
+  }
+};
+/** Frees the slot this process holds (no-op when it pushed without one). */
+export const pushUnlock = () => { if (heldSlot) rmSync(heldSlot, { force: true }); heldSlot = null; };
+
 // Pushes the wip commit; a transient network or ref-lock error is tried again (3 pushes, 2 s and 4 s apart).
+// Returns the seconds the transfer took and the seconds spent waiting for the push lock.
 const pushWip = async (commit, id) => {
   const lock = join(WORK, "have.lock"), off = join(WORK, "have.off"); let mine = false;
   try { if (Date.now() - statSync(off).mtimeMs > 3_600_000) rmSync(off, { force: true }); } catch { /* no off switch */ }
@@ -654,24 +1095,30 @@ const pushWip = async (commit, id) => {
     try { writeFileSync(lock, String(process.pid), { flag: "wx" }); mine = true; } catch { /* another call moves HAVE */ }
   }
   const wip = `refs/heads/${id}`; const refs = [`${commit}:${wip}`, ...(mine ? [`+${commit}:${HAVE}`] : [])];
+  const noteHave = () => { if (!mine) return; try { run("git", ["--git-dir", gdir(), "update-ref", HAVE_PUSHED, commit]); } catch { /* the next commit goes without it */ } };
+  let waitedMs = 0, held = false;
   try {
+    waitedMs = await pushLock(); held = true;
+    const t0 = Date.now();
     for (let attempt = 1; ; attempt++) {
-      try { run("git", ["--git-dir", gdir(), "push", "--porcelain", "origin", ...refs]); return; }
+      // No LFS lock check: nobody locks here, and its extra API call failed whole pushes (http2 REFUSED_STREAM, 2026-10-24).
+      try { run("git", ["--git-dir", gdir(), "-c", "lfs.locksverify=false", "push", "--porcelain", "origin", ...refs]); noteHave(); return { seconds: (Date.now() - t0) / 1000, waitedMs }; }
       catch (e) {
         const rows = String(e.stdout ?? "").split("\n").filter((l) => l.includes("\t")); const bad = (ref) => rows.some((l) => l.startsWith("!") && l.includes(`:${ref}\t`));
-        if (rows.some((l) => !l.startsWith("!") && l.includes(`:${wip}\t`))) { if (bad(HAVE)) writeFileSync(off, ""); return; } // the wip branch is there; a refused HAVE is switched off for an hour
+        if (rows.some((l) => !l.startsWith("!") && l.includes(`:${wip}\t`))) { if (bad(HAVE)) writeFileSync(off, ""); else noteHave(); return { seconds: (Date.now() - t0) / 1000, waitedMs }; } // the wip branch is there; a refused HAVE is switched off for an hour
         const why = whyLine(e); if (attempt >= 3 || !transient(why)) throw e;
         console.log(`${pushNote(why)} in ${2 * attempt} s`); await sleep(2000 * attempt);
       }
     }
-  } finally { if (mine) rmSync(lock, { force: true }); }
+  } finally { if (held) pushUnlock(); if (mine) rmSync(lock, { force: true }); }
 };
 
 // One fresh check: snapshot, push, dispatch, wait. A failure before the dispatch is { code: 2, retry: true }.
 // A kept result answers first; a live twin is joined instead of dispatched again.
 // only: build HEAD plus just these working-tree paths (others' unfinished files stay out); such a run is not kept.
-const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
-  const key = only ? null : reuseKey(cmd, os);
+// at: build that commit alone, no working-tree file (a bisect of a red test); such a run is not kept either.
+const startRemote = async (cmd, os, budgetMs, fresh = false, only = null, at = null) => {
+  const key = only || at ? null : reuseKey(cmd, os);
   if (key && !fresh) {
     const kept = keptResult(key);
     if (kept) { sayKept(kept, console.log); return { code: kept.code }; }
@@ -680,8 +1127,17 @@ const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
   }
   if (!existsSync(gdir())) { console.log("no mirror clone yet: run node tools/farm.mjs once"); return { code: 2, why: "no mirror clone", retry: false }; }
   const rev = (...a) => run("git", ["rev-parse", ...a], { cwd: ROOT }).trim();
-  let full = rev("HEAD"), head = rev("--short", full);
-  const job = { id: newId(), cmd, os, key, head, startedAt: Date.now() };
+  let full = rev(at ? `${at}^{commit}` : "HEAD"), head = rev("--short", full);
+  const job = { id: newId(), cmd, os, key, head, startedAt: Date.now(), only: only ?? null, at: at ?? null };
+  // A confirmed master red this line builds: say so now instead of a run that fails the same way (--fresh runs anyway).
+  if (!at && !fresh) {
+    let red = null; try { red = headRedFor(full, cmd, only); } catch { /* never blocks a check */ }
+    if (red && !red.wide) {
+      console.log(`${masterRedLine(red)}\nThis line builds ${red.crate}, so it would fail the same way: not run. Do not change your code for it. Do other work (another row, a test you can prove on another crate), then git pull and run this again when the fix lands. Fixing it yourself: put ${red.file} in --only. --fresh runs anyway.`);
+      return { code: 1, why: "known master red" };
+    }
+    if (red) console.log(`note: ${masterRedLine(red)} This --workspace line runs anyway; ${red.crate} will fail in it.`);
+  }
   let pushed = false, res = { code: 2, retry: true };
   // Seconds per phase of the local half, printed once ([local 12s: fetch 3.0 base 4.1 ...]): where a slow call went.
   const laps = []; const lap = async (name, fn) => { const t0 = Date.now(); try { return await fn(); } finally { laps.push(`${name} ${((Date.now() - t0) / 1000).toFixed(1)}`); } };
@@ -695,22 +1151,30 @@ const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
       tree = await lap("overlay", async () => withIndex(job.id, (env) => {
         const e = { ...process.env, ...env };
         run("git", ["--git-dir", gdir(), "read-tree", base], { env: e });
-        const lines = overlayLines(only);
+        const lines = at ? [] : overlayLines(only);
         if (only) console.log(`--only: HEAD ${head} plus ${lines.length} of your paths`);
         if (lines.length) run("git", ["--git-dir", gdir(), "update-index", "-z", "--add", "--replace", "--index-info"], { env: e, input: lines.map((l) => `${l}\0`).join("") });
         return run("git", ["--git-dir", gdir(), "write-tree"], { env: e }).trim();
       }));
+      if (at) break;
       const now = rev("HEAD"); if (now === full || again >= 2) break;
       console.log(`HEAD moved to ${now.slice(0, 9)} while the snapshot was built: again`); // the dirty files are judged against the new HEAD
       full = now; head = job.head = rev("--short", full);
     }
+    job.full = full;
+    if (only) { try { job.changes = changesOf(only, full); } catch { /* a proof without changes only skips commit-mine's line check */ } }
     const env = { ...process.env, GIT_AUTHOR_NAME: "maximkone", GIT_AUTHOR_EMAIL: "maximkone@users.noreply.github.com", GIT_COMMITTER_NAME: "maximkone", GIT_COMMITTER_EMAIL: "maximkone@users.noreply.github.com" };
-    const commit = await lap("commit", async () => { const parent = mirrorParent(); return run("git", ["--git-dir", gdir(), "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", `wip ${job.id} of ${head}: ${cmd}`], { env }).trim(); });
-    await lap("push", () => pushWip(commit, job.id)); pushed = true;
+    const commit = await lap("commit", async () => { const parent = mirrorParent(); const have = haveParent(parent); return run("git", ["--git-dir", gdir(), "commit-tree", tree, ...(parent ? ["-p", parent] : []), ...(have ? ["-p", have] : []), "-m", `wip ${job.id} of ${head}: ${cmd}`], { env }).trim(); });
+    // Not lap(): lap appends after the call returns, and this has to report the transfer alone, not the lock wait.
+    {
+      const pr = await pushWip(commit, job.id);
+      laps.push(...pushLaps(pr));
+    }
+    pushed = true;
     if (process.env.GH_CHECK_DRY) { lapLine(); console.log("GH_CHECK_DRY: pushed, not dispatched"); return { code: 2, why: "dry run", retry: false }; } // measures the local half without a GitHub run (use with --remote-only)
-    console.log(`[${lapOf(job)}] sent ${job.id} (HEAD ${head} + working tree) to the ${os} runner: ${cmd}`);
+    console.log(`[${lapOf(job)}] sent ${job.id} (${at ? `commit ${head} alone` : `HEAD ${head} + working tree`}) to the ${os} runner: ${cmd}`);
     // The os input only when it is not the default, so a mirror whose check.yml predates it still takes Linux lines.
-    try { await lap("dispatch", async () => run("gh", ["workflow", "run", "check.yml", "-R", PUBLIC_REPO, "--ref", job.id, "-f", `cmd=${cmd}`, ...(os === "ubuntu-latest" ? [] : ["-f", `os=${os}`])])); saveJob(job); lapLine(); }
+    try { await lap("dispatch", () => withRateRetry(async () => run("gh", ["workflow", "run", "check.yml", "-R", PUBLIC_REPO, "--ref", job.id, "-f", `cmd=${cmd}`, ...(os === "ubuntu-latest" ? [] : ["-f", `os=${os}`])]))); saveJob(job); lapLine(); }
     catch (e) { lapLine(); const why = whyLine(e); console.log(`dispatch failed (is check.yml on the mirror's main? run node tools/farm.mjs once): ${why}`); res = { code: 2, why: "dispatch failed", retry: true }; return res; }
     res = await settle(job, budgetMs);
     return res;
@@ -733,12 +1197,21 @@ export const main = async (argv, env = process.env) => {
   const a = parseArgs(argv, env);
   if (a.error) { console.log(`refused: ${a.error}\nnode tools/gh-check.mjs --help lists the flags`); return 2; }
   const budgetMs = a.budget * 1000;
+  if (a.masterReds) return writeMasterReds(a.masterReds);
   if (a.wait) {
     const job = loadJob(a.wait);
     const res = await waitRemote(a.wait, budgetMs);
     return job ? afterRemote({ res, cmd: job.cmd, mode: "auto", local: (c) => runLocal(c, console.log, { fresh: a.fresh }), say: console.log }) : res.code;
   }
-  if (!okCmd(a.cmd)) { console.log("refused: give one plain `cargo check|test|clippy ...` command, such as `node tools/gh-check.mjs cargo test -p engine-net --lib one_filter` (`node tools/gh-check.mjs --help` lists the flags)"); return 2; }
-  return route({ cmd: a.cmd, mode: a.only || env.GH_CHECK_DRY ? "remote" : a.mode, remote: (c, os) => startRemote(c, os, budgetMs, a.fresh, a.only), local: (c) => runLocal(c, console.log, { fresh: a.fresh }) });
+  if (!okCmd(a.cmd)) { console.log("refused: give one plain `cargo check|test|clippy ...` command, such as `node tools/gh-check.mjs cargo test -p engine-net --lib one_filter`, or one cargo mutants slice, such as `cargo mutants -p engine-core --shard 1/8` (`node tools/gh-check.mjs --help` lists the flags)"); return 2; }
+  if (isMutants(a.cmd) && a.mode === "local") { console.log("refused: cargo mutants never runs on this PC: drop --local (the slice goes to a GitHub runner)"); return 2; }
+  // A dependency's lint is not this crate's: --no-deps is added here, not left to the caller to remember.
+  const nd = withNoDeps(a.cmd);
+  if (nd.added) console.log(`note: clippy with -p now adds --no-deps, so a dependency's warning cannot fail this line: ${nd.cmd}`);
+  a.cmd = nd.cmd;
+  // --only mistakes that cost a whole remote run are refused here, before the fetch and the push.
+  const problems = a.only ? preflightOnly(a.only) : [];
+  if (problems.length) { console.log("refused: " + problems.join("\nrefused: ")); return 2; }
+  return route({ cmd: a.cmd, mode: a.only || a.at || env.GH_CHECK_DRY ? "remote" : a.mode, remote: (c, os) => startRemote(c, os, budgetMs, a.fresh, a.only, a.at), local: (c) => runLocal(c, console.log, { fresh: a.fresh }) });
 };
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main(process.argv.slice(2)).then((c) => process.exit(c));

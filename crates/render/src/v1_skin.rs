@@ -1755,6 +1755,9 @@ mod tests {
         assert_eq!(bad[2].length, 0.0);
     }
 
+    // GpuSkinned and GpuSkinError exist only with `window`; without the gate every
+    // `--features v1` test line failed to build (seen on GitHub 2026-10-24).
+    #[cfg(feature = "window")]
     #[test]
     fn skinned_capture_darkens_when_orm_occlusion_drops() {
         // EG12: fs_skinned samples orm.x. With a neutral white ORM vs an
