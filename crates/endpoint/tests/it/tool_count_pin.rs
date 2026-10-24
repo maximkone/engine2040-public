@@ -53,8 +53,15 @@ use engine_endpoint::{
 /// `fx.ragdoll`, `fx.limb`, `fx.break`, `fx.blast` and `fx.undo` on demand
 /// (AD30), so every arm moves up by five more. BG4 (2026-10-23) adds the four
 /// clip verbs (`anim.clip.trim`, `anim.clip.retime`, `anim.clip.mirror`,
-/// `anim.clip.undo`), so every arm moves up by four more.
-const EXPECTED_ROUTER: usize = 95
+/// `anim.clip.undo`), so every arm moves up by four more. After BG4 five packs
+/// joined `PACK_NAMES` without moving this pin: `world`, `level_paint` (DOOR8's
+/// one verb `level.paint`, 2026-10-24), `stage`, `ui` and `audio`, and further
+/// verbs landed inside existing packs. Measured 2026-10-24 under
+/// `--features mcp`: the live count is 126, thirty-one over the BG4 arm, so
+/// every arm moves up by thirty-one. The fx pack's four preset verbs
+/// (`fx.preset.list|preview|set|clear`, 2026-10-24) add four more, so the live
+/// router under `--features mcp` is 130.
+const EXPECTED_ROUTER: usize = 130
     + if cfg!(feature = "rules") { 5 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

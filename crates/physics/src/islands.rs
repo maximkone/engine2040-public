@@ -1011,6 +1011,26 @@ mod tests {
         JobPool::new(threads.saturating_sub(1)).expect("pool starts")
     }
 
+    /// One parallel step that records the id of the thread that ran each lane.
+    fn step_noting_thread(
+        pool: &JobPool,
+        live: &mut [Cell],
+        pairs: &[(usize, usize)],
+        cfg: ParConfig,
+        seen: &std::sync::Mutex<Vec<thread::ThreadId>>,
+    ) {
+        step_islands(pool, live, pairs, cfg, |members| {
+            let id = thread::current().id();
+            if let Ok(mut ids) = seen.lock() {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            step_cell_island(members)
+        })
+        .expect("steps");
+    }
+
     /// Chunk edges are a function of the island count and `chunk` only, and
     /// they cover every island once in ascending order.
     #[test]
@@ -1184,6 +1204,16 @@ mod tests {
 
     #[test]
     fn par_step_a_panicking_island_unwinds_on_the_caller() {
+        // wasm32-wasip1 is built with `panic = "abort"`: a panic ends the
+        // process, so there is no payload to hand back there. The leg keeps
+        // the test so both legs list the same names.
+        if cfg!(target_arch = "wasm32") {
+            assert!(
+                cfg!(panic = "abort"),
+                "wasm32 should be built with panic = abort"
+            );
+            return;
+        }
         let mut live = cells(16);
         for threads in [1, 4] {
             let pool = lane_pool(threads);
@@ -1221,26 +1251,41 @@ mod tests {
             chunk: 2,
         };
         for _ in 0..60 {
-            step_islands(&pool, &mut live, &pairs, cfg, |members| {
-                let id = thread::current().id();
-                if let Ok(mut ids) = seen.lock() {
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
-                }
-                step_cell_island(members)
-            })
-            .expect("steps");
+            step_noting_thread(&pool, &mut live, &pairs, cfg, &seen);
         }
-        let seen = seen.into_inner().unwrap_or_default();
+        let ids = seen.lock().map(|ids| ids.clone()).unwrap_or_default();
         assert!(
-            seen.len() <= 4,
+            ids.len() <= 4,
             "60 steps ran on {} threads; the pool has 3 workers plus the caller",
-            seen.len()
+            ids.len()
         );
         assert!(
-            seen.contains(&thread::current().id()),
+            ids.contains(&thread::current().id()),
             "lane 0 is the caller"
+        );
+        // wasm32 has no threads: the pool starts none and every lane runs
+        // inline on the caller, which is what the wasm leg of the golden
+        // matrix exercises.
+        if cfg!(target_arch = "wasm32") {
+            assert_eq!(
+                ids.len(),
+                1,
+                "wasm32 starts no worker, so one thread runs every lane"
+            );
+            return;
+        }
+        // Native keeps the pool busy: run on until a worker takes a lane, so a
+        // slow worker wake-up cannot flake the assert.
+        for _ in 0..600 {
+            if ids.len() > 1 {
+                break;
+            }
+            step_noting_thread(&pool, &mut live, &pairs, cfg, &seen);
+        }
+        let ids = seen.lock().map(|ids| ids.len()).unwrap_or(0);
+        assert!(
+            ids > 1,
+            "600 steps ran on the caller alone; the pool never stepped a lane"
         );
     }
 

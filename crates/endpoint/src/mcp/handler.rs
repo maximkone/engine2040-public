@@ -56,7 +56,7 @@ impl McpServer {
             .protocol_version()
             .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
         let (list_changed, list_sinks, scene_sinks, scene_legacy, scene_moved) = {
-            let Ok(mut state) = self.state.lock() else {
+            let Ok(mut state) = self.state.write() else {
                 return;
             };
             // A reborrow keeps `packs_pushed` and `loaded_packs` disjoint fields.
@@ -290,7 +290,7 @@ impl ServerHandler for McpServer {
             .is_some_and(|uris| uris.iter().any(|uri| uri == crate::resources::SCENE_URI));
         let wants_list = accepted.tools_list_changed == Some(true);
         {
-            let Ok(mut state) = self.state.lock() else {
+            let Ok(mut state) = self.state.write() else {
                 return Err(ErrorData::internal_error(
                     "server state lock poisoned by a failed call; restart the server",
                     None,
@@ -306,7 +306,7 @@ impl ServerHandler for McpServer {
             }
         }
         context.cancelled().await;
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.state.write() {
             state
                 .scene_subscribers
                 .retain(|live| live.id() != sink.id());
@@ -332,7 +332,7 @@ impl ServerHandler for McpServer {
                 None,
             ));
         }
-        let Ok(mut state) = self.state.lock() else {
+        let Ok(mut state) = self.state.write() else {
             return Err(ErrorData::internal_error(
                 "server state lock poisoned by a failed call; restart the server",
                 None,
@@ -350,7 +350,7 @@ impl ServerHandler for McpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
         if request.uri == crate::resources::SCENE_URI {
-            if let Ok(mut state) = self.state.lock() {
+            if let Ok(mut state) = self.state.write() {
                 state.scene_subscribed = false;
             }
         }

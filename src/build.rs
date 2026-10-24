@@ -9,7 +9,7 @@
 use crate::cli::Error;
 use crate::manifest::{joined, Choice, Target};
 use crate::process::{self, Checkout, Runner, Step};
-use crate::project::{parse_target, Flags, Project};
+use crate::project::{parse_target, Flags, LockRow, Project};
 use crate::workspace::GameBin;
 use std::ffi::OsString;
 use std::fs;
@@ -59,11 +59,82 @@ fn build_verb_with(
             joined(&project.manifest.targets, ", ")
         )));
     }
+    check_lock(&project, &checkout.root)?;
     let result = build(checkout, target, &project.game(), run, out)?;
     if let Some(exe) = result {
         export_project(&project, &exe, run, out)?;
     }
     Ok(())
+}
+
+/// Enforce the project lock before anything builds: the first build writes it, a later build
+/// refuses a dependency row that is missing or whose crate content moved, naming the row.
+fn check_lock(project: &Project, root: &Path) -> Result<(), Error> {
+    let rows = project.dependency_rows(root)?;
+    let path = project.lock_path();
+    if !path.is_file() {
+        write_lock(&path, &rows)?;
+        return Ok(());
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|error| Error::Project(format!("cannot read {}: {error}", path.display())))?;
+    let locked = parse_lock(&text);
+    for row in &rows {
+        let Some(hash) = locked
+            .iter()
+            .find(|(name, _)| name == &row.name)
+            .map(|(_, hash)| hash)
+        else {
+            return Err(Error::Project(format!(
+                "{}: no row for `{}`; the lock predates this dependency: delete {} and build again",
+                path.display(),
+                row.name,
+                path.display()
+            )));
+        };
+        if hash != &row.hash {
+            return Err(Error::Project(format!(
+                "{}: row `{}` moved (locked {hash}, now {}); delete {} and build again to accept the new crate content",
+                path.display(),
+                row.name,
+                row.hash,
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Write the lock: one comment line, then one `name version source hash` row per crate.
+fn write_lock(path: &Path, rows: &[LockRow]) -> Result<(), Error> {
+    let mut text = String::from(
+        "# engine2040 project lock: one row per resolved crate: name version source hash\n",
+    );
+    for row in rows {
+        text.push_str(&row.line());
+        text.push('\n');
+    }
+    fs::write(path, text)
+        .map_err(|error| Error::Project(format!("cannot write {}: {error}", path.display())))
+}
+
+/// The rows a lock file holds: name to content hash. Comments and short rows are skipped.
+fn parse_lock(text: &str) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        let (Some(name), Some(_version), Some(_source), Some(hash)) =
+            (words.next(), words.next(), words.next(), words.next())
+        else {
+            continue;
+        };
+        rows.push((name.to_owned(), hash.to_owned()));
+    }
+    rows
 }
 
 /// What a target built: the exe of a windows build; `None` for web, whose output already is a
@@ -366,6 +437,20 @@ mod tests {
         let root = temp.0.join("engine");
         fs::create_dir_all(root.join("tools")).unwrap();
         fs::write(root.join(WEB_BUILD), "").unwrap();
+        // The lock resolves the game crate: the fake workspace carries the crate it names.
+        let game_crate = root.join("crates").join("game");
+        fs::create_dir_all(game_crate.join("src")).unwrap();
+        fs::write(
+            game_crate.join("Cargo.toml"),
+            "[package]\nname = \"engine-game\"\nversion.workspace = true\n",
+        )
+        .unwrap();
+        fs::write(game_crate.join("src").join("lib.rs"), "").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         Checkout {
             target_dir: root.join("target"),
             root,
@@ -960,5 +1045,106 @@ mod tests {
         );
         assert!(shown.contains(WEB_BUILD), "{shown}");
         assert!(!ran, "nothing is built once the game cannot be exported");
+    }
+
+    /// A project that names no game, with a runner that fakes a successful windows build.
+    fn lock_project(temp: &TempDir, env: &Checkout, name: &str) -> (std::path::PathBuf, PathBuf) {
+        let dir = temp.0.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("game.toml");
+        fs::write(
+            &manifest,
+            format!("name = \"{name}\"\ntargets = [\"windows\"]\n"),
+        )
+        .unwrap();
+        let exe = env.target_dir.join("release").join("arena.exe");
+        (manifest, exe)
+    }
+
+    /// A runner that stages the arena exe, hashes and archives it: a windows build that works.
+    fn passing_build(exe: &Path) -> impl FnMut(&Step) -> io::Result<process::Outcome> {
+        let exe = exe.to_path_buf();
+        move |step: &Step| {
+            if step.program.ends_with("certutil") {
+                return certutil_reply(step);
+            }
+            if step.program.ends_with("tar") {
+                fs::write(&step.args[3], "").unwrap();
+                return reply(0, "");
+            }
+            fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            fs::write(&exe, b"MZ").unwrap();
+            reply(0, "")
+        }
+    }
+
+    /// F2P: the first build writes `project.lock` and the next build reads it back; moving the
+    /// crate's content refuses, naming the row.
+    #[test]
+    fn build_writes_the_project_lock_and_refuses_a_moved_crate() {
+        let temp = TempDir::new();
+        let env = checkout(&temp, "windows");
+        let (manifest, exe) = lock_project(&temp, &env, "lock-duel");
+        let words_of = |manifest: &Path| {
+            words(&[
+                "--target",
+                "windows",
+                "--manifest",
+                manifest.to_str().unwrap(),
+            ])
+        };
+        let mut first = passing_build(&exe);
+        let mut out = Vec::new();
+        build_verb_with(words_of(&manifest), &env, &mut first, &mut out).unwrap();
+        let lock = manifest.parent().unwrap().join(crate::project::LOCK_FILE);
+        let text = fs::read_to_string(&lock).expect("the first build writes the lock");
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("engine-game 0.1.0 crate:crates/game ")),
+            "{text}"
+        );
+        // The same rows on the next build: the lock is read, not rewritten.
+        let mut second = passing_build(&exe);
+        build_verb_with(words_of(&manifest), &env, &mut second, &mut Vec::new()).unwrap();
+        // Moving the crate's content moves its hash, so the row refuses by name.
+        fs::write(
+            env.root.join("crates").join("game").join("src/lib.rs"),
+            "// moved\n",
+        )
+        .unwrap();
+        let mut third = passing_build(&exe);
+        let error =
+            build_verb_with(words_of(&manifest), &env, &mut third, &mut Vec::new()).unwrap_err();
+        let shown = error.to_string();
+        assert!(shown.contains("row `engine-game` moved"), "{shown}");
+        assert!(shown.contains(&lock.display().to_string()), "{shown}");
+    }
+
+    /// F2P: a lock without a dependency row refuses the build, naming the missing row.
+    #[test]
+    fn build_refuses_a_dependency_the_lock_does_not_hold() {
+        let temp = TempDir::new();
+        let env = checkout(&temp, "windows");
+        let (manifest, exe) = lock_project(&temp, &env, "stale-duel");
+        fs::write(
+            manifest.parent().unwrap().join(crate::project::LOCK_FILE),
+            "# engine2040 project lock\n",
+        )
+        .unwrap();
+        let mut run = passing_build(&exe);
+        let error = build_verb_with(
+            words(&[
+                "--target",
+                "windows",
+                "--manifest",
+                manifest.to_str().unwrap(),
+            ]),
+            &env,
+            &mut run,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        let shown = error.to_string();
+        assert!(shown.contains("no row for `engine-game`"), "{shown}");
     }
 }

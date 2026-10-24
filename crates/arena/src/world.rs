@@ -137,6 +137,74 @@ impl Obstacle {
     }
 }
 
+/// One obstacle as cover geometry for the fight plan: the same box the
+/// collision uses, kept in the floor plane's meters.
+///
+/// Consumer: the rules-v2 plan ([`crate::engage::Plan::build`]) asks
+/// [`MatchWorld::cover_boxes`] whether an obstacle stands between two
+/// fighters, so a foe behind cover never enters a [`FoeView`]. Units:
+/// meters, like the obstacle it copies; the sight test reads whole
+/// millimetres and converts them once per end. Determinism: the geometry
+/// is built once from the world's canonical obstacles, so the same world
+/// always gives the same boxes; the test projects the two ends into the
+/// box frame. Errors: none.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoverBox {
+    /// The obstacle the cover geometry is.
+    obstacle: Obstacle,
+}
+
+impl CoverBox {
+    /// The cover geometry of one obstacle: the same box, the same numbers.
+    fn new(obstacle: &Obstacle) -> Self {
+        Self {
+            obstacle: *obstacle,
+        }
+    }
+
+    /// True when the floor segment `a..b` (whole millimetres, `[x, z]`)
+    /// crosses this box: cover a fighter cannot see past.
+    pub fn blocks_segment(&self, a: [i32; 2], b: [i32; 2]) -> bool {
+        let from = self.obstacle.to_local([
+            crate::match_wire::metres(a[0]),
+            crate::match_wire::metres(a[1]),
+        ]);
+        let to = self.obstacle.to_local([
+            crate::match_wire::metres(b[0]),
+            crate::match_wire::metres(b[1]),
+        ]);
+        let delta = [to[0] - from[0], to[1] - from[1]];
+        // Slab test: the segment enters the box frame's rectangle when the
+        // two slabs overlap.
+        let (mut near, mut far) = (0.0f32, 1.0f32);
+        for lane in 0..2 {
+            let low = -self.obstacle.half[lane];
+            let high = self.obstacle.half[lane];
+            if delta[lane] == 0.0 {
+                if from[lane] < low || from[lane] > high {
+                    return false;
+                }
+                continue;
+            }
+            let slope = 1.0 / delta[lane];
+            let (mut enter, mut leave) = ((low - from[lane]) * slope, (high - from[lane]) * slope);
+            if enter > leave {
+                core::mem::swap(&mut enter, &mut leave);
+            }
+            if enter > near {
+                near = enter;
+            }
+            if leave < far {
+                far = leave;
+            }
+            if near > far {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Why a world was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorldError {
@@ -170,6 +238,9 @@ impl std::error::Error for WorldError {}
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MatchWorld {
     obstacles: Vec<Obstacle>,
+    /// The same obstacles as cover geometry, built once from the canonical
+    /// list: the fight plan reads these to test sight lines.
+    cover: Vec<CoverBox>,
     /// Cooked kit-zone colliders; `None` for every world built without
     /// [`MatchWorld::with_kit_zone`], which then plays and hashes as before.
     zone: Option<kit_zone::KitZone>,
@@ -229,8 +300,10 @@ impl MatchWorld {
             o.center = [canon_zero(o.center[0]), canon_zero(o.center[1])];
         }
         obstacles.sort_by_key(bits);
+        let cover = obstacles.iter().map(CoverBox::new).collect();
         Ok(Self {
             obstacles,
+            cover,
             zone: None,
         })
     }
@@ -256,6 +329,12 @@ impl MatchWorld {
     /// Obstacles in canonical order.
     pub fn obstacles(&self) -> &[Obstacle] {
         &self.obstacles
+    }
+
+    /// The obstacles as cover boxes, in the same canonical order: the fight
+    /// plan tests a sight line against these.
+    pub fn cover_boxes(&self) -> &[CoverBox] {
+        &self.cover
     }
 
     /// True when the world is the legacy empty arena.

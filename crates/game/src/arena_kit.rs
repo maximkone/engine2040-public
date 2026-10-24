@@ -1736,7 +1736,7 @@ mod tests {
     }
 
     // The import gate reads the real kit: every mesh is measured, and the
-    // banner cloth base is the one asset over a potato cap.
+    // banner cloth base now sits under the potato cap, so the kit passes.
     #[cfg(feature = "app")]
     #[test]
     fn the_shipping_kit_measures_meshes_against_the_potato_caps() {
@@ -1747,25 +1747,19 @@ mod tests {
         assert_eq!(budget.max_bones, 0, "the kit is static");
         assert_eq!(budget.max_influences, 0, "no mesh is skinned");
         assert_eq!(budget.max_materials, 1, "one material per mesh");
-        assert_eq!(budget.max_tex_px, 4_036_608, "banner cloth base");
-        assert_eq!(budget.status(), "FAIL");
+        assert_eq!(
+            budget.max_tex_px, 1_048_576,
+            "the biggest base is a 1024x1024 cooked set, exactly at the cap"
+        );
+        assert_eq!(budget.status(), "PASS");
         assert_eq!(
             budget.findings,
-            vec![KitBudgetFinding {
-                file: "banner.gltf",
-                mesh: 2,
-                kind: "tex_px",
-                actual: 4_036_608,
-                allowed: 1_048_576,
-            }]
+            Vec::new(),
+            "no mesh is over a potato cap: the banner cloth base is 1024x986"
         );
         let line = budget.line();
         assert!(line.contains("meshes=38"), "{line}");
-        assert!(line.contains("caps=POTATO budget=FAIL"), "{line}");
-        assert!(
-            line.contains("banner.gltf mesh=2 tex_px 4036608>1048576"),
-            "{line}"
-        );
+        assert!(line.contains("caps=POTATO budget=PASS"), "{line}");
     }
 
     // Same bytes give the same meshes: one import per run, keys stable x2.

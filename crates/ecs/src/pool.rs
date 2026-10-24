@@ -271,6 +271,10 @@ impl JobPool {
     /// Start `workers` threads, `0..=MAX_WORKERS`. Zero starts none: every
     /// job then runs inline on the caller of [`scope`](Self::scope).
     ///
+    /// On wasm32 there are no threads, so `new` starts none whatever it is
+    /// asked for and every job runs inline; the results are the same bytes,
+    /// which is what lets one test list run natively and under wasmtime.
+    ///
     /// Errors: [`PoolError::TooManyWorkers`] past the cap, or
     /// [`PoolError::Spawn`] when the OS refuses a thread (the workers already
     /// started are joined first).
@@ -278,6 +282,8 @@ impl JobPool {
         if workers > MAX_WORKERS {
             return Err(PoolError::TooManyWorkers(workers));
         }
+        #[cfg(target_arch = "wasm32")]
+        let workers = 0;
         let mut pool = Self::inline();
         pool.workers.reserve_exact(workers);
         for index in 0..workers {
@@ -669,7 +675,11 @@ mod tests {
         let inline = JobPool::for_threads(1).expect("inline pool starts");
         assert_eq!(inline.workers(), 0);
         let eight = JobPool::for_threads(8).expect("eight threads start");
-        assert_eq!(eight.workers(), 7);
+        // wasm32 has no threads, so a pool there keeps every job inline.
+        assert_eq!(
+            eight.workers(),
+            if cfg!(target_arch = "wasm32") { 0 } else { 7 }
+        );
     }
 
     #[test]

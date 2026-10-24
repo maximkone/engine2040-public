@@ -14,8 +14,9 @@
 //! points plus outward-wound triangle faces, capped at [`MAX_HULL_POINTS`] points
 //! (a capped hull is inside the true hull; the cap keeps the farthest-spread
 //! points). A static kit piece becomes a triangle mesh: vertices welded by exact
-//! position, degenerate triangles dropped. Heightfields are not cooked: no kit
-//! piece needs one yet.
+//! position, degenerate triangles dropped. A declared height grid
+//! ([`HeightGrid`]) becomes a terrain mesh plus a heightfield record, cooked in
+//! integer millimetres ([`cook_height_grid`]) and encoded with [`encode_terrain`].
 //!
 //! Collision is on by default: every node of the art tree that carries a mesh
 //! collides unless the art says otherwise.
@@ -805,6 +806,290 @@ pub fn cook_mesh(
         vertices,
         indices: out,
     })
+}
+
+// --- height grids: a terrain mesh plus a heightfield record -----------------
+//
+// A declared grid of integer millimetre heights cooks into the triangle mesh the
+// render upload draws and the heightfield record the physics reads. Every input
+// is an integer, so the same grid cooks the same bytes on every machine: a
+// vertex is `(col * spacing, height, row * spacing)` in millimetres, a normal is
+// formed from two integer height differences and scaled once, and the encoded
+// form holds no float at all.
+
+/// Most rows one height grid may declare.
+pub const MAX_TERRAIN_ROWS: u32 = 1024;
+/// Most columns one height grid may declare.
+pub const MAX_TERRAIN_COLS: u32 = 1024;
+/// First four bytes of an encoded terrain cook.
+pub const TERRAIN_MAGIC: [u8; 4] = *b"E2TN";
+/// Terrain byte-format version.
+pub const TERRAIN_VERSION: u16 = 1;
+/// The fixed-point scale of a cooked normal: unit length is 32767.
+pub const NORMAL_ONE: i32 = 32767;
+
+/// A declared height grid: integer millimetre heights in row-major order, one
+/// spacing for both axes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeightGrid {
+    /// Rows along Z; at least two.
+    pub rows: u32,
+    /// Columns along X; at least two.
+    pub cols: u32,
+    /// Distance between neighbouring samples in whole millimetres; at least one.
+    pub spacing_mm: u32,
+    /// Heights in millimetres, row-major, exactly `rows * cols` entries.
+    pub heights_mm: Vec<i32>,
+}
+
+/// The terrain mesh a height grid cooks, in integer millimetres.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerrainMesh {
+    /// Vertex positions in millimetres, row-major over the grid.
+    pub positions_mm: Vec<[i32; 3]>,
+    /// Unit normals at the fixed-point scale [`NORMAL_ONE`].
+    pub normals_q15: Vec<[i16; 3]>,
+    /// Three indices per triangle, `(rows - 1) * (cols - 1) * 2` triangles.
+    pub indices: Vec<u32>,
+}
+
+/// The heightfield collider a terrain cooks: the grid the physics samples.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeightfieldRecord {
+    /// Rows along Z.
+    pub rows: u32,
+    /// Columns along X.
+    pub cols: u32,
+    /// Sample spacing in millimetres.
+    pub spacing_mm: u32,
+    /// Heights in millimetres, row-major.
+    pub heights_mm: Vec<i32>,
+}
+
+/// One terrain cook: the render mesh plus the heightfield collider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CookedTerrain {
+    /// What the renderer uploads.
+    pub mesh: TerrainMesh,
+    /// What the physics samples.
+    pub collider: HeightfieldRecord,
+}
+
+/// Triangle count of a valid grid: two per quad.
+#[must_use]
+pub fn terrain_triangles(rows: u32, cols: u32) -> usize {
+    let quads = usize::try_from(rows.saturating_sub(1))
+        .unwrap_or(0)
+        .saturating_mul(usize::try_from(cols.saturating_sub(1)).unwrap_or(0));
+    quads * 2
+}
+
+/// Cook a height grid into a terrain mesh and its heightfield record.
+///
+/// Deterministic by construction: integer inputs, integer positions, a normal
+/// from two integer height differences scaled once to [`NORMAL_ONE`], and
+/// triangles wound so every face normal points up. Errors: the grid's own shape
+/// ([`ColliderCookError::BadMesh`]) or a count past the caps.
+pub fn cook_height_grid(grid: &HeightGrid) -> Result<CookedTerrain, ColliderCookError> {
+    if grid.rows < 2 || grid.cols < 2 {
+        return Err(ColliderCookError::BadMesh(
+            "a height grid needs at least 2 rows and 2 columns",
+        ));
+    }
+    if grid.rows > MAX_TERRAIN_ROWS || grid.cols > MAX_TERRAIN_COLS {
+        return Err(ColliderCookError::TooLarge {
+            what: "height grid rows or columns",
+            count: usize::try_from(grid.rows.max(grid.cols)).unwrap_or(usize::MAX),
+        });
+    }
+    if grid.spacing_mm == 0 {
+        return Err(ColliderCookError::BadMesh(
+            "the grid spacing is zero millimetres",
+        ));
+    }
+    if grid.spacing_mm > MAX_SPACING_MM {
+        return Err(ColliderCookError::TooLarge {
+            what: "height grid spacing in millimetres",
+            count: usize::try_from(grid.spacing_mm).unwrap_or(usize::MAX),
+        });
+    }
+    if let Some(height) = grid.heights_mm.iter().find(|h| h.abs() > MAX_HEIGHT_MM) {
+        return Err(ColliderCookError::TooLarge {
+            what: "height grid height in millimetres",
+            count: usize::try_from(height.unsigned_abs()).unwrap_or(usize::MAX),
+        });
+    }
+    let samples = usize::try_from(grid.rows)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(usize::try_from(grid.cols).unwrap_or(usize::MAX));
+    if grid.heights_mm.len() != samples {
+        return Err(ColliderCookError::BadMesh(
+            "the heights do not fill rows * cols",
+        ));
+    }
+    let mut positions_mm = Vec::with_capacity(samples);
+    for row in 0..grid.rows {
+        for col in 0..grid.cols {
+            let at = grid_index(grid.cols, row, col);
+            positions_mm.push([
+                i32_mm(col, grid.spacing_mm),
+                grid.heights_mm[at],
+                i32_mm(row, grid.spacing_mm),
+            ]);
+        }
+    }
+    let mut normals_q15 = Vec::with_capacity(samples);
+    for row in 0..grid.rows {
+        for col in 0..grid.cols {
+            normals_q15.push(grid_normal(grid, row, col));
+        }
+    }
+    let mut indices = Vec::with_capacity(terrain_triangles(grid.rows, grid.cols) * 3);
+    for row in 0..grid.rows - 1 {
+        for col in 0..grid.cols - 1 {
+            let a = u32::try_from(grid_index(grid.cols, row, col)).unwrap_or(u32::MAX);
+            let b = a + 1;
+            let c = a + grid.cols;
+            let d = c + 1;
+            // (a, c, b) and (b, c, d) both wind counter-clockwise seen from +Y.
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+    Ok(CookedTerrain {
+        mesh: TerrainMesh {
+            positions_mm,
+            normals_q15,
+            indices,
+        },
+        collider: HeightfieldRecord {
+            rows: grid.rows,
+            cols: grid.cols,
+            spacing_mm: grid.spacing_mm,
+            heights_mm: grid.heights_mm.clone(),
+        },
+    })
+}
+
+/// Row-major sample index.
+fn grid_index(cols: u32, row: u32, col: u32) -> usize {
+    usize::try_from(row)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(usize::try_from(cols).unwrap_or(usize::MAX))
+        .saturating_add(usize::try_from(col).unwrap_or(usize::MAX))
+}
+
+/// `step * spacing` in millimetres, saturating past the `i32` range.
+fn i32_mm(step: u32, spacing_mm: u32) -> i32 {
+    i32::try_from(u64::from(step) * u64::from(spacing_mm)).unwrap_or(i32::MAX)
+}
+
+/// Largest absolute height a grid may declare, in millimetres (one kilometre).
+pub const MAX_HEIGHT_MM: i32 = 1_000_000;
+/// Largest sample spacing a grid may declare, in millimetres (one kilometre).
+pub const MAX_SPACING_MM: u32 = 1_000_000;
+
+/// The unit normal at one sample, scaled once to [`NORMAL_ONE`].
+///
+/// The two neighbour differences are integer millimetres over the whole sample
+/// span, so the plane normal `(-dx * span_z, span_x * span_z, -dz * span_x)`
+/// never rounds before the one scale step: an integer length and one rounded
+/// division per component, no float anywhere. A border sample takes its
+/// one-sided difference, which is why its span is one spacing shorter.
+fn grid_normal(grid: &HeightGrid, row: u32, col: u32) -> [i16; 3] {
+    let col_lo = col.saturating_sub(1);
+    let col_hi = (col + 1).min(grid.cols - 1);
+    let row_lo = row.saturating_sub(1);
+    let row_hi = (row + 1).min(grid.rows - 1);
+    let dx = i128::from(grid.heights_mm[grid_index(grid.cols, row, col_hi)])
+        - i128::from(grid.heights_mm[grid_index(grid.cols, row, col_lo)]);
+    let dz = i128::from(grid.heights_mm[grid_index(grid.cols, row_hi, col)])
+        - i128::from(grid.heights_mm[grid_index(grid.cols, row_lo, col)]);
+    let span_x = i128::from(col_hi - col_lo) * i128::from(grid.spacing_mm);
+    let span_z = i128::from(row_hi - row_lo) * i128::from(grid.spacing_mm);
+    let x = -dx * span_z;
+    let y = span_x * span_z;
+    let z = -dz * span_x;
+    let length_sq = (x * x + y * y + z * z).unsigned_abs();
+    if length_sq == 0 {
+        return [0, normal_one(), 0];
+    }
+    let length = length_sq.isqrt();
+    [
+        scale_component(x, length),
+        scale_component(y, length),
+        scale_component(z, length),
+    ]
+}
+
+/// [`NORMAL_ONE`] as an `i16` (the constant fits by construction).
+fn normal_one() -> i16 {
+    i16::try_from(NORMAL_ONE).unwrap_or(i16::MAX)
+}
+
+/// One normal component at the fixed-point scale: `value * NORMAL_ONE / length`,
+/// rounded half up and clamped, integer only.
+fn scale_component(value: i128, length: u128) -> i16 {
+    if length == 0 {
+        return 0;
+    }
+    let numerator = u128::try_from(NORMAL_ONE).unwrap_or(1) * value.unsigned_abs();
+    let rounded = (numerator + length / 2) / length;
+    let clamped = rounded.min(u128::try_from(NORMAL_ONE).unwrap_or(1));
+    let magnitude = i16::try_from(clamped).unwrap_or(i16::MAX);
+    if value < 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// Bytes of one terrain cook, little-endian: magic, version, the heightfield
+/// record, then the mesh. Integer fields only, so equal grids give equal bytes.
+///
+/// ```text
+/// "E2TN" | u16 version | u32 rows | u32 cols | u32 spacing_mm
+///   | u32 samples | samples x i32 height_mm
+///   | u32 verts   | verts x (3 i32 position_mm, 3 i16 normal_q15)
+///   | u32 tris    | tris  x 3 u32 index
+/// ```
+pub fn encode_terrain(terrain: &CookedTerrain) -> Result<Vec<u8>, ColliderCookError> {
+    let samples = count_u32(terrain.collider.heights_mm.len())?;
+    let verts = count_u32(terrain.mesh.positions_mm.len())?;
+    if verts != samples {
+        return Err(ColliderCookError::BadMesh(
+            "the mesh and the heightfield disagree on the sample count",
+        ));
+    }
+    let tris = count_u32(terrain.mesh.indices.len() / 3)?;
+    let mut out = Vec::with_capacity(24 + samples as usize * 22 + tris as usize * 12);
+    out.extend_from_slice(&TERRAIN_MAGIC);
+    out.extend_from_slice(&TERRAIN_VERSION.to_le_bytes());
+    out.extend_from_slice(&terrain.collider.rows.to_le_bytes());
+    out.extend_from_slice(&terrain.collider.cols.to_le_bytes());
+    out.extend_from_slice(&terrain.collider.spacing_mm.to_le_bytes());
+    out.extend_from_slice(&samples.to_le_bytes());
+    for height in &terrain.collider.heights_mm {
+        out.extend_from_slice(&height.to_le_bytes());
+    }
+    out.extend_from_slice(&verts.to_le_bytes());
+    for (position, normal) in terrain
+        .mesh
+        .positions_mm
+        .iter()
+        .zip(&terrain.mesh.normals_q15)
+    {
+        for value in position {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in normal {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    out.extend_from_slice(&tris.to_le_bytes());
+    for index in &terrain.mesh.indices {
+        out.extend_from_slice(&index.to_le_bytes());
+    }
+    Ok(out)
 }
 
 fn push_point(out: &mut Vec<u8>, p: &[f32; 3]) {
@@ -1772,5 +2057,108 @@ mod tests {
             assert_eq!(walls.receipt.tagged, 1);
             assert_eq!(walls.receipt.auto, 6, "the wall and its five merlons");
         }
+    }
+}
+
+#[cfg(test)]
+mod terrain_tests {
+    use super::*;
+
+    fn three_by_three() -> HeightGrid {
+        HeightGrid {
+            rows: 3,
+            cols: 3,
+            spacing_mm: 500,
+            heights_mm: vec![
+                0, 100, 200, //
+                50, 150, 250, //
+                100, 200, 300,
+            ],
+        }
+    }
+
+    /// F2P: a 3x3 grid cooks twice byte-equal and carries the quad count.
+    #[test]
+    fn a_three_by_three_grid_cooks_twice_byte_equal() {
+        let grid = three_by_three();
+        let first = cook_height_grid(&grid).expect("grid cooks");
+        let second = cook_height_grid(&grid).expect("grid cooks again");
+        assert_eq!(first, second, "same grid, same cook");
+        let first_bytes = encode_terrain(&first).expect("encodes");
+        let second_bytes = encode_terrain(&second).expect("encodes");
+        assert_eq!(first_bytes, second_bytes, "same grid, same bytes");
+        assert_eq!(&first_bytes[..4], &TERRAIN_MAGIC);
+        assert_eq!(first.mesh.positions_mm.len(), 9);
+        assert_eq!(first.mesh.normals_q15.len(), 9);
+        assert_eq!(
+            first.mesh.indices.len() / 3,
+            terrain_triangles(3, 3),
+            "two triangles per quad"
+        );
+        assert_eq!(first.mesh.indices.len() / 3, 8);
+        assert_eq!(first.collider.heights_mm, grid.heights_mm);
+        assert_eq!(
+            (first.collider.rows, first.collider.cols, first.collider.spacing_mm),
+            (3, 3, 500)
+        );
+        // Positions are the integer millimetre grid, row-major.
+        assert_eq!(first.mesh.positions_mm[0], [0, 0, 0]);
+        assert_eq!(first.mesh.positions_mm[2], [1000, 200, 0]);
+        assert_eq!(first.mesh.positions_mm[8], [1000, 300, 1000]);
+    }
+
+    #[test]
+    fn a_flat_grid_points_up_and_a_slope_leans_the_way_it_falls() {
+        let mut flat = three_by_three();
+        flat.heights_mm = vec![0; 9];
+        let cooked = cook_height_grid(&flat).expect("flat cooks");
+        for normal in &cooked.mesh.normals_q15 {
+            assert_eq!(*normal, [0, normal_one(), 0], "a flat grid points up");
+        }
+        // Height grows with the row, so the normal leans toward -Z.
+        let mut slope = three_by_three();
+        slope.heights_mm = vec![
+            0, 0, 0, //
+            0, 0, 0, //
+            500, 500, 500,
+        ];
+        let cooked = cook_height_grid(&slope).expect("slope cooks");
+        let middle = cooked.mesh.normals_q15[4];
+        assert!(middle[2] < 0, "the slope leans toward -Z: {middle:?}");
+        assert!(middle[1] > 0, "the slope still points up: {middle:?}");
+        assert_eq!(middle[0], 0, "no X lean: {middle:?}");
+        // Every winding faces up: the face normal of each triangle has +Y.
+        for tri in cooked.mesh.indices.chunks_exact(3) {
+            let [a, b, c] = [tri[0], tri[1], tri[2]]
+                .map(|item| cooked.mesh.positions_mm[usize::try_from(item).unwrap()]);
+            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let ny = ab[2] * ac[0] - ab[0] * ac[2];
+            assert!(ny > 0, "triangle {tri:?} faces up");
+        }
+    }
+
+    #[test]
+    fn a_grid_that_does_not_fit_its_shape_is_refused() {
+        let mut short = three_by_three();
+        short.heights_mm.pop();
+        assert_eq!(
+            cook_height_grid(&short).expect_err("short grid").to_string(),
+            "collider cook: bad mesh, the heights do not fill rows * cols"
+        );
+        let mut thin = three_by_three();
+        thin.rows = 1;
+        thin.heights_mm = vec![0, 0, 0];
+        assert!(cook_height_grid(&thin).is_err(), "one row has no quads");
+        let mut spaced = three_by_three();
+        spaced.spacing_mm = 0;
+        assert!(cook_height_grid(&spaced).is_err(), "zero spacing");
+        let mut tall = three_by_three();
+        tall.heights_mm[4] = MAX_HEIGHT_MM + 1;
+        assert!(cook_height_grid(&tall).is_err(), "a height past the cap");
+        let mut big = three_by_three();
+        big.rows = MAX_TERRAIN_ROWS + 1;
+        big.heights_mm = vec![0; usize::try_from(big.rows).unwrap() * 3];
+        assert!(cook_height_grid(&big).is_err(), "rows past the cap");
     }
 }

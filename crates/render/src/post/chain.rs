@@ -1264,17 +1264,21 @@ mod tests {
     /// The config digest covers the look path and the table, not the receipt ms.
     #[test]
     fn chain_config_digest_tracks_the_look() {
-        let mut cfg = ChainConfig::default();
-        let none = cfg.digest();
-        cfg.lut_path = Some("content/looks/dusk.cube".into());
+        let none = ChainConfig::default().digest();
+        let mut cfg = ChainConfig {
+            lut_path: Some("content/looks/dusk.cube".into()),
+            ..ChainConfig::default()
+        };
         let path = cfg.digest();
         assert_ne!(path, none, "the look path moves the digest");
         cfg.set_lut(lut::parse_cube(&cube_text(2, |r, g, b| [r, g, b])).expect("identity parses"));
         let table = cfg.digest();
         assert_ne!(table, path, "the loaded table moves the digest");
         let again = {
-            let mut other = ChainConfig::default();
-            other.lut_path = cfg.lut_path.clone();
+            let mut other = ChainConfig {
+                lut_path: cfg.lut_path.clone(),
+                ..ChainConfig::default()
+            };
             other.set_lut(lut::parse_cube(&cube_text(2, |r, g, b| [r, g, b])).expect("parses"));
             other.digest()
         };

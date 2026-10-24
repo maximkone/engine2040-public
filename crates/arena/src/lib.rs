@@ -1315,9 +1315,16 @@ impl Sim {
                     &self.fight,
                     &self.rules.teams,
                     self.fighters,
+                    self.world.cover_boxes(),
                 );
             }
-            engage::Plan::build(&self.states, &self.fight, &self.rules.teams, self.fighters)
+            engage::Plan::build(
+                &self.states,
+                &self.fight,
+                &self.rules.teams,
+                self.fighters,
+                self.world.cover_boxes(),
+            )
         });
         for (slot, cell) in slots.iter_mut().enumerate().take(self.fighters) {
             if cell.is_none() {
@@ -5081,7 +5088,7 @@ mod tests {
         for _ in 0..SAMPLES {
             let begin = std::time::Instant::now();
             for _ in 0..BATCH {
-                std::hint::black_box(engage::Plan::build(&states, &fight, &teams, count));
+                std::hint::black_box(engage::Plan::build(&states, &fight, &teams, count, &[]));
             }
             columns[0].push(micros_per(begin.elapsed(), BATCH));
             let begin = std::time::Instant::now();

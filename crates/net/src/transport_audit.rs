@@ -12,7 +12,7 @@
 //! rustls, the TLS engine inside quinn, through a full TLS 1.3 handshake with
 //! certificate-chain verification, in memory, with no sockets. The measured
 //! numbers are the exact encoded bytes each direction and the CPU nanoseconds
-//! one setup costs. [`compare`] turns a pair of [`SetupCost`] into a verdict at
+//! one setup costs. [`compare`](crate::transport_audit::compare) turns a pair of [`SetupCost`](crate::transport_audit::SetupCost) into a verdict at
 //! one link round-trip time.
 //!
 //! Result (2026-10-19, measured by the benchmark test): both paths set up in

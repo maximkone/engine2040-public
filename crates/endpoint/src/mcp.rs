@@ -54,7 +54,7 @@
 
 use crate::startup::StartupError;
 use std::collections::BTreeSet;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{RwLock, RwLockReadGuard};
 
 use engine_editor::capability::{
     self, approve, canonical_action_hash, Approval, ApprovalLedger, Capability,
@@ -1167,8 +1167,47 @@ pub use self::mcp_tools::{
 
 /// MCP stdio server over one document plus its capability session.
 pub struct McpServer {
-    state: Mutex<ServerState>,
+    state: RwLock<ServerState>,
     tool_router: ToolRouter<Self>,
+    /// Test-only gate: a read call reports entering its shared span and waits
+    /// for the release, so a test can hold eight reads inside at once.
+    #[cfg(test)]
+    pub(crate) read_gate: Option<std::sync::Arc<ReadGate>>,
+}
+
+/// Test-only read gate: `entered` fires after the caller took a shared lock and
+/// the caller then waits for one `release` message. Never present outside
+/// tests; it exists to prove the read span is shared.
+#[cfg(test)]
+pub(crate) struct ReadGate {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl ReadGate {
+    /// A fresh gate with the two ends the test drives.
+    pub(crate) fn channel() -> (
+        std::sync::Arc<Self>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gate = std::sync::Arc::new(Self {
+            entered,
+            release: std::sync::Mutex::new(release_rx),
+        });
+        (gate, entered_rx, release_tx)
+    }
+
+    /// Wait here while the caller still holds its shared lock.
+    pub(crate) fn pass(&self) {
+        self.entered.send(()).ok();
+        if let Ok(release) = self.release.lock() {
+            release.recv().ok();
+        }
+    }
 }
 
 impl McpServer {
@@ -1211,9 +1250,18 @@ impl McpServer {
         let tool_router = Self::router();
         super::packs::seed_core_index(&mut state.insight, &tool_router.list_all());
         Self {
-            state: Mutex::new(state),
+            state: RwLock::new(state),
             tool_router,
+            #[cfg(test)]
+            read_gate: None,
         }
+    }
+
+    /// Hold this session's read gate in tests, so eight reads can be shown to
+    /// sit inside their shared span at the same time.
+    #[cfg(test)]
+    pub(crate) fn set_read_gate(&mut self, gate: std::sync::Arc<ReadGate>) {
+        self.read_gate = Some(gate);
     }
 
     /// The core router. Exactly the [`CORE_TOOL_NAMES`] tools: no execute,
@@ -1453,11 +1501,26 @@ impl McpServer {
         Ok(ledger)
     }
 
-    /// Lock the session state; a poisoned lock fails closed, never serving
-    /// possibly inconsistent state. Crate-visible so the MCP2 tools in
-    /// [`super::play`] invoke through the same gate.
-    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, ServerState>, McpToolError> {
-        self.state.lock().map_err(|_| {
+    /// Lock the session state exclusively; a poisoned lock fails closed, never
+    /// serving possibly inconsistent state. Every state-changing call takes
+    /// this for its whole span, so no write interleaves with another call.
+    /// Crate-visible so the MCP2 tools in [`super::play`] invoke through the
+    /// same gate.
+    pub(crate) fn lock(
+        &self,
+    ) -> Result<std::sync::RwLockWriteGuard<'_, ServerState>, McpToolError> {
+        self.state.write().map_err(|_| {
+            McpToolError::new(
+                "lock_poisoned",
+                "server state lock poisoned by a failed call; restart the server",
+            )
+        })
+    }
+
+    /// Share the session state for a read-only call: many readers hold this at
+    /// once, a writer waits for all of them.
+    pub(crate) fn lock_read(&self) -> Result<RwLockReadGuard<'_, ServerState>, McpToolError> {
+        self.state.read().map_err(|_| {
             McpToolError::new(
                 "lock_poisoned",
                 "server state lock poisoned by a failed call; restart the server",

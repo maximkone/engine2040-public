@@ -20,8 +20,9 @@ const GEO_VIEW_BYTES = [
   1800, 1800, 1200, 2400, 2304,
   420, 420, 280, 560, 576,
 ];
-// Image slice lengths: cloth albedo 2k, cloth normal 2k, orm pair.
-const IMG_VIEW_BYTES = [3195339, 2656496, 664, 664];
+// Image slice lengths: cloth albedo 1k (1024x986, under the potato cap), cloth
+// normal 2k, orm pair.
+const IMG_VIEW_BYTES = [153322, 2656496, 664, 664];
 
 export function loadDoc(path = GLTF_PATH) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -68,7 +69,7 @@ test("banner parses with 4 images over 19 views", () => {
   const lens = doc.bufferViews.map((v) => v.byteLength);
   assert.deepEqual(lens.slice(0, 15), GEO_VIEW_BYTES);
   assert.deepEqual(lens.slice(15), IMG_VIEW_BYTES);
-  assert.equal(doc.buffers?.[0]?.byteLength, 5874427);
+  assert.equal(doc.buffers?.[0]?.byteLength, 2832412);
   assert.deepEqual(doc.images.map((im) => im.bufferView), [15, 16, 17, 18]);
   const names = doc.meshes.map((m) => m.name);
   assert.deepEqual(names, ["banner_pole", "banner_bar", "banner_cloth"]);

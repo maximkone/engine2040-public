@@ -1,17 +1,17 @@
 //! ack: packet delivery tracking with a 32-bit ack bitfield and a loss rate.
 //!
 //! Purpose: tell a sender which of its packets arrived, and what share was
-//! lost, from sequence numbers alone. The receiver half ([`RecvWindow`])
+//! lost, from sequence numbers alone. The receiver half (`RecvWindow`)
 //! folds arrivals into the pair a packet header would carry: the newest
 //! sequence received plus a 32-bit field where bit `i` means sequence
-//! `latest - 1 - i` arrived. The sender half ([`SentLedger`]) keeps a fixed
+//! `latest - 1 - i` arrived. The sender half ([`SentLedger`](crate::ack::SentLedger)) keeps a fixed
 //! ring of sent records and resolves each one to delivered or lost when an
-//! [`Ack`] names it. The shape follows naia's ack manager; the code is
+//! [`Ack`](crate::ack::Ack) names it. The shape follows naia's ack manager; the code is
 //! integer-only and std-only.
 //!
 //! Rules of the ledger: a record resolves once, by the first ack that
 //! vouches for it (a repeated, reordered or older ack changes nothing), or
-//! as lost when [`WINDOW`] newer packets have been sent past it. A clear bit
+//! as lost when [`WINDOW`](crate::ack::WINDOW) newer packets have been sent past it. A clear bit
 //! is final: a packet that lands after an ack named it missing still counts
 //! as lost, the cost every header scheme pays under reordering.
 //!
@@ -19,8 +19,8 @@
 //! (1/1000, rounded to nearest). Determinism: fixed arrays, no map, no clock;
 //! the same calls give the same state. The result feeds receipts and resend
 //! decisions only, never simulation state or a hash.
-//! Errors: [`AckError`]; a refused call changes nothing.
-//! Consumer: [`input::InputDelivery`], fed by the played bout's seats.
+//! Errors: [`AckError`](crate::ack::AckError); a refused call changes nothing.
+//! Consumer: [`input::InputDelivery`](crate::ack::input::InputDelivery), fed by the played bout's seats.
 
 use std::fmt;
 

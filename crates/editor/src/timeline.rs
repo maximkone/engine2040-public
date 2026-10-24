@@ -597,6 +597,192 @@ fn round_div(num: i128, den: i128) -> i128 {
     }
 }
 
+/// Keys the timeline panel handles; the dock maps egui keys onto these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SheetKey {
+    /// Cursor up (newer key row).
+    Up,
+    /// Cursor down.
+    Down,
+    /// Playhead one tick back.
+    Left,
+    /// Playhead one tick forward.
+    Right,
+    /// Insert a key for the selected joint at the playhead.
+    Insert,
+    /// Delete the selected key.
+    Delete,
+}
+
+/// What one panel key asked the host to apply. The panel edits the sheet it is
+/// handed and reports the change; it never calls a command service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SheetEdit {
+    /// A key now sits at this joint and tick.
+    Insert {
+        /// Track joint.
+        joint: u16,
+        /// Key tick.
+        tick: u32,
+    },
+    /// The key at this joint and tick left the sheet.
+    Delete {
+        /// Track joint.
+        joint: u16,
+        /// Key tick.
+        tick: u32,
+    },
+    /// The key was refused; the text is the panel row to draw.
+    Refused {
+        /// Display line of the refusal.
+        text: String,
+    },
+}
+
+/// Timeline panel state: a key cursor, a playhead and the last refusal.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SheetPanel {
+    cursor: usize,
+    playhead: u32,
+    notice: Option<String>,
+}
+
+impl SheetPanel {
+    /// Fresh panel: cursor on the first row, playhead at `0`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Row the cursor sits on.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Playhead tick.
+    pub fn playhead(&self) -> u32 {
+        self.playhead
+    }
+
+    /// Last refusal line, drawn under the rows.
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    /// Move the cursor within `len` rows.
+    pub fn move_cursor(&mut self, down: bool, len: usize) {
+        crate::shell::panels::move_cursor(&mut self.cursor, down, len);
+    }
+
+    /// Move the playhead by `delta` ticks, clamped inside the clip.
+    pub fn step_playhead(&mut self, delta: i32, ticks: u32) -> u32 {
+        let highest = i64::from(ticks.saturating_sub(1));
+        let next = i64::from(self.playhead) + i64::from(delta);
+        self.playhead = u32::try_from(next.clamp(0, highest)).unwrap_or(self.playhead);
+        self.playhead
+    }
+
+    /// Select the cursor row of a sheet as `(joint, tick)`.
+    pub fn selected(&self, sheet: &Sheet) -> Option<(u16, u32)> {
+        key_pairs(sheet).get(self.cursor).copied()
+    }
+
+    /// One panel key.
+    ///
+    /// Up/Down move the cursor, Left/Right move the playhead, `I` inserts the
+    /// sampled value at the playhead for the selected joint, `Delete` removes
+    /// the selected key. A refusal becomes a [`SheetEdit::Refused`] row and a
+    /// notice, never a panic.
+    pub fn press(&mut self, sheet: &mut Sheet, key: SheetKey) -> Option<SheetEdit> {
+        match key {
+            SheetKey::Up => {
+                self.move_cursor(false, key_pairs(sheet).len());
+                None
+            }
+            SheetKey::Down => {
+                self.move_cursor(true, key_pairs(sheet).len());
+                None
+            }
+            SheetKey::Left => {
+                self.step_playhead(-1, sheet.ticks);
+                None
+            }
+            SheetKey::Right => {
+                self.step_playhead(1, sheet.ticks);
+                None
+            }
+            SheetKey::Insert => {
+                let joint = match self.selected(sheet) {
+                    Some((joint, _)) => joint,
+                    None => match sheet.tracks.first() {
+                        Some(track) => track.joint,
+                        None => {
+                            return Some(self.refuse(SheetError::EmptyTracks.to_string()));
+                        }
+                    },
+                };
+                let track = sheet
+                    .tracks
+                    .iter()
+                    .position(|track| track.joint == joint)
+                    .unwrap_or(0);
+                let value = match sheet.sample(track, self.playhead) {
+                    Ok(value) => value,
+                    Err(error) => return Some(self.refuse(error.to_string())),
+                };
+                let key = Key {
+                    tick: self.playhead,
+                    value_milli: value,
+                    easing: Easing::Linear,
+                };
+                match sheet.insert_key(joint, key) {
+                    Ok(()) => {
+                        self.cursor = key_pairs(sheet)
+                            .iter()
+                            .position(|pair| *pair == (joint, self.playhead))
+                            .unwrap_or(0);
+                        Some(SheetEdit::Insert {
+                            joint,
+                            tick: self.playhead,
+                        })
+                    }
+                    Err(error) => Some(self.refuse(error.to_string())),
+                }
+            }
+            SheetKey::Delete => {
+                let Some((joint, tick)) = self.selected(sheet) else {
+                    let error = SheetError::UnknownJoint { joint: 0 };
+                    return Some(self.refuse(error.to_string()));
+                };
+                match sheet.delete_key(joint, tick) {
+                    Ok(_) => {
+                        let len = key_pairs(sheet).len();
+                        self.cursor = self.cursor.min(len.saturating_sub(1));
+                        Some(SheetEdit::Delete { joint, tick })
+                    }
+                    Err(error) => Some(self.refuse(error.to_string())),
+                }
+            }
+        }
+    }
+
+    /// Record a refusal and hand back its row.
+    fn refuse(&mut self, text: String) -> SheetEdit {
+        self.notice = Some(text.clone());
+        SheetEdit::Refused { text }
+    }
+}
+
+/// Every `(joint, tick)` pair in sheet order, matching [`Sheet::rows`].
+pub fn key_pairs(sheet: &Sheet) -> Vec<(u16, u32)> {
+    let mut out = Vec::new();
+    for track in &sheet.tracks {
+        for key in &track.keys {
+            out.push((track.joint, key.tick));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,5 +967,57 @@ mod tests {
             Err(SheetError::UnknownKey { joint: 3, tick: 16 })
         );
         assert_eq!(sheet.digest(), digest, "delete restores the digest");
+    }
+
+    #[test]
+    fn the_timeline_panel_edits_at_the_playhead_and_echoes_refusals() {
+        let mut sheet = clip();
+        let mut panel = SheetPanel::new();
+        panel.press(&mut sheet, SheetKey::Right);
+        panel.press(&mut sheet, SheetKey::Right);
+        assert_eq!(panel.playhead(), 2, "playhead steps by one tick");
+        // Cursor starts on the first row, so I inserts into joint 3.
+        let edit = panel.press(&mut sheet, SheetKey::Insert).unwrap();
+        assert_eq!(edit, SheetEdit::Insert { joint: 3, tick: 2 });
+        assert_eq!(
+            sheet.sample(0, 2).unwrap(),
+            [40; 3],
+            "sample held the value"
+        );
+        assert_eq!(
+            panel.selected(&sheet),
+            Some((3, 2)),
+            "the new key is selected"
+        );
+        let edit = panel.press(&mut sheet, SheetKey::Delete).unwrap();
+        assert_eq!(edit, SheetEdit::Delete { joint: 3, tick: 2 });
+        assert_eq!(
+            sheet.rows().len(),
+            5,
+            "insert then delete restores the rows"
+        );
+        // A duplicate tick refuses as a typed row and changes nothing.
+        for _ in 0..10 {
+            panel.press(&mut sheet, SheetKey::Left);
+        }
+        assert_eq!(panel.playhead(), 0);
+        let edit = panel.press(&mut sheet, SheetKey::Insert).unwrap();
+        assert!(matches!(edit, SheetEdit::Refused { .. }));
+        assert!(panel.notice().unwrap().contains("already has a key"));
+        assert_eq!(sheet.rows().len(), 5);
+        // The playhead clamps inside the clip at both ends.
+        for _ in 0..100 {
+            panel.press(&mut sheet, SheetKey::Right);
+        }
+        assert_eq!(panel.playhead(), sheet.ticks - 1);
+        // A sheet with no track refuses the insert with its own line.
+        let mut empty = Sheet {
+            name: "untitled".to_string(),
+            ticks: 60,
+            tracks: Vec::new(),
+        };
+        let edit = panel.press(&mut empty, SheetKey::Insert).unwrap();
+        assert!(matches!(edit, SheetEdit::Refused { .. }));
+        assert!(panel.notice().unwrap().contains("no track"));
     }
 }

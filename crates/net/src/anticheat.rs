@@ -2,8 +2,8 @@
 //!
 //! Owner: net crate (flags only; admission authority is [`crate::guard`]).
 //! Caller: [`InputGuard::admit`](crate::guard::InputGuard::admit) runs every
-//! admitted client input through [`sanitize`] and notes each changed input
-//! in the guard's [`FlagLog`], read back through
+//! admitted client input through [`sanitize`](crate::anticheat::sanitize) and notes each changed input
+//! in the guard's [`FlagLog`](crate::anticheat::FlagLog), read back through
 //! [`HeadlessServer::flagged_inputs`](crate::dedicated::HeadlessServer::flagged_inputs).
 //! The wire codec already refuses impossible fields; this rule normalizes
 //! what is legal on the wire but not in this match (a spear press in a match
@@ -11,7 +11,7 @@
 //! and a replay names every tick the server changed.
 //! Units: fixed ticks, `F_*` bit flags. Determinism: integer bit ops and
 //! admission order only. Errors: none. Budget: O(1) per input; the log is
-//! bounded at [`MAX_FLAGGED`] and counts the rest.
+//! bounded at [`MAX_FLAGGED`](crate::anticheat::MAX_FLAGGED) and counts the rest.
 
 use engine_core::Fnv64;
 use engine_input::fighter::{Buttons, THROW_SPEAR};

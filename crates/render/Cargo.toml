@@ -87,7 +87,8 @@ pollster = { workspace = true, optional = true }
 # `backend::read_vram`: DXGI video-memory budget and usage. The same crate
 # version and features already ride in through wgpu-hal's DX12 backend, so
 # this adds no new package to the graph; gated behind `window`.
-windows = { version = "0.62", optional = true, default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Dxgi"] }
+# `power::read_power` (GS40) adds the one `GetSystemPowerStatus` call.
+windows = { version = "0.62", optional = true, default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_System_Power"] }
 
 [dev-dependencies]
 engine-core = { workspace = true, features = ["test-util"] }

@@ -39,7 +39,7 @@ struct Snapshot {
 }
 
 fn snapshot(server: &McpServer) -> Snapshot {
-    let state = server.state.lock().expect("test lock holds");
+    let state = server.state.write().expect("test lock holds");
     Snapshot {
         doc: state.doc.clone(),
         past: state.journal.past_len(),
@@ -241,7 +241,7 @@ fn model_and_script_origins_read_back_from_scene_rows() {
         .expect("model object row");
     assert_eq!(row.origin.as_deref(), Some("model:local/sidecar-1"));
     {
-        let state = server.state.lock().expect("test lock holds");
+        let state = server.state.write().expect("test lock holds");
         let chain = commands::chain_for(&state.journal, model_id);
         let record = chain.last().expect("model stamp is journaled");
         assert_eq!(
@@ -278,7 +278,7 @@ fn model_and_script_origins_read_back_from_scene_rows() {
         .expect("script object row");
     assert_eq!(row.origin.as_deref(), Some("script:pipeline"));
     {
-        let state = server.state.lock().expect("test lock holds");
+        let state = server.state.write().expect("test lock holds");
         let chain = commands::chain_for(&state.journal, script_id);
         let record = chain.last().expect("script stamp is journaled");
         assert_eq!(record.source, Source::Script("pipeline".to_owned()));
@@ -402,7 +402,7 @@ fn twenty_hostile_writes_never_land_and_one_clean_control_does() {
     assert_eq!(
         server
             .state
-            .lock()
+            .write()
             .expect("test lock holds")
             .journal
             .past_len(),

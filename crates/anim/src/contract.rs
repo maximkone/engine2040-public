@@ -461,29 +461,46 @@ pub struct BoneMapping {
     pub method: &'static str,
 }
 
-/// Map one source bone name to its stable role. Both engine names
-/// (`"pelvis"`) and Mixamo-style names (`"mixamorig_Hips"`) map to the same
-/// closed role. Unknown names are refused. Determinism: string match only.
+/// Map one source bone name to its stable role. Three naming families share
+/// the closed roles: our own snake-case names (`"pelvis"`), Mixamo-style names
+/// (`"mixamorig_Hips"`, `LeftUpLeg`) and Unreal mannequin names (`spine_02`,
+/// `upperarm_l`, `thigh_l`). Unknown names are refused. Determinism: string
+/// match only. A family name with no role of its own, such as `clavicle_l`, is
+/// deliberately absent: the caller maps it or leaves it out.
 pub fn bone_role_for_name(name: &str) -> Result<BoneRole, AnimError> {
     match name {
         "root" | "Root" | "mixamorig_Root" => Ok(BoneRole::Root),
         "pelvis" | "Hips" | "hips" | "mixamorig_Hips" => Ok(BoneRole::Pelvis),
-        "spine_lower" | "Spine" | "spine" | "mixamorig_Spine" => Ok(BoneRole::SpineLower),
+        "spine_lower" | "Spine" | "spine" | "mixamorig_Spine" | "spine_01" | "spine_02" => {
+            Ok(BoneRole::SpineLower)
+        }
         "spine_upper" | "Spine1" | "spine1" | "mixamorig_Spine1" | "Spine2"
-        | "mixamorig_Spine2" => Ok(BoneRole::SpineUpper),
-        "head" | "Head" | "Neck" | "neck" | "mixamorig_Head" | "mixamorig_Neck" => {
+        | "mixamorig_Spine2" | "spine_03" | "spine_04" | "spine_05" => Ok(BoneRole::SpineUpper),
+        "head" | "Head" | "Neck" | "neck" | "mixamorig_Head" | "mixamorig_Neck" | "neck_01" => {
             Ok(BoneRole::Head)
         }
-        "upper_arm_l" | "LeftArm" | "mixamorig_LeftArm" => Ok(BoneRole::UpperArmLeft),
-        "upper_arm_r" | "RightArm" | "mixamorig_RightArm" => Ok(BoneRole::UpperArmRight),
-        "lower_arm_l" | "LeftForeArm" | "mixamorig_LeftForeArm" => Ok(BoneRole::LowerArmLeft),
-        "lower_arm_r" | "RightForeArm" | "mixamorig_RightForeArm" => Ok(BoneRole::LowerArmRight),
+        "upper_arm_l" | "LeftArm" | "mixamorig_LeftArm" | "upperarm_l" => {
+            Ok(BoneRole::UpperArmLeft)
+        }
+        "upper_arm_r" | "RightArm" | "mixamorig_RightArm" | "upperarm_r" => {
+            Ok(BoneRole::UpperArmRight)
+        }
+        "lower_arm_l" | "LeftForeArm" | "mixamorig_LeftForeArm" | "lowerarm_l" => {
+            Ok(BoneRole::LowerArmLeft)
+        }
+        "lower_arm_r" | "RightForeArm" | "mixamorig_RightForeArm" | "lowerarm_r" => {
+            Ok(BoneRole::LowerArmRight)
+        }
         "hand_l" | "LeftHand" | "mixamorig_LeftHand" => Ok(BoneRole::HandLeft),
         "hand_r" | "RightHand" | "mixamorig_RightHand" => Ok(BoneRole::HandRight),
-        "upper_leg_l" | "LeftUpLeg" | "mixamorig_LeftUpLeg" => Ok(BoneRole::UpperLegLeft),
-        "upper_leg_r" | "RightUpLeg" | "mixamorig_RightUpLeg" => Ok(BoneRole::UpperLegRight),
-        "lower_leg_l" | "LeftLeg" | "mixamorig_LeftLeg" => Ok(BoneRole::LowerLegLeft),
-        "lower_leg_r" | "RightLeg" | "mixamorig_RightLeg" => Ok(BoneRole::LowerLegRight),
+        "upper_leg_l" | "LeftUpLeg" | "mixamorig_LeftUpLeg" | "thigh_l" => {
+            Ok(BoneRole::UpperLegLeft)
+        }
+        "upper_leg_r" | "RightUpLeg" | "mixamorig_RightUpLeg" | "thigh_r" => {
+            Ok(BoneRole::UpperLegRight)
+        }
+        "lower_leg_l" | "LeftLeg" | "mixamorig_LeftLeg" | "calf_l" => Ok(BoneRole::LowerLegLeft),
+        "lower_leg_r" | "RightLeg" | "mixamorig_RightLeg" | "calf_r" => Ok(BoneRole::LowerLegRight),
         "foot_l" | "LeftFoot" | "mixamorig_LeftFoot" => Ok(BoneRole::FootLeft),
         "foot_r" | "RightFoot" | "mixamorig_RightFoot" => Ok(BoneRole::FootRight),
         _ => Err(AnimError::UnknownRole(0)),
@@ -975,6 +992,59 @@ mod tests {
             method: "alias",
         });
         assert_eq!(bone_coverage(&map), Ok(1000));
+    }
+
+    #[test]
+    fn unreal_mannequin_names_collapse_to_the_roles() {
+        let pairs = [
+            ("spine_01", BoneRole::SpineLower),
+            ("spine_02", BoneRole::SpineLower),
+            ("spine_03", BoneRole::SpineUpper),
+            ("neck_01", BoneRole::Head),
+            ("upperarm_l", BoneRole::UpperArmLeft),
+            ("lowerarm_r", BoneRole::LowerArmRight),
+            ("thigh_l", BoneRole::UpperLegLeft),
+            ("calf_r", BoneRole::LowerLegRight),
+        ];
+        for (name, role) in pairs {
+            assert_eq!(bone_role_for_name(name), Ok(role), "{name}");
+        }
+        // A name with no role of its own stays unknown: the caller maps it or
+        // leaves it out of the submission.
+        assert_eq!(
+            bone_role_for_name("clavicle_l"),
+            Err(AnimError::UnknownRole(0))
+        );
+        // The whole Unreal family scores a full map without a single override.
+        let sources = [
+            "root",
+            "pelvis",
+            "spine_01",
+            "spine_03",
+            "head",
+            "upperarm_l",
+            "upperarm_r",
+            "lowerarm_l",
+            "lowerarm_r",
+            "hand_l",
+            "hand_r",
+            "thigh_l",
+            "thigh_r",
+            "calf_l",
+            "calf_r",
+            "foot_l",
+            "foot_r",
+        ];
+        let map: Vec<BoneMapping> = sources
+            .iter()
+            .map(|name| BoneMapping {
+                source: (*name).to_owned(),
+                role: bone_role_for_name(name).expect("a family name"),
+                confidence_permille: 900,
+                method: "alias",
+            })
+            .collect();
+        assert_eq!(bone_coverage(&map), Ok(FULL_COVERAGE_PERMILLE));
     }
 
     #[test]

@@ -416,7 +416,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
 
 **Promoted from the landscape backlog (PLN30, cluster E ship and input)**
 
-- [ ] GS39 game: borderless fullscreen toggle on F11 — the arena window opens windowed
+- [x] GS39 game: borderless fullscreen toggle on F11 — the arena window opens windowed
   and has no way to fill the screen. Add `WindowMode { Windowed, Borderless }` with
   `toggled()` and `is_borderless()` to `crates/game/src/bin/arena_frame/mod.rs`; F11
   (pressed, no repeat) flips it and calls `window.set_fullscreen(...)` with `None` or
@@ -427,8 +427,8 @@ Every row is one crate, small, with a named donor and a test that fails before.
   --features app --bin arena window_mode` x2: two toggles return to `Windowed`,
   `Borderless.is_borderless()` is true; golden `d57b5c8ae3096614` unchanged. F2P: no
   `WindowMode`. P2P: `cargo test -p engine-game --features app --bin arena` green.
-  needs: none.
-- [ ] GS40 render: battery cap on the quality tier — a laptop on battery draws full
+  needs: none. Landed 069ed16.
+- [x] GS40 render: battery cap on the quality tier — a laptop on battery draws full Landed 0e6cd1a.
   frames and the fan and heat show it. Add `crates/render/src/power.rs`: a Windows leaf
   `read_power()` beside `backend::read_vram` (`GetSystemPowerStatus`: `ACLineStatus`,
   `BatteryLifePercent`, `SystemStatusFlag` battery saver) returning `PowerReading::{Known

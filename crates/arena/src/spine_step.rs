@@ -611,7 +611,15 @@ fn sys_inputs(core: &mut Core, _: &mut Ctx) {
 fn sys_ai(core: &mut Core, _: &mut Ctx) {
     let n = core.fighters;
     let v2 = core.rules.version == FIGHT_RULES_V2;
-    let plan = v2.then(|| engage::Plan::build(&core.states, &core.fight, &core.rules.teams, n));
+    let plan = v2.then(|| {
+        engage::Plan::build(
+            &core.states,
+            &core.fight,
+            &core.rules.teams,
+            n,
+            core.world.cover_boxes(),
+        )
+    });
     for slot in 0..n {
         if core.from_tape[slot] {
             continue;

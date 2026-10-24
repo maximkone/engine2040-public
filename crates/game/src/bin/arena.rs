@@ -1163,6 +1163,9 @@ struct ArenaApp {
     window_focused: bool,
     /// Whether the window was occluded at the last frame.
     window_occluded: bool,
+    /// How the window fills the screen (F11 flips it). Presentation only:
+    /// the sim, the tape and the state hash never see it.
+    window_mode: arena_frame::WindowMode,
     /// The present path's split for the frame just presented: the
     /// swapchain acquire plus the render crate's live wall split.
     last_frame_split: arena_frame::FrameSplit,
@@ -1363,6 +1366,7 @@ impl ArenaApp {
             frame_trace_path: frame_trace_path(),
             window_focused: true,
             window_occluded: false,
+            window_mode: arena_frame::WindowMode::Windowed,
             last_frame_split: arena_frame::FrameSplit::default(),
             // OPT27: the 4 GB, 32-layer local model at 60 Hz. A refused
             // config says so once and the run goes on without a watch.
@@ -2853,6 +2857,12 @@ impl ArenaApp {
             // step per press. Never touches the sim (presentation only).
             if struck {
                 self.presentation_camera_key(code);
+            }
+            // F11 fills the screen: borderless fullscreen over the display,
+            // and the next F11 returns to the windowed size. Presentation
+            // only, so the tape and the hash never see the mode.
+            if struck && code == winit::keyboard::KeyCode::F11 {
+                self.toggle_fullscreen();
             }
             if struck && self.cam_mode == CameraMode::Free {
                 self.step_free_cam(code);

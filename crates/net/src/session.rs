@@ -6,7 +6,7 @@
 //! only; this crate stays dependency-light (arena plus input path deps).
 //!
 //! Authority per tick: [`Server`] owns the match. It holds one cold
-//! [`LiveMatch`](engine_arena::LiveMatch) and steps it exactly once per
+//! [`LiveMatch`] and steps it exactly once per
 //! authored tick with the human inputs it has received (one sim step per
 //! tick, byte-identical to the arena prefix runners); every slot without a
 //! human input is filled by the arena's own brain fill, so AI fills empty

@@ -1,4 +1,4 @@
-//! `e2040-mcp`: the stdio MCP door on a project folder.
+//! `e2040-mcp`: the MCP door on a project folder.
 //!
 //! Consumer: any MCP client (Claude Code, OpenCode, Cursor) plus the EV1 eval
 //! harness, with one config line pointing at a project folder. Data owner
@@ -6,22 +6,79 @@
 //! and the tokio runtime. Units follow `engine-scene`. Determinism scope:
 //! none here. Errors print to stderr with a nonzero exit; stdout carries
 //! only MCP JSON-RPC frames.
+//!
+//! Two transports, one door: stdio (the default, byte-identical to before)
+//! and `--http ADDR`, an opt-in streamable HTTP door on loopback with a
+//! per-run bearer token, a bounded body and a read timeout.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 use engine_endpoint::startup::{build_server, parse_args, usage};
 
-/// Serve one project folder until the client closes stdin.
+/// Extra help line for the HTTP mode.
+const HTTP_HELP: &str = "\
+--http ADDR serves the same door over HTTP on ADDR (loopback only, such as\n\
+127.0.0.1:0 for an ephemeral port). The run prints its address and a per-run\n\
+bearer token; every request must carry `Authorization: Bearer <token>`.\n\
+Routes: `GET /tools` lists the tools, `POST /tx/batch` applies one batch.\n\
+Without --http the door speaks MCP over stdio, exactly as before.\n";
+
+/// Serve one project folder until the client closes stdin, or over HTTP.
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("{}", usage());
+        println!("{HTTP_HELP}");
         return;
     }
-    std::process::exit(Box::pin(run(&args)).await);
+    let (rest, http) = match split_http(&args) {
+        Ok(parts) => parts,
+        Err(message) => {
+            eprintln!("e2040-mcp: usage error: {message}");
+            std::process::exit(2);
+        }
+    };
+    std::process::exit(Box::pin(run(&rest, http)).await);
+}
+
+/// Split `--http ADDR` (or `--http=ADDR`) out of argv: the address must be
+/// loopback, and the rest still parses as the stdio flag set.
+fn split_http(args: &[String]) -> Result<(Vec<String>, Option<SocketAddr>), String> {
+    let mut rest: Vec<String> = Vec::new();
+    let mut http: Option<SocketAddr> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let value = if arg == "--http" {
+            Some(
+                args.next()
+                    .ok_or_else(|| "--http needs an address".to_owned())?
+                    .as_str(),
+            )
+        } else {
+            arg.strip_prefix("--http=")
+        };
+        let Some(value) = value else {
+            rest.push(arg.clone());
+            continue;
+        };
+        if http.is_some() {
+            return Err("--http given twice".to_owned());
+        }
+        let addr: SocketAddr = value
+            .parse()
+            .map_err(|_| format!("--http needs an address like 127.0.0.1:0, got `{value}`"))?;
+        if !addr.ip().is_loopback() {
+            return Err(format!("--http serves loopback only, got `{addr}`"));
+        }
+        http = Some(addr);
+    }
+    Ok((rest, http))
 }
 
 /// Parse, open and serve: every failure maps to a typed exit code.
-async fn run(args: &[String]) -> i32 {
+async fn run(args: &[String], http: Option<SocketAddr>) -> i32 {
     let config = match parse_args(args) {
         Ok(config) => config,
         Err(error) => {
@@ -60,10 +117,6 @@ async fn run(args: &[String]) -> i32 {
         engine_endpoint::packs::view::arena_exe_path().display(),
         engine_endpoint::packs::view::ARENA_EXE_ENV
     );
-    eprintln!(
-        "e2040-mcp: serving `{dir}` over stdio",
-        dir = config.project_dir.display()
-    );
     if let Some(grant) = &config.web {
         eprintln!(
             "e2040-mcp: web verbs allowed under `{root}`{chrome}",
@@ -74,6 +127,31 @@ async fn run(args: &[String]) -> i32 {
             }
         );
     }
+    if let Some(addr) = http {
+        // LG6: the same door on a loopback socket, with a per-run token.
+        let door = match engine_endpoint::remote_shim::http_door::HttpDoor::start_on(
+            Arc::new(server),
+            addr,
+        ) {
+            Ok(door) => door,
+            Err(error) => {
+                eprintln!("e2040-mcp: http door failed to bind: {error}");
+                return 1;
+            }
+        };
+        eprintln!(
+            "e2040-mcp: serving `{dir}` over http",
+            dir = config.project_dir.display()
+        );
+        eprintln!("{}", door.announce_line());
+        // The accept thread owns the socket; the runtime only waits for a kill.
+        std::future::pending::<()>().await;
+        return 0;
+    }
+    eprintln!(
+        "e2040-mcp: serving `{dir}` over stdio",
+        dir = config.project_dir.display()
+    );
     match Box::pin(server.run_stdio()).await {
         Ok(_) => 0,
         Err(error) => {

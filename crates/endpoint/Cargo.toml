@@ -13,7 +13,7 @@ workspace = true
 # `e2040-mcp` stdio binary (MIT, 1.53.1 in lock via rmcp; workspace tokio).
 # EA1e drives the local/remote provider adapters on recorded fixtures.
 [features]
-mcp = ["dep:rmcp", "dep:engine-editor", "dep:engine-scene", "engine-scene/json", "dep:engine-arena", "dep:engine-spatial", "dep:tokio", "dep:engine-provider", "dep:engine-observe", "dep:engine-game", "dep:engine-destruction", "dep:engine-combat", "dep:engine-anim", "dep:engine-material", "dep:engine-ai", "dep:engine-net", "dep:engine-physics", "dep:engine-physfx", "dep:engine-nav", "dep:engine-input", "dep:engine-playtest", "dep:engine-world"]
+mcp = ["dep:rmcp", "dep:engine-editor", "dep:engine-scene", "engine-scene/json", "dep:engine-arena", "dep:engine-spatial", "dep:tokio", "dep:engine-provider", "dep:engine-observe", "dep:engine-game", "dep:engine-destruction", "dep:engine-combat", "dep:engine-anim", "dep:engine-material", "dep:engine-ai", "dep:engine-net", "dep:engine-physics", "dep:engine-physfx", "dep:engine-nav", "dep:engine-input", "dep:engine-playtest", "dep:engine-world", "dep:engine-ui", "dep:engine-audio"]
 
 # The geo pack's modeling ops (boolean, unwrap, lod, collision) run on the cook-time engine-geo crate:
 # off by default so the default build has neither the donor libraries nor the xatlas C++ step.
@@ -81,6 +81,10 @@ engine-playtest = { workspace = true, optional = true }
 # The world pack (door verbs) bakes, samples and paints the std-only TVER terrain:
 # world never imports endpoint.
 engine-world = { workspace = true, optional = true }
+# The ui pack solves the integer layout (engine-ui) and the audio pack validates
+# the cue sheet and anchors (engine-audio): both owners, never a copy here.
+engine-ui = { workspace = true, optional = true }
+engine-audio = { workspace = true, optional = true }
 # AD8 verify: the proof crate's tape, bug and trace verifiers (feature `verify`).
 engine-proof = { workspace = true, optional = true }
 # Cook-time geometry (feature `geo`); never in the tick graph.

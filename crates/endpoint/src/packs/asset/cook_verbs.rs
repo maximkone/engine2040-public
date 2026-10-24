@@ -25,10 +25,9 @@
 //! Feature gate: built only with both the `intake` (glTF import, bundle cook) and `geo`
 //! (mesh tools) features; both are off by default.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use engine_anim::clip_rot::{bake_rot_track, rot_blob_hash, write_rot_blob, RotBlob, RotTrack};
 use engine_assets::bundle_cook::{cook_bundle_bytes, verify_bundle_bytes, StagedCooked};
 use engine_assets::mesh_cook::{
     tri_count, MeshClass, MAX_HULL_VERTS, MAX_LOD_LEVELS, PROP_MAX_TRIS,
@@ -49,6 +48,8 @@ use rmcp::serde_json::Value;
 
 use super::{TOOL_ASSET_BUDGET, TOOL_ASSET_COOK, TOOL_ASSET_LINT};
 use crate::mcp::{McpServer, McpToolError};
+
+use super::rot_cook::rot_sidecar;
 
 /// Default atlas edge in texels when `asset.cook` is not told one.
 pub const DEFAULT_ATLAS: u32 = 512;
@@ -83,11 +84,11 @@ fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-fn wide(n: usize) -> u64 {
+pub(super) fn wide(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
-fn io_failed(what: &str, path: &Path, error: &std::io::Error) -> McpToolError {
+pub(super) fn io_failed(what: &str, path: &Path, error: &std::io::Error) -> McpToolError {
     McpToolError::new(
         "io_failed",
         format!(
@@ -685,225 +686,6 @@ fn build_bundle(
     Ok((bytes, built))
 }
 
-/// GLB JSON and BIN chunks, when `bytes` is a GLB.
-fn glb_chunks(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
-    if bytes.get(0..4)? != b"glTF" {
-        return None;
-    }
-    let mut at = 12usize;
-    let mut json = None;
-    let mut bin: &[u8] = &[];
-    while at.checked_add(8)? <= bytes.len() {
-        let len = usize::try_from(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
-            .unwrap_or(usize::MAX);
-        let kind = bytes.get(at + 4..at + 8)?;
-        let body = bytes.get(at + 8..at.checked_add(8)?.checked_add(len)?)?;
-        match kind {
-            b"JSON" => json = Some(body),
-            b"BIN\0" => bin = body,
-            _ => {}
-        }
-        at = at.checked_add(8)?.checked_add(len)?;
-    }
-    Some((json?, bin))
-}
-
-/// Read one float accessor (SCALAR, VEC3 or VEC4) as a flat list.
-fn accessor_f32(doc: &Value, bin: &[u8], index: u64) -> Option<Vec<f32>> {
-    let accessors = doc.get("accessors")?.as_array()?;
-    let accessor = accessors.get(usize::try_from(index).ok()?)?;
-    if accessor.get("componentType")?.as_u64()? != 5126 {
-        return None;
-    }
-    let components = match accessor.get("type")?.as_str()? {
-        "SCALAR" => 1,
-        "VEC3" => 3,
-        "VEC4" => 4,
-        _ => return None,
-    };
-    let count = usize::try_from(accessor.get("count")?.as_u64()?).ok()?;
-    let view_index = usize::try_from(accessor.get("bufferView")?.as_u64()?).ok()?;
-    let view = doc.get("bufferViews")?.as_array()?.get(view_index)?;
-    let base = usize::try_from(view.get("byteOffset").and_then(Value::as_u64).unwrap_or(0)).ok()?
-        + usize::try_from(
-            accessor
-                .get("byteOffset")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        )
-        .ok()?;
-    let stride = view
-        .get("byteStride")
-        .and_then(Value::as_u64)
-        .and_then(|s| usize::try_from(s).ok())
-        .filter(|s| *s >= components * 4)
-        .unwrap_or(components * 4);
-    let mut out = Vec::with_capacity(count.checked_mul(components)?);
-    for i in 0..count {
-        let start = base.checked_add(i.checked_mul(stride)?)?;
-        for c in 0..components {
-            let at = start.checked_add(c * 4)?;
-            out.push(f32::from_le_bytes(bin.get(at..at + 4)?.try_into().ok()?));
-        }
-    }
-    Some(out)
-}
-
-/// Bake the rotation sidecar beside the bundle: one lane per skin joint, from the
-/// first animation's rotation channels. `None` when the GLB has no skinned
-/// rotation channel, so a static mesh writes no `.rot` file and the bundle bytes
-/// stay exactly what they were before this verb knew about rotations.
-fn rot_sidecar(
-    bytes: &[u8],
-    name: &str,
-    folder: &Path,
-    warnings: &mut Vec<String>,
-) -> Result<Option<(PathBuf, u64, String)>, McpToolError> {
-    let Some((json, bin)) = glb_chunks(bytes) else {
-        return Ok(None);
-    };
-    let Ok(doc) = rmcp::serde_json::from_slice::<Value>(json) else {
-        return Ok(None);
-    };
-    let mut joints: Vec<u64> = Vec::new();
-    for skin in doc
-        .get("skins")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        for joint in skin
-            .get("joints")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(node) = joint.as_u64() {
-                joints.push(node);
-            }
-        }
-    }
-    joints.sort_unstable();
-    joints.dedup();
-    if joints.is_empty() {
-        return Ok(None);
-    }
-    let Some((rotations, translated)) = rot_channels(&doc, bin, &joints) else {
-        return Ok(None);
-    };
-    if rotations.is_empty() {
-        return Ok(None);
-    }
-    let (lanes, end) = bake_lanes(&joints, &rotations, &translated, warnings);
-    let blob = RotBlob {
-        joints: u16::try_from(lanes.len()).unwrap_or(u16::MAX),
-        lanes,
-        sockets: Vec::new(),
-        ticks_len: end,
-    };
-    let blob_bytes = write_rot_blob(&blob);
-    let path = folder.join(format!("{name}.rot"));
-    std::fs::write(&path, &blob_bytes).map_err(|e| io_failed("write", &path, &e))?;
-    let digest = format!("{:016x}", rot_blob_hash(&blob));
-    Ok(Some((path, wide(blob_bytes.len()), digest)))
-}
-
-/// Rotation tracks and translation nodes of the first animation, kept only for
-/// nodes that are skin joints.
-fn rot_channels(
-    doc: &Value,
-    bin: &[u8],
-    joints: &[u64],
-) -> Option<(BTreeMap<u64, (Vec<f32>, Vec<[f32; 4]>)>, BTreeSet<u64>)> {
-    let animation = doc
-        .get("animations")
-        .and_then(Value::as_array)
-        .and_then(|list| list.first())?;
-    let samplers = animation.get("samplers").and_then(Value::as_array)?;
-    let channels = animation.get("channels").and_then(Value::as_array)?;
-    let mut rotations: BTreeMap<u64, (Vec<f32>, Vec<[f32; 4]>)> = BTreeMap::new();
-    let mut translated: BTreeSet<u64> = BTreeSet::new();
-    for channel in channels {
-        let Some(target) = channel.get("target") else {
-            continue;
-        };
-        let (Some(node), Some(path)) = (
-            target.get("node").and_then(Value::as_u64),
-            target.get("path").and_then(Value::as_str),
-        ) else {
-            continue;
-        };
-        if !joints.contains(&node) {
-            continue;
-        }
-        if path == "translation" {
-            translated.insert(node);
-            continue;
-        }
-        if path != "rotation" {
-            continue;
-        }
-        let Some(sampler) = channel
-            .get("sampler")
-            .and_then(Value::as_u64)
-            .and_then(|i| samplers.get(usize::try_from(i).ok()?))
-        else {
-            continue;
-        };
-        let times = sampler
-            .get("input")
-            .and_then(Value::as_u64)
-            .and_then(|i| accessor_f32(doc, bin, i));
-        let quats = sampler
-            .get("output")
-            .and_then(Value::as_u64)
-            .and_then(|i| accessor_f32(doc, bin, i));
-        let (Some(times), Some(quats)) = (times, quats) else {
-            continue;
-        };
-        if quats.len() % 4 != 0 {
-            continue;
-        }
-        let values: Vec<[f32; 4]> = quats
-            .chunks_exact(4)
-            .map(|q| [q[0], q[1], q[2], q[3]])
-            .collect();
-        if values.len() != times.len() {
-            continue;
-        }
-        rotations.insert(node, (times, values));
-    }
-    Some((rotations, translated))
-}
-
-/// One lane per joint in joint order; a joint with rotation but no translation
-/// track still bakes, with one warning row.
-fn bake_lanes(
-    joints: &[u64],
-    rotations: &BTreeMap<u64, (Vec<f32>, Vec<[f32; 4]>)>,
-    translated: &BTreeSet<u64>,
-    warnings: &mut Vec<String>,
-) -> (Vec<RotTrack>, f32) {
-    let mut lanes = Vec::with_capacity(joints.len());
-    let mut end = 0.0f32;
-    for node in joints {
-        if let Some((times, values)) = rotations.get(node) {
-            for t in times {
-                end = end.max(*t);
-            }
-            lanes.push(bake_rot_track(times.clone(), values.clone()));
-            if !translated.contains(node) {
-                warnings.push(format!(
-                    "joint node {node} has rotation but no translation track in the first animation; its lane bakes alone (a warning row, not a fail)"
-                ));
-            }
-        } else {
-            lanes.push(RotTrack::default());
-        }
-    }
-    (lanes, end)
-}
-
 fn cook(args: &CookArgs) -> Result<CookOutput, McpToolError> {
     if !name_ok(&args.name) {
         return Err(bad(format!(
@@ -1358,6 +1140,22 @@ pub struct AssetCost {
     pub hulls: u32,
     /// Draw calls at LOD0 (one per triangle primitive).
     pub draw_calls: u32,
+    /// Crowd impostor row, set when the bundle is a crowd specimen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impostor: Option<ImpostorCost>,
+}
+
+/// The crowd half of one asset row: what the cards cost against the tree.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ImpostorCost {
+    /// Primitives that become cards (one card per draw of the specimen).
+    pub cards: u32,
+    /// Bytes the cards cost at the mid card quality.
+    pub card_bytes: u64,
+    /// Cooked specimen bytes the cards avoid loading per fighter.
+    pub mesh_bytes_avoided: u64,
 }
 
 /// Level total over a placement.
@@ -1440,6 +1238,23 @@ fn cost_of(path: &Path, asset: &str) -> Result<AssetCost, McpToolError> {
         texture_bytes,
         hulls,
         draw_calls: draws,
+        impostor: crowd_row(asset, wide(bytes.len()), draws),
+    })
+}
+
+/// The impostor row for a crowd specimen: one card per primitive, priced at the
+/// mid card quality, against the cooked specimen bytes this file holds.
+fn crowd_row(asset: &str, file_bytes: u64, draws: u32) -> Option<ImpostorCost> {
+    let lower = asset.to_lowercase();
+    if !(lower.contains("crowd") || lower.contains("impostor")) {
+        return None;
+    }
+    let card_bytes =
+        u64::from(draws).saturating_mul(super::impostor::CARD_PRESETS[1].bytes_per_card);
+    Some(ImpostorCost {
+        cards: draws,
+        card_bytes,
+        mesh_bytes_avoided: file_bytes.saturating_sub(card_bytes),
     })
 }
 
@@ -1893,11 +1708,19 @@ mod tests {
         let mut out = Vec::with_capacity(total);
         out.extend_from_slice(b"glTF");
         out.extend_from_slice(&2u32.to_le_bytes());
-        out.extend_from_slice(&(total as u32).to_le_bytes());
-        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(total).unwrap_or(u32::MAX).to_le_bytes());
+        out.extend_from_slice(
+            &u32::try_from(json_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         out.extend_from_slice(b"JSON");
         out.extend_from_slice(&json_bytes);
-        out.extend_from_slice(&(bin_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(
+            &u32::try_from(bin_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         out.extend_from_slice(b"BIN\0");
         out.extend_from_slice(&bin_bytes);
         out
@@ -1974,5 +1797,39 @@ mod tests {
         let second = CookTool::invoke(&server, args).expect("cooks again");
         assert_eq!(second.bundle_digest, first.bundle_digest);
         assert_eq!(second.bundle_bytes, first.bundle_bytes);
+    }
+
+    #[test]
+    fn budget_gives_a_crowd_bundle_an_impostor_row_and_a_plain_bundle_none() {
+        let server = server();
+        let crowd = BudgetTool::invoke(
+            &server,
+            BudgetArgs {
+                glb_path: Some(root("../../content/crowd/src/crowd_impostor_01.gltf")),
+                placement_json: None,
+                asset_dir: None,
+                map_name: None,
+            },
+        )
+        .expect("prices the specimen");
+        let cost = &crowd.assets[0];
+        let row = cost.impostor.expect("a crowd bundle carries the row");
+        assert_eq!(row.cards, cost.draw_calls, "one card per specimen draw");
+        assert!(row.card_bytes > 0);
+        assert!(
+            row.mesh_bytes_avoided > 0,
+            "the specimen file is bigger than its cards"
+        );
+        let plain = BudgetTool::invoke(
+            &server,
+            BudgetArgs {
+                glb_path: Some(root("../../content/maps/cooked/siege_wall.glb")),
+                placement_json: None,
+                asset_dir: None,
+                map_name: None,
+            },
+        )
+        .expect("prices the wall");
+        assert!(plain.assets[0].impostor.is_none(), "a wall is not a crowd");
     }
 }

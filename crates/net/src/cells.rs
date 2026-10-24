@@ -1,9 +1,9 @@
 //! cells: tick-budgeted pre-cooked map-cell streaming.
 //! Owner: net. Units: cell ids, ticks at 60 Hz, bytes. Determinism: integer
 //! math plus stable id order only, hashes via `engine-core` FNV; no float,
-//! no wall clock, no `HashMap` in hashed state. Errors: [`CellError`].
-//! Caller: `HeadlessServer::tick` drives [`CellQueue`]; `session::Client`
-//! decodes via [`decode_packet`] plus `ingest_cell_bytes`.
+//! no wall clock, no `HashMap` in hashed state. Errors: [`CellError`](crate::cells::CellError).
+//! Caller: `HeadlessServer::tick` drives [`CellQueue`](crate::cells::CellQueue); `session::Client`
+//! decodes via [`decode_packet`](crate::cells::decode_packet) plus `ingest_cell_bytes`.
 //! PORT-IDEA(veloren/veloren@2dbddc2: budget-plus-priority queue shape only;
 //! presence-drives-priority mapped onto `interest.rs` rings; combat-dirty
 //! never culled; dirty-set-flushes-off-tick future, receipt names version).

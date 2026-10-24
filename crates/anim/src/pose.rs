@@ -120,7 +120,7 @@ fn wrap_pi(delta: f32) -> f32 {
     (delta + PI).rem_euclid(TAU) - PI
 }
 
-fn lerp3(a: [f32; 3], b: [f32; 3], w: f32) -> [f32; 3] {
+pub(crate) fn lerp3(a: [f32; 3], b: [f32; 3], w: f32) -> [f32; 3] {
     [
         a[0] + (b[0] - a[0]) * w,
         a[1] + (b[1] - a[1]) * w,

@@ -2392,6 +2392,10 @@ mod tests {
         );
         assert!(first.surface_chars > 0);
         assert!(first.tools > 0);
+        eprintln!(
+            "door surface {} chars of {} advertised (headroom {}), {} tools",
+            first.surface_chars, first.budget_chars, first.headroom_chars, first.tools
+        );
         assert_eq!(first.audit_head, None, "the first call sees an empty chain");
         assert_eq!(first.audit_total, 0);
         assert_eq!(first.durable_generation, None, "unknown stays unknown");

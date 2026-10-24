@@ -357,9 +357,12 @@ fn digest_u16s(values: &[u16]) -> u64 {
 mod tests {
     use super::*;
 
+    /// One test scene: normals, depth, albedo and ids, row-major.
+    type Scene = (Vec<[f32; 3]>, Vec<f32>, Vec<[f32; 3]>, Vec<u16>);
+
     /// A small scene: sand ground with two crates, lit from `sun` degrees of
     /// tilt. Only the normal changes with `sun`; depth, albedo and ids stay.
-    fn scene(sun: f32) -> (Vec<[f32; 3]>, Vec<f32>, Vec<[f32; 3]>, Vec<u16>) {
+    fn scene(sun: f32) -> Scene {
         let (width, height) = (8usize, 6usize);
         let mut normal = Vec::with_capacity(width * height);
         let mut depth = Vec::with_capacity(width * height);

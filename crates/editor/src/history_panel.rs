@@ -29,13 +29,7 @@ impl HistoryPanel {
 
     /// Move the cursor down (older) or up (newer), clamped to `len` rows.
     pub fn move_cursor(&mut self, down: bool, len: usize) {
-        if down {
-            if self.cursor + 1 < len {
-                self.cursor += 1;
-            }
-        } else {
-            self.cursor = self.cursor.saturating_sub(1);
-        }
+        crate::shell::panels::move_cursor(&mut self.cursor, down, len);
     }
 
     /// Rows for the panel, newest first.

@@ -8,6 +8,7 @@ use crate::cli::{usage, write_text_receipt, Error};
 use crate::manifest::{check_name, lookup, unwired_note, valid_words, Manifest, Target};
 use crate::process::{self, Checkout, Runner, Step};
 use crate::workspace::{self, GameBin};
+use engine_core::hash::{hex16, Fnv64};
 use engine_proof::{record, replay, Config, MAX_TICKS};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -372,6 +373,20 @@ impl Project {
         &self.dir
     }
 
+    /// Where `build` reads and writes this project's lock: `project.lock` beside the manifest.
+    pub fn lock_path(&self) -> PathBuf {
+        self.dir.join(LOCK_FILE)
+    }
+
+    /// The crates this project builds against, read from the engine checkout. A package here
+    /// is only a Cargo crate in the one workspace: no store and no fetch, so the manifest
+    /// names the only crate a project resolves — the game it builds.
+    pub fn dependency_rows(&self, root: &Path) -> Result<Vec<LockRow>, Error> {
+        let game = self.game();
+        let crate_dir = find_crate(root, &game.package)?;
+        Ok(vec![lock_row(root, &game.package, &crate_dir)?])
+    }
+
     /// Whether `game.toml` names a game, so `run` runs that bin instead of the proof fixture.
     pub fn names_game(&self) -> bool {
         self.game.is_some()
@@ -392,6 +407,191 @@ impl Project {
         })?;
         parse_seed(&path, &text)
     }
+}
+
+/// The lock file `build` writes beside the manifest.
+pub const LOCK_FILE: &str = "project.lock";
+
+/// One crate a project builds against, as `project.lock` records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockRow {
+    /// Cargo package name.
+    pub name: String,
+    /// The version the crate's manifest declares.
+    pub version: String,
+    /// Where the crate came from: `crate:<path from the engine checkout, forward slashes>`.
+    pub source: String,
+    /// 16 hex digits over the crate directory's files, their relative paths included.
+    pub hash: String,
+}
+
+impl LockRow {
+    /// The lock line: `name version source hash`.
+    pub fn line(&self) -> String {
+        format!(
+            "{} {} {} {}",
+            self.name, self.version, self.source, self.hash
+        )
+    }
+}
+
+/// The crate directory of `package` in a checkout: the checkout root or one `crates/` member.
+fn find_crate(root: &Path, package: &str) -> Result<PathBuf, Error> {
+    let mut dirs = vec![root.to_path_buf()];
+    if let Ok(entries) = fs::read_dir(root.join("crates")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+    }
+    for dir in dirs {
+        let cargo = dir.join("Cargo.toml");
+        let Ok(text) = fs::read_to_string(&cargo) else {
+            continue;
+        };
+        if package_name(&text).as_deref() == Some(package) {
+            return Ok(dir);
+        }
+    }
+    Err(Error::Project(format!(
+        "the engine checkout {} has no crate `{package}`; build runs in the checkout this exe was built from",
+        root.display()
+    )))
+}
+
+/// The `[package] name` of a crate manifest.
+fn package_name(text: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("name") else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        return Some(rest.trim().trim_matches('"').to_owned());
+    }
+    None
+}
+
+/// The version a crate manifest declares, or the workspace's when the crate inherits it.
+fn crate_version(root: &Path, text: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("version") {
+            if let Some(rest) = rest.trim_start().strip_prefix('=') {
+                return Some(rest.trim().trim_matches('"').to_owned());
+            }
+        }
+        if line.starts_with("version.workspace") {
+            return workspace_version(root);
+        }
+    }
+    None
+}
+
+/// The `[workspace.package] version` of the checkout root manifest.
+fn workspace_version(root: &Path) -> Option<String> {
+    let text = fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[workspace.package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("version") {
+            if let Some(rest) = rest.trim_start().strip_prefix('=') {
+                return Some(rest.trim().trim_matches('"').to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// One lock row for a crate directory: name, version, source and content hash.
+fn lock_row(root: &Path, package: &str, dir: &Path) -> Result<LockRow, Error> {
+    let cargo_path = dir.join("Cargo.toml");
+    let text = fs::read_to_string(&cargo_path).map_err(|error| {
+        Error::Project(format!("cannot read {}: {error}", cargo_path.display()))
+    })?;
+    let version = crate_version(root, &text).ok_or_else(|| {
+        Error::Project(format!(
+            "{}: `[package] version` is missing; the lock records one version per crate",
+            cargo_path.display()
+        ))
+    })?;
+    Ok(LockRow {
+        name: package.to_owned(),
+        version,
+        source: format!("crate:{}", relative_source(root, dir)),
+        hash: crate_hash(dir)?,
+    })
+}
+
+/// `dir` from `root`, forward slashes; the root itself is `.`.
+fn relative_source(root: &Path, dir: &Path) -> String {
+    let relative = dir.strip_prefix(root).unwrap_or(dir);
+    let text = relative.to_string_lossy().replace('\\', "/");
+    if text.is_empty() {
+        ".".to_owned()
+    } else {
+        text
+    }
+}
+
+/// 16 hex digits over a crate directory: every file's relative path and bytes, in path order.
+fn crate_hash(dir: &Path) -> Result<String, Error> {
+    let mut files = Vec::new();
+    collect_files(dir, &mut files)?;
+    files.sort();
+    let mut hash = Fnv64::new();
+    for file in &files {
+        let bytes = fs::read(file)
+            .map_err(|error| Error::Project(format!("cannot read {}: {error}", file.display())))?;
+        hash.write(relative_source(dir, file).as_bytes());
+        hash.write_len(bytes.len());
+        hash.write(&bytes);
+    }
+    Ok(hex16(hash.finish()))
+}
+
+/// Every file under `dir`, recursively; directories hold no bytes to hash.
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Error> {
+    let entries = fs::read_dir(dir)
+        .map_err(|error| Error::Project(format!("cannot read {}: {error}", dir.display())))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| Error::Project(format!("cannot read {}: {error}", dir.display())))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out)?;
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a key that parses but reaches no build or run, naming it, its line and what the

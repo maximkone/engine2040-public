@@ -1,7 +1,7 @@
 //! webtransport: browser clients join the dedicated server over WebTransport.
 //!
 //! Purpose: accept WebTransport sessions beside QUIC behind the same
-//! [`Transport`](crate::quic::Transport) trait, so the snapshot, state and
+//! [`Transport`](crate::quic::Transport)(crate::quic::Transport) trait, so the snapshot, state and
 //! lobby codecs stay exactly as they are. Datagrams carry the unreliable
 //! frames (inputs, states, deltas); one bidirectional stream per session,
 //! opened by the client, carries the reliable frames (snapshots, lobby).

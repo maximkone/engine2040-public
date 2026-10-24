@@ -111,6 +111,11 @@ pub mod state_machine;
 /// The spear throw as a masked override on the final pose: the arm loads back,
 /// sweeps to point, holds and lets go. Std-only presentation (SG3).
 pub mod throw_layer;
+/// Cutscene keyframe document: declared tracks, keys with a tick, a three-value
+/// pose and an easing word, compiled onto the same SoA clip the playback
+/// samples. Std-only; refusing an unknown track and non-monotonic keys keeps a
+/// scripted timeline playable.
+pub mod timeline;
 /// Weapon-trail rings plus the FPS viewmodel pose that feeds them.
 /// Std-only presentation; the fighter look draws each attacking slot's ring
 /// as a view-only strip, the render forward pass reads the strip vertices.

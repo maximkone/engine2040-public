@@ -11,9 +11,9 @@
 //! the tree runs beside the net tick hashes, it never feeds one and it never
 //! gates anything.
 //!
-//! The tree is the core digest ([`MerkleDigest`]), so the net crate owns no
+//! The tree is the core digest ([`MerkleDigest`](engine_core::digest::MerkleDigest)), so the net crate owns no
 //! second Merkle tree: the leaves are hashed through the core byte hash
-//! ([`hash_bytes`]) and every subtree root the walk compares comes from the
+//! ([`hash_bytes`](engine_core::hash::hash_bytes)) and every subtree root the walk compares comes from the
 //! core digest itself. The root is a different value on purpose: it never
 //! stands in for a tick hash.
 

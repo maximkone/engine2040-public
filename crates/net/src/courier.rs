@@ -2,7 +2,7 @@
 //!
 //! Purpose: carry one machine's blobs to the other over a UDP socket, either
 //! straight or through the self-hosted relay, in lockstep slots: each
-//! [`Courier::exchange`] sends this machine's blob for the next slot and
+//! [`Courier::exchange`](crate::courier::Courier::exchange) sends this machine's blob for the next slot and
 //! returns the other machine's, resending lost pieces until both hold both.
 //! It also registers at the relay, learns the public address from the
 //! relay's STUN echo, runs the hole punch, times probe round trips, and
@@ -11,7 +11,7 @@
 //! Determinism: none needed and none claimed: the courier moves bytes and
 //! measures the real network; the wall clock paces resends and times probes
 //! only, and never reaches the sim, a tape or a hash.
-//! Errors: [`SplitError`]; decoders refuse hostile bytes, never panic.
+//! Errors: [`SplitError`](crate::courier::SplitError); decoders refuse hostile bytes, never panic.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;

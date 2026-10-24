@@ -1,4 +1,4 @@
-//! played: the two-machine played bout over a [`Wire`].
+//! played: the two-machine played bout over a [`Wire`](crate::link::Wire).
 //!
 //! Purpose: one real match, played. A lobby forms 2 humans plus AI fill, the
 //! dedicated [`HeadlessServer`] authors the arena, two predicting [`Client`]s
@@ -9,8 +9,8 @@
 //! Owner: net lane. Units: ticks at 60 Hz, bytes, whole percent.
 //! Determinism: the wire draws are seeded, inputs come from the shared
 //! [`crate::scale`] human script, every map is a `BTreeMap`; the same config
-//! and wire give the same [`BoutReport::digest`] on every run. No clock.
-//! Errors: [`BoutError`] for setup, the report carries the verdict.
+//! and wire give the same [`BoutReport::digest`](crate::played::BoutReport::digest) on every run. No clock.
+//! Errors: [`BoutError`](crate::played::BoutError) for setup, the report carries the verdict.
 //! Budget: proof tool, not per-tick sim code; the arena prefix reruns per
 //! tick as in [`crate::session`].
 

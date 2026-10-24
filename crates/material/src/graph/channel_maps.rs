@@ -136,7 +136,7 @@ pub(super) fn channel_bake(surface: &Surface, resolution: u32) -> ChannelBake {
         if is_flat {
             flat.push(*name);
         }
-        maps.push(map(*name, resolution, rgba));
+        maps.push(map(name, resolution, rgba));
     }
     let sheets = SHEETS
         .iter()

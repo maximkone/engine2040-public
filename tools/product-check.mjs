@@ -25,6 +25,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { binStatus, BINS } from "./bins.mjs";
 import { decodePng, flipX10000 } from "./iqa-gate.mjs";
+import { readReading as readAaFlicker } from "./aa-flicker.mjs";
 
 // Is a process alive? EPERM means it exists but is not ours.
 const pidAlive = (pid) => {
@@ -294,6 +295,19 @@ export const pruneRuns = (runs, keep = null) => {
 // One FAIL line per broken floor: the console prints them and latest.md lists them.
 export const failLines = (red) => Object.entries(red).map(([k, v]) => `FAIL ${k}: ${v}`);
 
+// The AA default's temporal field (B7): the sand-edge fixture's two readings,
+// refreshed on a GPU machine by `node tools/aa-flicker.mjs`. A missing or
+// skipped reading prints why, never a zero, so a reader can tell "not measured"
+// from "measured calm".
+export const aaFlickerLine = (aa) => {
+  const head = "AA flicker (sand edge fixture `sand_edge_aa_default`)";
+  if (!aa) return `${head}: none (no reading: run node tools/aa-flicker.mjs on a GPU machine)`;
+  if (aa.missing) return `${head}: none (${aa.missing})`;
+  if (aa.skipped) return `${head}: none (${aa.skipped})`;
+  const step = aa.edge_step === null || aa.edge_step === undefined ? "no step" : `edge step ${aa.edge_step}`;
+  return `${head}: taa ${aa.taa_levels} levels, 4x msaa ${aa.msaa_levels} levels (${step}), calmer ${aa.calmer}; reading ${aa.sha ?? "?"} (${aa.at ?? "?"}) on ${aa.host ?? "?"}`;
+};
+
 export const summary = (c) => {
   const fps = (ms) => (ms ? `${(1000 / ms).toFixed(1)} fps (p50 ${ms} ms)` : "-");
   const reds = Object.entries(c.red);
@@ -303,6 +317,7 @@ export const summary = (c) => {
     `Verdict: ${reds.length ? `RED (${reds.map(([k]) => k).join(", ")})` : "GREEN"}; build: ${c.build}`,
     `Look run: exit ${c.look.exit}, framing empty ${c.look.empty}/${c.look.frames}, fewest in view ${c.look.fewest_in_view}, steepest down ${c.look.steepest_down_deg} deg, tinted share ${c.look.tinted_share}, validation errors ${c.look.validation_errors}, captures ${c.caps.captures} (blank ${c.caps.blank}, frozen pairs ${c.caps.frozen}) in ${c.runDir}`,
     `Look score (FLIP x10000 of the middle capture against the last green run): ${c.look.flip === null || c.look.flip === undefined ? `none (${c.look.flip_why ?? "no comparison"})` : `${c.look.flip} (max ${c.look.flip_max}) against ${c.look.flip_vs}`}`,
+    aaFlickerLine(c.aa),
     `Timing run (${c.timing?.size ?? "-"}): ${fps(c.timing?.interval_p50_ms)}, p99 ${c.timing?.interval_p99_ms} ms, gpu p50 ${c.timing?.gpu_p50_ms} ms, cpu p50 ${c.timing?.cpu_p50_ms} ms, ${c.timing?.loaded ? `LOADED (${c.timing.loaded} cargo/rustc running: fps and latency not gated)` : "quiet"}; reference ${c.ref ? fps(c.ref) : "none yet"}`,
     `Player latency (timing run only; floor ${c.bar?.floors?.present_p95_ms_max ?? LATENCY_P95_MAX_MS} ms p95): input to present submit p50 ${c.timing?.latency?.input_p50_ms ?? "-"} p95 ${c.timing?.latency?.input_p95_ms ?? "-"} ms, input to frame end p50 ${c.timing?.latency?.present_p50_ms ?? "-"} p95 ${c.timing?.latency?.present_p95_ms ?? "-"} ms, verdict ${c.timing?.latency?.verdict ?? "none"}`,
     `Look run latency (a capture run: its armed look probes block, never gated): input to frame end p95 ${c.look?.latency?.present_p95_ms ?? "-"} ms`,
@@ -361,7 +376,7 @@ const main = async () => {
     const scored = { ...look, flip: score.flip, flip_max: score.flip_max, flip_vs: score.vs === null ? null : prior.sha, flip_why: score.why };
     const red = redFloors({ look: scored, timing, caps, ref }, bar, passBar);
     const strip = ({ text, ...rest }) => rest;
-    const check = { sha, tree, at: new Date().toISOString(), build: built.why.split("\n")[0], verdict: Object.keys(red).length ? "RED" : "GREEN", red, ref, caps, look: strip(scored), timing: strip(timing), runDir: runDir.replace(/\\/g, "/"), bar, passBar };
+    const check = { sha, tree, at: new Date().toISOString(), build: built.why.split("\n")[0], verdict: Object.keys(red).length ? "RED" : "GREEN", red, ref, caps, aa: readAaFlicker(), look: strip(scored), timing: strip(timing), runDir: runDir.replace(/\\/g, "/"), bar, passBar };
     writeFileSync(latestFile, `${JSON.stringify(check, null, 2)}\n`);
     appendFileSync(historyFile, `${JSON.stringify({ sha, tree, at: check.at, verdict: check.verdict, red, timing: { interval_p50_ms: timing.interval_p50_ms, interval_p99_ms: timing.interval_p99_ms, vsync: timing.vsync, size: timing.size, loaded, latency: timing.latency }, look: { empty: look.empty, tinted_share: look.tinted_share, view: look.view, flip: scored.flip, flip_vs: scored.flip_vs } })}\n`);
     writeFileSync(join(OUT, "latest.md"), summary(check));

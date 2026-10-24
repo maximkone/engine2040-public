@@ -215,7 +215,7 @@ until the slice (LEG10) lands.
   moves once with a receipt that names it.
   F2P: seven slots with no name.
   Landed 58c9d8e47, with one clause dropped by decision 2026-10-23. The naming half: `crates/game/src/roster.rs` (Contubernium, Roster, ManState, FightReport, DiaryEntry) and `content/rome/contubernium.toml` (7 named men, 2 traits each); `cargo test -p engine-game --lib roster` 9 passed, 0 failed - 7/7 names after one fight, kills and wounds on the man who fought, one diary line per fight, rank from kills, fold twice equal, unknown id refused by name. The clause "the roster is in the tape, so the hash moves once": dropped, because `docs/HASH-LAW.md` scope IN is state that affects future ticks of the proof fixture, and the roster is campaign meta-state that no tick reads; the fold is proven byte-identical twice by its own test, so the golden stays `d57b5c8ae3096614`. Consumer for the next row: LEG18's camp day.
-- [ ] LEG18 game: the camp day is a works table. Steal: 0 A.D. builder costs and CDDA basecamp
+- [x] LEG18 game: the camp day is a works table. Steal: 0 A.D. builder costs and CDDA basecamp Landed c706ed0. `cargo test -p engine-game --lib camp_day` 7 passed; clippy -D warnings clean; golden unchanged.
   recipes. Eight works cost man-ticks; the ditch already lives in `crates/rome/src/camp.rs`.
   Tier B. Size M. Owns `crates/game/src/camp_day.rs`, `content/rome/works.toml`.
   Accept: `cargo test -p engine-game --lib camp_day` passes - the player starts a work, man-ticks

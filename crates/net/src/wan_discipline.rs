@@ -3,15 +3,15 @@
 //! Five send classes share one datagram: the viewer's own input echo, combat
 //! words, near poses, far poses and the idle crowd. A class batch never
 //! fragments past one datagram; a batch bigger than the cap is refused as
-//! [`WanDisciplineError::OverBudget`] and counted, never split. Under
+//! [`WanDisciplineError::OverBudget`](crate::wan_discipline::WanDisciplineError::OverBudget) and counted, never split. Under
 //! congestion the idle crowd sheds first, then far poses, then near poses;
 //! each waits 2-3 ticks (its own cadence) before it expires, while inputs and
-//! combat repeat [`REDUNDANCY`] times and never expire, so a single lost
+//! combat repeat [`REDUNDANCY`](crate::session::REDUNDANCY) times and never expire, so a single lost
 //! datagram cannot starve them (RFC 9221 datagram rules). Owner: net lane.
 //! Units: bytes, ticks at 60 Hz, integer kilobits/s x100. Determinism:
 //! integer ops and stable id order only, no map order, no wall clock; the
 //! report carries integer kilobits/s x100 and a tuple digest. Errors:
-//! [`WanDisciplineError`], never panics. Crate edge: reuses `interest.rs`
+//! [`WanDisciplineError`](crate::wan_discipline::WanDisciplineError), never panics. Crate edge: reuses `interest.rs`
 //! relevancy and `scale.rs` constants, never mirrors them.
 
 use super::interest::{

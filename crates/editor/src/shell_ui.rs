@@ -13,8 +13,7 @@
 use crate::browser_tab::BrowserTab;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use egui_dock::widgets::tab_viewer::OnCloseResponse;
-use egui_dock::{DockArea, DockState, TabViewer};
+use egui_dock::{DockArea, DockState};
 
 use engine_ai::CURVE_LANES;
 use engine_scene::ids::ObjectId;
@@ -31,6 +30,7 @@ use crate::outline::{
 use crate::shell::{Panel, Shell, ShellError};
 
 mod overlay;
+mod viewer;
 use crate::spine_inspect::{inspect_spine, SpineInspectError};
 use crate::templates::TemplateKind;
 use crate::tuning::CombatField;
@@ -101,6 +101,22 @@ pub struct ShellUi {
     palette_action: Option<crate::palette::PaletteAction>,
     /// Last palette refusal drawn under the query line.
     palette_error: Option<String>,
+    /// Animation sheet the Timeline tab edits; the host loads it.
+    timeline: crate::timeline::Sheet,
+    /// Timeline cursor and playhead.
+    timeline_panel: crate::timeline::SheetPanel,
+    /// Last timeline edit, taken by the host.
+    timeline_edit: Option<crate::timeline::SheetEdit>,
+    /// Pose shelf the Poses tab lists.
+    shelf: crate::pose_shelf::PoseShelf,
+    /// Pose cursor.
+    pose_panel: crate::pose_shelf::PosePanel,
+    /// Last pose name Enter picked, taken by the host.
+    pose_pick: Option<String>,
+    /// Tape the host handed for the `S` key.
+    pose_tape: Option<crate::pose_tape::PoseTape>,
+    /// Last pose notice (saved line or refusal text).
+    pose_notice: Option<String>,
 }
 
 /// One attached spine frame: the extraction tick and digest plus a node per
@@ -145,6 +161,18 @@ impl ShellUi {
             palette_index: crate::palette::CommandIndex::default(),
             palette_action: None,
             palette_error: None,
+            timeline: crate::timeline::Sheet {
+                name: "untitled".to_string(),
+                ticks: 60,
+                tracks: Vec::new(),
+            },
+            timeline_panel: crate::timeline::SheetPanel::new(),
+            timeline_edit: None,
+            shelf: crate::pose_shelf::PoseShelf::new(),
+            pose_panel: crate::pose_shelf::PosePanel::new(),
+            pose_pick: None,
+            pose_tape: None,
+            pose_notice: None,
         }
     }
 
@@ -296,6 +324,18 @@ impl ShellUi {
             &mut self.history_panel,
             &mut self.history_jump,
         );
+        let (timeline, timeline_panel, timeline_edit) = (
+            &mut self.timeline,
+            &mut self.timeline_panel,
+            &mut self.timeline_edit,
+        );
+        let (shelf, pose_panel, pose_pick, pose_tape, pose_notice) = (
+            &mut self.shelf,
+            &mut self.pose_panel,
+            &mut self.pose_pick,
+            &mut self.pose_tape,
+            &mut self.pose_notice,
+        );
         let mut viewer = Viewer {
             shell,
             gizmo,
@@ -319,12 +359,21 @@ impl ShellUi {
             history,
             history_panel,
             history_jump,
+            timeline,
+            timeline_panel,
+            timeline_edit,
+            shelf,
+            pose_panel,
+            pose_pick,
+            pose_tape,
+            pose_notice,
         };
         DockArea::new(dock).show_inside(ui, &mut viewer);
     }
 }
 
-/// [`TabViewer`] borrowing the shell and the gizmo session; one method per panel.
+/// [`TabViewer`](egui_dock::TabViewer) borrowing the shell and the gizmo
+/// session; one method per panel.
 struct Viewer<'a> {
     shell: &'a mut Shell,
     gizmo: &'a mut GizmoSession,
@@ -348,38 +397,14 @@ struct Viewer<'a> {
     history: &'a mut crate::History,
     history_panel: &'a mut crate::history_panel::HistoryPanel,
     history_jump: &'a mut Option<crate::HistoryJump>,
-}
-
-impl TabViewer for Viewer<'_> {
-    type Tab = Panel;
-
-    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
-        egui::Id::new(*tab)
-    }
-
-    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        egui::WidgetText::from(tab.title())
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        match tab {
-            Panel::Hierarchy => self.hierarchy(ui),
-            Panel::Inspector => self.inspector(ui),
-            Panel::Viewport => self.viewport_panel(ui),
-            Panel::Findings => self.findings_panel(ui),
-            Panel::Tuning => self.tuning_panel(ui),
-            Panel::Templates => self.templates_panel(ui),
-            Panel::Browser => self.browser.show(ui, self.shell),
-            Panel::Activity => self.activity(ui),
-            Panel::Log => self.log(ui),
-            Panel::History => self.history_tab(ui),
-        }
-    }
-
-    fn on_close(&mut self, tab: &mut Self::Tab) -> OnCloseResponse {
-        self.shell.close_panel(*tab);
-        OnCloseResponse::Close
-    }
+    timeline: &'a mut crate::timeline::Sheet,
+    timeline_panel: &'a mut crate::timeline::SheetPanel,
+    timeline_edit: &'a mut Option<crate::timeline::SheetEdit>,
+    shelf: &'a mut crate::pose_shelf::PoseShelf,
+    pose_panel: &'a mut crate::pose_shelf::PosePanel,
+    pose_pick: &'a mut Option<String>,
+    pose_tape: &'a mut Option<crate::pose_tape::PoseTape>,
+    pose_notice: &'a mut Option<String>,
 }
 
 impl Viewer<'_> {

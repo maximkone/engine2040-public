@@ -540,7 +540,7 @@
    "string_errors": 0,
    "board_ids": 0,
    "hash_reimpl": 12,
-   "dup_fns": 15,
+   "dup_fns": 17,
    "passthrough": 1,
    "long_fns": 32,
    "big_files": 6,
@@ -549,8 +549,8 @@
    "float_math": 0,
    "waivers": 116,
    "undoc_pub": 50,
-   "unsafe": 1,
-   "tests": 1403
+   "unsafe": 2,
+   "tests": 1542
   },
   "engine-save": {
    "unwrap": 0,
@@ -893,7 +893,7 @@
   "crates/game/src/bin/arena.rs": 5101,
   "crates/game/src/camera.rs": 3459,
   "crates/game/src/fighter_look.rs": 6757,
-  "crates/game/src/lib.rs": 4038,
+  "crates/game/src/lib.rs": 4041,
   "crates/game/src/windowed.rs": 3634,
   "crates/net/src/interest.rs": 3076,
   "crates/physics/src/ragdoll.rs": 3376,
@@ -4599,6 +4599,62 @@
    "from": 3629,
    "to": 3634,
    "reason": "BG5: feed_tick_audio takes the look's clip steps and forwards them to the audio feed (one import, one param, one call, doc); the file is still due its split out of the 3000-line band."
+  },
+  {
+   "date": "2026-10-24",
+   "crate": "engine-render",
+   "from": {
+    "unwrap": 1,
+    "panic_sites": 25,
+    "casts": 1044,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 4,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 12,
+    "dup_fns": 15,
+    "passthrough": 1,
+    "long_fns": 32,
+    "big_files": 6,
+    "hot_alloc": 2,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 116,
+    "undoc_pub": 50,
+    "unsafe": 1,
+    "tests": 1403
+   },
+   "to": {
+    "unwrap": 1,
+    "panic_sites": 25,
+    "casts": 1044,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 4,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 12,
+    "dup_fns": 17,
+    "passthrough": 1,
+    "long_fns": 32,
+    "big_files": 6,
+    "hot_alloc": 2,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 116,
+    "undoc_pub": 50,
+    "unsafe": 2,
+    "tests": 1542
+   },
+   "reason": "GS40 power.rs adds the seventh reasoned unsafe site: the one GetSystemPowerStatus call in the Windows leaf beside backend::read_vram, with a SAFETY note and the power_read_never_panics test."
+  },
+  {
+   "date": "2026-10-24",
+   "file": "crates/game/src/lib.rs",
+   "from": 4038,
+   "to": 4041,
+   "reason": "LEG18: the camp_day module declaration and its two-line doc sit in the crate root; the code lives in crates/game/src/camp_day.rs. lib.rs is already pinned over 3000 lines."
   }
  ]
 }

@@ -8,17 +8,17 @@
 //! how far ahead of or behind authority it is, whether it repeats or
 //! rewrites an input already admitted, and whether it arrived inside the
 //! lag window ([`crate::lagcomp`]). Refusals never reach the match; they are
-//! counted per slot by kind in a [`SlotReceipt`]. Admitted inputs pass
-//! [`sanitize`] (a spear press in a match without the spear is masked) and
-//! every flagged input is logged with its tick in a [`FlagLog`], so a replay
+//! counted per slot by kind in a [`SlotReceipt`](crate::guard::SlotReceipt). Admitted inputs pass
+//! [`sanitize`](crate::anticheat::sanitize) (a spear press in a match without the spear is masked) and
+//! every flagged input is logged with its tick in a [`FlagLog`](crate::anticheat::FlagLog), so a replay
 //! names it. Every attack press gets a lag receipt on the guard's
-//! [`LagTape`].
+//! [`LagTape`](crate::lagcomp::LagTape).
 //! Units: fixed ticks. Determinism: integer math, `BTreeMap` order and
 //! arrival order, no clock; the same datagrams give the same receipts and
-//! [`InputGuard::digest`].
+//! [`InputGuard::digest`](crate::guard::InputGuard::digest).
 //! Errors: none; refusals are counts, never panics.
 //! Budget: O(inputs per datagram x log n); memory is bounded by
-//! [`MEMORY_TICKS`] of admitted inputs, the flag log and the lag tape.
+//! [`MEMORY_TICKS`](crate::guard::MEMORY_TICKS) of admitted inputs, the flag log and the lag tape.
 
 use std::collections::BTreeMap;
 use std::fmt;

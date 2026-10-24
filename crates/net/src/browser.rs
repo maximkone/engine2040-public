@@ -2,7 +2,7 @@
 //!
 //! Purpose: a page joins the native server over WebTransport (datagrams plus
 //! one reliable stream) or, when UDP is blocked, over a WebSocket, behind the
-//! same [`Transport`](crate::quic::Transport) trait and the same payload
+//! same [`Transport`](crate::quic::Transport)(crate::quic::Transport) trait and the same payload
 //! bytes the native transports carry. [`connect_race`](crate::connect_race)
 //! starts both and keeps the first.
 //!
@@ -15,7 +15,7 @@
 //! The browser has no sockets and no threads: everything is callback driven
 //! on the page's one thread, so shared state is `Rc<RefCell<..>>`.
 //!
-//! Errors: [`LegError`](crate::connect_race::LegError) at connect,
+//! Errors: [`LegError`](crate::connect_race::LegError)(crate::connect_race::LegError) at connect,
 //! [`NetError`](crate::session::NetError) on the trait, a closed-state reason
 //! string once a session ends.
 //!
@@ -23,13 +23,13 @@
 //! socket (`quic::check_budget`, which every transport runs, the browser legs
 //! included) and a pinned certificate longer than the minting limit is refused
 //! before a key is made. Both refusals are counted for the whole process and read
-//! back as a [`GateReceipt`], so a page that sent something too big says so
+//! back as a [`GateReceipt`](crate::browser::GateReceipt), so a page that sent something too big says so
 //! instead of losing it silently.
 //!
 //! Background tab (QN9): a hidden tab gets no timer callbacks, so its frames stop
-//! and its prediction goes stale by however long the tab was hidden. [`TabWatch`]
+//! and its prediction goes stale by however long the tab was hidden. [`TabWatch`](crate::browser::TabWatch)
 //! turns that silent gap into a dropped and rejoined session, and its
-//! [`TabReceipt`] names the hidden duration, which no packet on the wire carries.
+//! [`TabReceipt`](crate::browser::TabReceipt) names the hidden duration, which no packet on the wire carries.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

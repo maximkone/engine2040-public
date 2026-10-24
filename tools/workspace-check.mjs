@@ -69,7 +69,7 @@ export const allowedEdges = new Map([
   // engine-ui snapshots (feature `mcp` only); ui never imports endpoint.
   // The world pack bakes, samples and paints the std-only TVER terrain (feature
   // `mcp` only); world never imports endpoint.
-  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-physfx", "engine-nav", "engine-input", "engine-ui", "engine-playtest", "engine-proof", "engine-world"]],
+  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-physfx", "engine-nav", "engine-input", "engine-ui", "engine-audio", "engine-playtest", "engine-proof", "engine-world"]],
   ["engine-input", ["engine-core"]],
   ["engine-net", ["engine-arena", "engine-input", "engine-observe", "engine-ecs", "engine-save", "engine-combat", "engine-physics"]], // ARC5: rejoin resim keeps spine checkpoints in `Spine::snapshot` bytes and rides the save rollback/persist envelopes; BX9 frames combat's `Cut` and spawns the decoded limb on a real limb pool (tests)
   ["engine-nav", ["engine-spatial"]], // SP40 KdTree crowd feed reads spatial KdTree

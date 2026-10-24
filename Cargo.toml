@@ -40,12 +40,13 @@ rust-version = "1.97.1"
 # `node tools/rust-quality.mjs` and join this list when their count hits zero.
 # Exceptions use `#[expect(lint, reason = "...")]`, never a bare `allow`.
 [workspace.lints.rust]
-# Six scoped, reasoned `#[expect(unsafe_code)]` sites exist: engine-core's
+# Seven scoped, reasoned `#[expect(unsafe_code)]` sites exist: engine-core's
 # counting allocators (the unit `CountingAlloc` over `System` and the generic
 # `CountingAllocator<A>` a candidate-backend harness installs), engine-provider's
 # test-only environment writer, engine-ecs's `pool::erased::apply` (writes,
 # runs or drops one type-erased job closure in its job buffer), engine-geo's
-# xatlas FFI wrapper, and engine-render's Windows DXGI VRAM read (`backend.rs`).
+# xatlas FFI wrapper, engine-render's Windows DXGI VRAM read (`backend.rs`),
+# and engine-render's Windows battery read (`power.rs`).
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 # `loom` is set by `RUSTFLAGS="--cfg loom"` for the job-pool model in engine-ecs.

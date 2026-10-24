@@ -288,6 +288,35 @@ pub(super) fn exit_reached(
 /// title walks the player toward them. A melee starts well inside this.
 const RIVAL_FAR_M: f32 = 10.0;
 
+/// How the window fills the screen: the ordinary window at the `--size` inner
+/// size, or borderless fullscreen over the whole display. One F11 press flips
+/// it. Presentation only: the tape, the frame camera and the state hash never
+/// see the mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum WindowMode {
+    /// The window, sized by `--size` (or `WINDOW_SIZE` without it).
+    #[default]
+    Windowed,
+    /// Borderless fullscreen on the display the window sits on.
+    Borderless,
+}
+
+impl WindowMode {
+    /// The mode the next F11 press selects: two presses return to
+    /// [`WindowMode::Windowed`], so the window never gets stuck fullscreen.
+    pub(super) fn toggled(self) -> Self {
+        match self {
+            Self::Windowed => Self::Borderless,
+            Self::Borderless => Self::Windowed,
+        }
+    }
+
+    /// Whether this mode asks the window for borderless fullscreen.
+    pub(super) fn is_borderless(self) -> bool {
+        matches!(self, Self::Borderless)
+    }
+}
+
 /// The window title: the controls, with the rival hint first when there is one
 /// (a narrow title bar clips the tail, and the hint is the part that matters).
 pub(super) fn window_title(hint: Option<&str>) -> String {
@@ -909,6 +938,30 @@ impl ArenaApp {
         self.window_focused = focused;
         self.window_occluded = occluded;
     }
+
+    /// One F11 press flips [`WindowMode`] and asks the window for it: `None`
+    /// gives the window its `--size` back, `Borderless(None)` fills the
+    /// display the window sits on. The pure [`WindowMode`] pair decides; this
+    /// only passes the answer on. Presentation only: the sim, the tape and
+    /// the state hash never see the mode.
+    pub(super) fn toggle_fullscreen(&mut self) {
+        let mode = self.window_mode.toggled();
+        self.window_mode = mode;
+        if let Some(window) = self.window.as_ref() {
+            window.set_fullscreen(
+                mode.is_borderless()
+                    .then_some(winit::window::Fullscreen::Borderless(None)),
+            );
+        }
+        tell!(
+            "arena: window {} (F11 toggles)",
+            if mode.is_borderless() {
+                "borderless fullscreen"
+            } else {
+                "windowed"
+            }
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1232,5 +1285,27 @@ mod tests {
         assert!(!exit_reached(false, 299, 300, 0, Some(300), true));
         assert!(exit_reached(false, 300, 300, 0, Some(300), true));
         assert!(exit_reached(true, 300, 300, 0, None, true));
+    }
+
+    #[test]
+    fn window_mode_two_toggles_return_to_windowed() {
+        // Failing-before: no `WindowMode`, so the arena window opened windowed
+        // and no key could fill the screen. The window itself is never built
+        // here: the mode is pure, and F11 only asks it and passes it on.
+        assert_eq!(
+            WindowMode::default(),
+            WindowMode::Windowed,
+            "the arena opens windowed"
+        );
+        assert!(
+            !WindowMode::Windowed.is_borderless(),
+            "the windowed mode is not fullscreen"
+        );
+        let borderless = WindowMode::Windowed.toggled();
+        assert_eq!(borderless, WindowMode::Borderless, "F11 fills the screen");
+        assert!(borderless.is_borderless(), "borderless asks for fullscreen");
+        let back = borderless.toggled();
+        assert_eq!(back, WindowMode::Windowed, "the second F11 returns");
+        assert!(!back.is_borderless(), "and the window is windowed again");
     }
 }

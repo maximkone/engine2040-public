@@ -2,7 +2,7 @@
 //! Owner: net lane. Units: bytes/s and bits/s for bandwidth, whole ticks
 //! for time. Determinism: integer math and stable slot order only, so same
 //! inputs give same bytes, same selection and same soak hash. Errors:
-//! [`ScaleError`], never panics. Cap: match slots come from
+//! [`ScaleError`](crate::scale::ScaleError), never panics. Cap: match slots come from
 //! `engine_input::MAX_PARTICIPANTS` (the canonical cap); this module
 //! declares no private fighter cap. Crate edge `engine-net -> engine-input`
 //! is in `tools/workspace-check.mjs`.

@@ -128,7 +128,7 @@ pub const PARRY_HITSTOP_TICKS_V2: u32 = 8;
 /// (15 ticks, inside 12-18) and a wider parry window (7 ticks, inside 6-8).
 /// Every other row matches V1, and 7 < 15 satisfies the replacement rule,
 /// so [`validate_tables`] accepts version 2. Single owner of the 15/7
-/// literals; [`TABLES_V2`](crate::fight::TABLES_V2) reuses this row.
+/// literals; [`TABLES_V2`] reuses this row.
 ///
 /// [`TABLES_V1`]: crate::fight::TABLES_V1
 pub const fn v2_rows() -> Tables {
@@ -350,7 +350,7 @@ impl SwapInput {
 /// the shipped V1 row; 2 gives the readable-timing V2 row; anything else
 /// is unknown. Replacement sets are not
 /// statics: they travel as [`SwapInput`] and step via
-/// [`step_with_tables`](crate::fight::step_with_tables).
+/// [`step_with_tables`].
 pub fn tables_for_version(version: u32) -> Option<&'static Tables> {
     match version {
         0 | TABLES_VERSION_V1 => Some(&TABLES_V1),
@@ -412,7 +412,7 @@ pub fn ttk_ticks_for_tables(tables: Tables, hp_permille: u16) -> u64 {
 }
 
 /// Lenient replay step under a version tag: resolves the rows, then steps
-/// like [`step_with_tables`](crate::fight::step_with_tables). Unknown
+/// like [`step_with_tables`]. Unknown
 /// versions fail with [`CombatError::UnknownTableVersion`] and step
 /// nothing, so old tapes always replay through V1.
 pub fn step_for_version(

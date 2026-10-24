@@ -52,7 +52,9 @@ impl ToolBase for SceneReadTool {
 
 impl SyncTool<McpServer> for SceneReadTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch_screened(TOOL_SCENE_READ, &param, |state| state.scene_read(&param))
+        // LG10: a bounded snapshot shares the session state, so eight readers
+        // sit inside the call at once while a write waits for all of them.
+        service.dispatch_read(TOOL_SCENE_READ, &param, |state| state.scene_read(&param))
     }
 }
 
@@ -83,7 +85,8 @@ impl ToolBase for TxPreviewTool {
 
 impl SyncTool<McpServer> for TxPreviewTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch_screened(TOOL_TX_PREVIEW, &param, |state| state.tx_preview(&param))
+        // A dry-run diff reads the document and stages nothing: shared span.
+        service.dispatch_read(TOOL_TX_PREVIEW, &param, |state| state.tx_preview(&param))
     }
 }
 

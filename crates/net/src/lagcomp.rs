@@ -8,18 +8,18 @@
 //! server holds each tick open for the widest window of its connected slots:
 //! a slot's window is its one-way trip in whole ticks plus one (the server
 //! reads, then authors, inside one step), sized from the slot's round trip
-//! and capped at [`MAX_WINDOW_TICKS`]. A remote player's attack then lands on
+//! and capped at [`MAX_WINDOW_TICKS`](crate::lagcomp::MAX_WINDOW_TICKS). A remote player's attack then lands on
 //! the tick it was pressed, the same tick a player beside the server gets.
-//! Every attack press (attack or spear throw) gets a [`HitReceipt`]: fair
+//! Every attack press (attack or spear throw) gets a [`HitReceipt`](crate::lagcomp::HitReceipt): fair
 //! when it arrived inside the window while its tick was still open, refused
 //! and counted otherwise. Whom the attack strikes stays the arena's sweep at
 //! that tick; this module only decides whether the press counts on time.
 //! Units: integer ticks at the arena rate, whole ms by integer math only.
 //! Determinism: integer fields in arrival order, no clock; the same claims
 //! give the same receipts and the same tape hash.
-//! Errors: [`LagError`]; a late claim is a refused receipt, not an error.
-//! Budget: [`adjudicate`] O(1) with no heap; the tape is bounded at
-//! [`MAX_HITS_PER_TAPE`] and counts what it could not keep.
+//! Errors: [`LagError`](crate::lagcomp::LagError); a late claim is a refused receipt, not an error.
+//! Budget: [`adjudicate`](crate::lagcomp::adjudicate) O(1) with no heap; the tape is bounded at
+//! [`MAX_HITS_PER_TAPE`](crate::lagcomp::MAX_HITS_PER_TAPE) and counts what it could not keep.
 
 use engine_arena::TICK_HZ;
 use engine_core::Fnv64;

@@ -23,7 +23,7 @@
 //! milliseconds, fixed ticks. Determinism scope: same full plus same baseline
 //! gives the same [`Delta`]; interpolation uses integer math only, so the same
 //! samples plus the same query give the same answer on every tier-3 machine.
-//! Error type: [`NetError`](super::session::NetError); invalid snapshots or
+//! Error type: [`NetError`]; invalid snapshots or
 //! deltas reject loudly and change nothing, never panic.
 
 use super::session::NetError;

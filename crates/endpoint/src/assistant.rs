@@ -116,7 +116,7 @@ pub use backend::*;
 fn observed_state<'a>(
     server: &'a McpServer,
     observed: u64,
-) -> Result<std::sync::MutexGuard<'a, ServerState>, ProposeError> {
+) -> Result<std::sync::RwLockWriteGuard<'a, ServerState>, ProposeError> {
     let state = server.lock().map_err(|error| ProposeError::PreviewFailed {
         code: error.code,
         message: error.message.clone(),

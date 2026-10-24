@@ -57,9 +57,10 @@ pub fn scans_payload(tool: &str) -> bool {
     SCANNED_TOOLS.contains(&tool)
 }
 
-/// The screened tool names in registry order. Consumer: the routing test,
-/// which loops this list instead of a hand-written copy.
-#[cfg(test)]
+/// The screened tool names in registry order. Consumer: the routing test
+/// (`door_dispatch`, which needs `mcp`), so the helper rides the same gate:
+/// a default-feature test build has no caller and must not compile it.
+#[cfg(all(test, feature = "mcp"))]
 pub(crate) fn scanned_tools() -> &'static [&'static str] {
     SCANNED_TOOLS
 }

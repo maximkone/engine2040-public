@@ -2,26 +2,26 @@
 //! with frame-step, plus first-divergence attribution.
 //!
 //! Consumer: the fight replay theater, proof bug bundles and the soak
-//! divergence check. Bug-file tapes are [`FighterTape`]s (the bug-file owner
+//! divergence check. Bug-file tapes are [`FighterTape`](engine_input::FighterTape)s (the bug-file owner
 //! `playtest::agent` decodes its bytes to them); this module plays any such
 //! tape directly, with no provider or transport import. Data owner: the
-//! caller owns configs and tapes; [`ReplayTape`] owns its recorded copy.
+//! caller owns configs and tapes; [`ReplayTape`](crate::replay::ReplayTape) owns its recorded copy.
 //! Units: fixed ticks at [`engine_arena::TICK_HZ`]. Determinism scope:
 //! same-machine reproducibility — the same config plus inputs twice gives the
 //! identical tape (sorted iteration, deterministic [`engine_arena`] runs, no
-//! wall clock). Errors: [`ReplayError`]; bad input rejects loudly and
+//! wall clock). Errors: [`ReplayError`](crate::replay::ReplayError); bad input rejects loudly and
 //! changes nothing.
 //!
 //! Header identity: a tape pins the world it was recorded against.
-//! [`ReplayTape::spec_digest`] is the [`engine_arena::MatchSpec::identity`] of
+//! [`ReplayTape::spec_digest`](crate::replay::ReplayTape::spec_digest) is the [`engine_arena::MatchSpec::identity`] of
 //! the config, rules and world that produced its checkpoints, and
-//! [`ReplayTape::logic_version`] is [`SIM_LOGIC_VERSION`]. Playback refuses a
+//! [`ReplayTape::logic_version`](crate::replay::ReplayTape::logic_version) is [`SIM_LOGIC_VERSION`](crate::replay::SIM_LOGIC_VERSION). Playback refuses a
 //! tape from another world or another tick logic by name
-//! ([`ReplayError::SpecMismatch`], [`ReplayError::LogicMismatch`], both values
+//! ([`ReplayError::SpecMismatch`](crate::replay::ReplayError::SpecMismatch), [`ReplayError::LogicMismatch`](crate::replay::ReplayError::LogicMismatch), both values
 //! carried) instead of surfacing as a bare hash mismatch on a later tick.
 //!
 //! Budgets: record costs one arena run plus 12 bytes per tick of checkpoints
-//! and one 12-byte keyframe per [`KEYFRAME_EVERY`] ticks. Theater
+//! and one 12-byte keyframe per [`KEYFRAME_EVERY`](crate::replay::KEYFRAME_EVERY) ticks. Theater
 //! frame-step is O(1) with no allocation (counting-allocator test below).
 
 use std::collections::BTreeMap;

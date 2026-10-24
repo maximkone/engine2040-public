@@ -39,6 +39,8 @@ pub const TOOL_ASSET_LINT: &str = "asset.lint";
 pub const TOOL_ASSET_BUDGET: &str = "asset.budget";
 /// Verb: ranked lookup over the committed kit report (text, kind or palette).
 pub const TOOL_ASSET_SEARCH: &str = "asset.search";
+/// Verb: when a legion turns to cards and what that costs.
+pub const TOOL_ASSET_IMPOSTOR: &str = "asset.impostor";
 
 /// The center command that runs the generator on the free GPU lane.
 pub const GENERATE_COMMAND: &str =
@@ -119,17 +121,28 @@ pub use search::{
     SEARCH_KINDS,
 };
 
+/// `asset.impostor`: the crowd card threshold over the `engine_anim` tier
+/// table. Read-only, no content files touched.
+mod impostor;
+pub use impostor::{
+    ImpostorArgs, ImpostorOutput, ImpostorTool, TierRowsOut, CARD_PRESETS, CARD_THRESHOLD_M,
+    MAX_DISTANCE_M, MAX_FIGHTERS, MIN_DISTANCE_M, MIN_FIGHTERS, TIER_NAMES,
+};
+
 /// The artist's import loop over a GLB (card S3, W1, W6): `asset.cook` runs the whole mesh
 /// chain and reports a budget table, `asset.lint` checks an import, `asset.budget` prices a
 /// cooked asset or a whole placement. Built only with both `intake` (glTF) and `geo` (mesh
 /// tools).
 #[cfg(all(feature = "intake", feature = "geo"))]
 mod cook_verbs;
+/// Rotation sidecar writer for `asset.cook` (feature `intake` + `geo`).
+#[cfg(all(feature = "intake", feature = "geo"))]
+mod rot_cook;
 #[cfg(all(feature = "intake", feature = "geo"))]
 pub use cook_verbs::{
     AssetCost, BakeMode, BudgetArgs, BudgetOutput, BudgetTool, CollisionMode, CookArgs,
-    CookOptions, CookOutput, CookTool, LevelTotal, LintArgs, LintFinding, LintOutput, LintTool,
-    LodBudgetRow, UvMode, ATLAS_EDGES, DEFAULT_ATLAS, MAX_BAKE_SAMPLES, MAX_CONVEX_HULLS,
+    CookOptions, CookOutput, CookTool, ImpostorCost, LevelTotal, LintArgs, LintFinding, LintOutput,
+    LintTool, LodBudgetRow, UvMode, ATLAS_EDGES, DEFAULT_ATLAS, MAX_BAKE_SAMPLES, MAX_CONVEX_HULLS,
     MAX_MATERIALS, MAX_SIZE_DEVIATION, PIVOT_EPS_M,
 };
 
@@ -170,6 +183,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     #[cfg(feature = "intake")]
     pack.add(VerbSpec::of::<search::SearchTool>(
         TOOL_ASSET_SEARCH,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<impostor::ImpostorTool>(
+        TOOL_ASSET_IMPOSTOR,
         PACK,
         CapabilityCard::Observe,
     )?);

@@ -5,9 +5,9 @@
 //! net lane. Units: millimetres, ticks at 60 Hz, bytes and bits/s.
 //! Determinism: hash path is integer `+ - * /` and stable id order only, no
 //! map iteration, no wall clock; reports carry integer kilobits/s x100 and
-//! integer saving x100, never float. Errors: [`InterestError`], never panics.
+//! integer saving x100, never float. Errors: [`InterestError`](crate::interest::InterestError), never panics.
 //!
-//! Callers: in-test consumer drives [`ConnectionInterest::select`] through
+//! Callers: in-test consumer drives [`ConnectionInterest::select`](crate::interest::ConnectionInterest::select) through
 //! the real `delta.rs` encode/decode path; production `session.rs` wiring is
 //! deferred to the session packet. Crate edge: reuses `scale.rs` header/budget
 //! constants, never mirrors them.
@@ -135,7 +135,7 @@ pub struct ScopeDelta {
 /// number of in-scope ids. [`ScopeView::update`] maintains it from the scope
 /// delta alone (incremental view maintenance, the DBSP section-4 idea,
 /// reimplemented std-only with no dependency): a flipped room bit reaches its
-/// ids through [`room_lane`], so the cost is the delta, not the roster. Fixed
+/// ids through `room_lane`, so the cost is the delta, not the roster. Fixed
 /// size, no allocation, integer ops in ascending room order, so every machine
 /// builds the same view. Callers: the siege scope proof drives it against a
 /// full rebuild each step; the session packet wires the production consumer.

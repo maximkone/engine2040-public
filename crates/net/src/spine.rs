@@ -1,13 +1,13 @@
 //! spine: rejoin resim over `Spine::snapshot` bytes.
 //!
-//! Consumer: a client that dropped and rejoins the match. [`SpineRollback`]
+//! Consumer: a client that dropped and rejoins the match. [`SpineRollback`](crate::spine::SpineRollback)
 //! keeps bounded authoritative checkpoints in canonical spine snapshot
 //! bytes, restores the drop tick and replays the authoritative suffix the
 //! server sends (or loads the drop tick back from a save payload). Data
-//! owner: the caller owns the rollback and the [`Spine`]; `engine-net` only
+//! owner: the caller owns the rollback and the [`Spine`](engine_ecs::spine::Spine); `engine-net` only
 //! orders the bytes. Units: ticks (`u64`), bytes. Determinism: the same
 //! spine gives the same snapshot bytes, and convergence is byte equality
-//! (`save::rollback::converges`). Errors: [`SpineRollbackError`].
+//! (`save::rollback::converges`). Errors: [`SpineRollbackError`](crate::spine::SpineRollbackError).
 
 use engine_ecs::spine::{Spine, SpineError};
 use engine_save::persist::{self, PersistErr};

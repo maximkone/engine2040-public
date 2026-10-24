@@ -18,9 +18,15 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use engine_core::hash::GOLDEN_GAMMA;
+use engine_core::Fnv64;
 
 mod verify;
 pub use verify::{verify_pinned_records, verify_records, AuditVerifier, VERIFY_BUDGET_NS};
+
+/// Agent-loop consumer: a scripted task drives the door and the log keeps the
+/// args (needs the door, so it rides the `mcp` feature with it).
+#[cfg(feature = "mcp")]
+pub mod agent_run;
 
 /// Nanoseconds per appended record: half a millisecond, measured in tests.
 pub const DOOR_AUDIT_BUDGET_NS: u64 = 500_000;
@@ -32,6 +38,11 @@ pub const DOOR_AUDIT_CAP: usize = 1024;
 /// Longest tool name retained verbatim; longer names truncate on a character
 /// boundary (every gateway name is far shorter, so this never fires live).
 pub const MAX_TOOL_NAME_LEN: usize = 64;
+/// Longest call args retained verbatim, in bytes. A call whose args exceed
+/// this is refused by name ([`AuditError::ArgsTooLarge`], code
+/// `args_too_large`), never truncated: a replay from the log always carries
+/// the exact args the call ran with.
+pub const MAX_ARGS_BYTES: usize = 512;
 
 /// Mixer step constant: the core SplitMix64 increment (2^64 over phi, odd).
 /// An odd multiplier keeps each mixing step bijective, so distinct prefixes
@@ -119,6 +130,31 @@ pub enum AuditError {
     /// (`u64::MAX` appends; unreachable in practice, but typed so the
     /// append path never panics).
     SequenceExhausted,
+    /// The call's args exceed [`MAX_ARGS_BYTES`], so the call is refused
+    /// before anything runs: the log never grows past its args bound and no
+    /// args are ever truncated into a replay that would differ from the run.
+    ArgsTooLarge {
+        /// Byte length of the args offered.
+        len: usize,
+        /// The bound that refused them.
+        cap: usize,
+    },
+}
+
+impl AuditError {
+    /// Stable machine name, so a caller can branch on the refusal instead of
+    /// matching its prose.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ChainBroken { .. } => "chain_broken",
+            Self::OrderBroken { .. } => "order_broken",
+            Self::HeadMismatch => "head_mismatch",
+            Self::LengthMismatch { .. } => "length_mismatch",
+            Self::SequenceExhausted => "sequence_exhausted",
+            Self::ArgsTooLarge { .. } => "args_too_large",
+        }
+    }
 }
 
 impl fmt::Display for AuditError {
@@ -138,6 +174,11 @@ impl fmt::Display for AuditError {
                 )
             }
             Self::SequenceExhausted => f.write_str("door audit sequence exhausted"),
+            Self::ArgsTooLarge { len, cap } => write!(
+                f,
+                "door audit args too large: {len} bytes over the {cap}-byte bound; \
+                 shrink the call, the log never truncates args"
+            ),
         }
     }
 }
@@ -164,6 +205,47 @@ pub struct CallRecord {
     pub prev: [u8; 32],
     /// Chain digest: `digest(prev || entry || seq)`.
     pub chain: [u8; 32],
+}
+
+/// One agent-loop call: the chain record plus the args that drove it, and the
+/// document revision on both sides of the call. Replaying [`Self::args`] in
+/// order on a fresh door reproduces the same writes at the same revisions;
+/// [`Self::args_digest`] is also the record's `detail` word, so a changed args
+/// string breaks the chain like any other edited field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoopCall {
+    /// Sealed chain record for this call.
+    pub record: CallRecord,
+    /// Args the call ran with, verbatim, at most [`MAX_ARGS_BYTES`].
+    pub args: String,
+    /// `Fnv64` of `args`; equals `record.detail`.
+    pub args_digest: u64,
+    /// Document revision before the call.
+    pub revision_before: u64,
+    /// Document revision after the call.
+    pub revision_after: u64,
+}
+
+/// `Fnv64` over the args bytes: the one digest both the chain detail word and
+/// the replay check use.
+#[must_use]
+pub fn args_digest(args: &str) -> u64 {
+    let mut hasher = Fnv64::new();
+    hasher.write(args.as_bytes());
+    hasher.finish()
+}
+
+/// Refuse args over [`MAX_ARGS_BYTES`] before anything runs, so the bound has
+/// one owner for both the pre-run check and the append.
+/// Errors: [`AuditError::ArgsTooLarge`] with the real length and the cap.
+pub fn check_args(args: &str) -> Result<(), AuditError> {
+    if args.len() > MAX_ARGS_BYTES {
+        return Err(AuditError::ArgsTooLarge {
+            len: args.len(),
+            cap: MAX_ARGS_BYTES,
+        });
+    }
+    Ok(())
 }
 
 /// Canonical entry bytes for one record (little-endian integers,
@@ -201,6 +283,9 @@ fn link(prev: &[u8; 32], entry: &[u8; 32], seq: u64) -> [u8; 32] {
 #[derive(Clone, Debug)]
 pub struct DoorAudit {
     records: VecDeque<CallRecord>,
+    /// Agent-loop calls beside the chain: the args plus the revisions on both
+    /// sides, kept under the same cap as the records.
+    calls: VecDeque<LoopCall>,
     /// Chain digest of the newest rotated-out record (zeros while nothing
     /// rotated out): verification of the retained window starts here.
     anchor: [u8; 32],
@@ -216,6 +301,7 @@ impl DoorAudit {
     pub fn new() -> Self {
         Self {
             records: VecDeque::new(),
+            calls: VecDeque::new(),
             anchor: [0u8; 32],
             dropped: 0,
             appended: 0,
@@ -297,6 +383,46 @@ impl DoorAudit {
         });
         self.appended = seq;
         self.records.back().ok_or(AuditError::SequenceExhausted)
+    }
+
+    /// Chain one record for an agent-loop call: the args are kept verbatim
+    /// beside the record (never truncated) and their digest becomes the
+    /// record's `detail` word, so a changed args string breaks the chain like
+    /// any other edited field. Replay reads [`Self::loop_calls`] in order.
+    /// Errors: [`AuditError::ArgsTooLarge`] when the args exceed
+    /// [`MAX_ARGS_BYTES`] (the refusal happens before anything is kept, so no
+    /// call is ever logged with different args than it ran with), and
+    /// [`AuditError::SequenceExhausted`].
+    pub fn append_call(
+        &mut self,
+        session: u64,
+        tool: &str,
+        args: &str,
+        revision_before: u64,
+        revision_after: u64,
+        outcome: AuditOutcome,
+    ) -> Result<&LoopCall, AuditError> {
+        check_args(args)?;
+        let digest = args_digest(args);
+        let record = self
+            .append(session, tool, revision_after, outcome, digest)?
+            .clone();
+        if self.calls.len() >= DOOR_AUDIT_CAP {
+            self.calls.pop_front();
+        }
+        self.calls.push_back(LoopCall {
+            record,
+            args: args.to_owned(),
+            args_digest: digest,
+            revision_before,
+            revision_after,
+        });
+        self.calls.back().ok_or(AuditError::SequenceExhausted)
+    }
+
+    /// Agent-loop calls retained beside the chain, oldest first.
+    pub fn loop_calls(&self) -> impl Iterator<Item = &LoopCall> {
+        self.calls.iter()
     }
 
     /// Streaming checker positioned at the start of the retained window: feed

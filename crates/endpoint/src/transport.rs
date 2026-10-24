@@ -1,12 +1,14 @@
 //! transport: loopback-only + token + caps + timeout tiers. std-only.
 //!
-//! Admission kit for a remote transport, not for the live door: the door is
-//! rmcp stdio (one local child), so it has no host to check, no
-//! presented-token channel in a tool call and no deadline to own; wiring
-//! these gates into it would invent its contract. The one member that runs
-//! live is [`MAX_CHARS`], as the sandbox manifest's per-tool payload cap
-//! (`door_refuses_over_cap_and_admits_under_cap` pins it); the rest run in
-//! the redteam fixtures and the `session_chaos` remote shim.
+//! Admission kit for a remote transport. The stdio door (the default) is one
+//! local child: it has no host to check, no presented-token channel in a tool
+//! call and no deadline to own, so wiring these gates into it would invent its
+//! contract. The opt-in HTTP door (`e2040-mcp --http`, see
+//! `remote_shim::http_door`) owns the same three checks on its own socket: a
+//! loopback bind, a per-run bearer token and a read timeout. The one member
+//! that runs live in both is [`MAX_CHARS`], as the sandbox manifest's per-tool
+//! payload cap (`door_refuses_over_cap_and_admits_under_cap` pins it); the
+//! rest run in the redteam fixtures and the `session_chaos` remote shim.
 
 /// A single tool-call frame. Shape-only: no socket, no JSON yet.
 pub struct Frame {

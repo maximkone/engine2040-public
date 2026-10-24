@@ -881,6 +881,8 @@ Landed 4a3404180, 6a6250af6, 4dc66447a. Static audit at 9c748d0bf: every `rg -n 
   pass twice on the RTX 3050 and a fresh presenter's frame 1 equals frame
   2. F2P: the 380 px / 2 of 255 first-pair diff above. P2P: golden
   unchanged (presentation only, never hashed). needs: none.
+  Progress 2026-10-24 (no code change, tree left clean): red reproduced on the RTX 3050, both tests fail on that block. `capture_twin_sky_pair_differs_and_repeats` fails on `off_png == off_again` (two long PNG dumps, frames 1 vs 2 of one presenter at 160x120, sky row off); `light_torch_on_vs_off_differs` fails on `a == b` (frames 0 vs 1, 64x64, two cubes). A throwaway instrumented test (four `render_offscreen` calls on `default_scene(64,64)` with the near cube at x=19 plus a far cube) reproduced the shape exactly: frame 0 -> 1 differ (PNG len 4851 vs 4846), 1 -> 2 and 2 -> 3 byte-identical, and the fog/GTAO evidence means are the same on every frame (`fog_top` 0.8196776, `fog_bottom` 0.8150845, `contact_min` 0.4375, `ao_top` 0.66042745 x4), so the fog tranche consumes identical depth on all frames and its own output does not drift; the TAA receipt is `enabled: false, passes: 0` on all four, so history is excluded too. The same sweep with a fresh presenter per arm (3 frames each) excludes the rest of the lighting path: sun depth off 4851/4846 then stable, bloom off identical to all-on, auto exposure off identical to all-on. One new fact the row did not have, and the next lead: with `set_fog_enabled(false)` the frames never converge at all (len 6628, 6633, 6630 for frames 0, 1, 2), so the fog-off arm is not simply "the 380 minus 126" - something in the neutral-pair path (`clear_fog_targets` runs once behind `fog_pair_dirty`, then the branch skips the uploads) leaves the blit pair evolving per frame. Next measurement: read back `targets.ao_texture` and `targets.fog_texture` after each of frames 0 and 1 (they are plain RGBA32Float, one `copy_texture_to_buffer` + map) and diff them, then do the same for `targets.hdr_texture`; the pair that differs names the pass, and the fix is to have the first frame write the state it reads (the forward samples group 1 `targets.ao_bind`, which only the post-forward tranche writes, so a fresh presenter's forward reads the pair it has not built yet). No source edit is left behind.
+  Progress 2026-10-24 (second box, no code change, tree left clean): the named readback was run and **both pairs are stable, so the AO/fog lead is disproved**. Throwaway test, two cubes at x = 19 plus the far cube, 64x64 `default_scene`, `render_offscreen` twice on one presenter, then `copy_texture_to_buffer` + map after each frame: `fog_texture` (R32Float) 0 of 4096 texels differ between frame 0 and 1 (first texel 0.9970212 both), `ao_texture` (R32Float) 0 of 4096 (1.0 both), `hdr_texture` (Rgba16Float) **765 of 4096 texels differ**, first at (30,17): frame 0 `[249,57,121,53,154,49,0,60]` against frame 1 `[238,57,108,53,137,49,0,60]`, i.e. frame 0 is about 0.16% brighter (R 1.2188 vs 1.2168). So the capture already gives the forward this frame's occlusion field - `encode_ao_field` runs before `encode_forward` in the same encoder - and the fault is inside the forward's own inputs, not the pair. The IBL chart is not it either: calling `submit_ibl_chart()` once before the first frame (returned Ok(1)) leaves the same 765 texels and the same first texel. Together with the first box this narrows it to the forward's uniform/shadow inputs: sun map off, bloom off, exposure off and TAA off all keep the first-pair diff, and the fog pair plus AO are byte-equal across frames. Next measurement (one run, no source change): read back the forward's uniform buffers after frames 0 and 1 in the same test - `light_buf`, the camera uniform `publish_camera` writes, `ibl_sh_buf`, `material_ring`, `twin_shadow_buf` and `fog_fwd_buf` - and diff them; the buffer that moves names the stale write. If all six are equal, the remaining candidates are the sun depth map (`sun_sub.view`) and the bake textures, and the HDR-level `sun off` arm (not the PNG-level one from the first box) decides. No source edit is left behind; the fog target needed `COPY_SRC` only for this readback and that flag was reverted with the test.
 - [x] EG49 agent: project memory and a build-task suite (finish-line D18, no board row until now) - Landed 0ba1a8447.
   the door serves no project memory and there is no task suite. Add `tools/memory/memory.mjs`: a
   JSONL store whose rows are a decision, a failed fix or a tuned value, each carrying the tape hash
@@ -1812,7 +1814,7 @@ Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this
   2021 --check` clean; `node tools/rust-quality.mjs --crate render` PASS 89, 0
   ratchet regressions. Golden untouched (render is presentation). Row stays
   open on the hunt2 bar only.
-- [ ] LF5d render: TAA slice 4, sharpen and choose — an RCAS pass after the
+- [x] LF5d render: TAA slice 4, sharpen and choose — an RCAS pass after the
   resolve (Bevy `robust_contrast_adaptive_sharpening.wesl`, `render-steals.md`
   item 11), then keep TAA or EG13's MSAA by the calmer capture (sand-edge
   frame-to-frame diff) as the presenter default. Diff: regular. Tier A. Size
@@ -1820,6 +1822,7 @@ Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this
   edge's contrast with no pixel above the input's max; the chosen mode's
   flicker number in latest.md is the lower of the two. F2P: no sharpen pass.
   P2P: render lib green. needs: LF5c, EG13.
+  Landed ba92c4cde (with 3fd240f20, ad0e573bf).
   Progress 2026-10-24: the sharpen half landed `3fd240f20`. `PostChain`
   carries `sharpen` (`0..=1`, `DEFAULT_CHAIN_SHARPEN` = 0 so the default
   bytes and the GPU parity frame stay unchanged) and `run_chain_core` runs
@@ -1860,6 +1863,22 @@ Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this
   filter at 68 passed. The accept's `latest.md` flicker field still does not
   exist, so the test's printed line and this row carry the number; the row
   stays open on that report field.
+  Progress 2026-10-24 (the report field, Accept green): `latest.md` now carries
+  it. `tools/aa-flicker.mjs` runs the same `sand_edge_aa_default` fixture on a
+  GPU machine and writes `target/reports/aa-flicker.json` (skip and missing
+  readings name their reason, never a zero); `tools/product-check.mjs` prints
+  that reading as a line of the generated report. First generated report
+  (`target/reports/product/latest.md`, product-check GREEN at `26ea22715`):
+  `AA flicker (sand edge fixture sand_edge_aa_default): taa 10.6 levels, 4x
+  msaa 0 levels (edge step 201.68), calmer 4x msaa; reading 26ea22715 ...`.
+  The chosen mode (4x MSAA, the shipped default) is the lower of the two, so
+  this Accept is met; leg 1 stays green
+  (`rcas_finish_raises_edge_contrast_without_new_peaks`, edge contrast
+  0.449333 -> 0.463248, no output above the input max). Node proofs:
+  `node --test tools/aa-flicker.test.mjs tools/product-check.test.mjs` 23 pass.
+  Not part of this Accept, still open as its own follow-on: the sharpen's GPU
+  twin (submit encode plus an `rp1-sharpen` graph pass), so `DEFAULT_CHAIN_SHARPEN`
+  stays 0.0 and the shipped frame does not turn RCAS on yet.
 - [x] LF6 render: dust and sparks from `particles_gpu.rs` - the seeded pool
   exists; the window never spawns. Dust at footfalls and knockdowns, sparks
   on `Blocked` and `Parried` cues (seeded from the cue tick, view only), drawn

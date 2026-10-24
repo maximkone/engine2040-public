@@ -5,6 +5,9 @@
 /// Opt-in read-only TCP inspector on 127.0.0.1 (off unless started).
 pub mod loopback;
 
+/// Opt-in streamable HTTP door on 127.0.0.1 with a per-run bearer token.
+pub mod http_door;
+
 use super::discover::{
     batch_execute_grouped, preview_batch, BatchExecuteOutput, PreviewItem, PreviewResult,
 };

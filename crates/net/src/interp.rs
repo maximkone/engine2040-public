@@ -12,21 +12,21 @@
 //! the snapshot ring plus extrapolate guard are reimplemented std-only over
 //! [`FullSnap`](crate::delta::FullSnap) and integer ticks.
 //!
-//! Consumer: [`RemoteView`] is the LAN guest's remote presentation
+//! Consumer: [`RemoteView`](crate::interp::RemoteView) is the LAN guest's remote presentation
 //! (`engine-game` `NetGame::remote_frame`): one snapshot stream feeds the
-//! frozen tick-clock `Interpolator`, the [`ConfirmedHistory`] that also
-//! stores delta baselines, and [`SnapshotInterpolator`], which answers
+//! frozen tick-clock `Interpolator`, the [`ConfirmedHistory`](crate::snapshot::ConfirmedHistory) that also
+//! stores delta baselines, and [`SnapshotInterpolator`](crate::interp::SnapshotInterpolator), which answers
 //! render-time queries the multiplayer app renders.
 //! Data owner: the server owns authoritative snapshots; the ring only copies
 //! validated bytes. Units: millimeters, decidegrees, integer ticks for keys,
-//! [`Fixed`] render alpha for sub-tick queries. Determinism scope: positions
-//! blend with integer-only [`Fixed`] math (LUT trig plus CORDIC atan2 for
+//! [`Fixed`](engine_core::fixed::Fixed) render alpha for sub-tick queries. Determinism scope: positions
+//! blend with integer-only [`Fixed`](engine_core::fixed::Fixed) math (LUT trig plus CORDIC atan2 for
 //! yaw) over integer ticks, so the same ring plus the same query gives the
 //! same presentation bytes on every machine; presentation output still never
 //! enters the simulation hash, and nothing here runs on the fixed tick.
 //! Error type: [`NetError`](crate::session::NetError); invalid snapshots
 //! reject loudly and change nothing, never panic. Budget: at most
-//! [`MAX_INTERP_RING`] anchors of bounded slots each; one bounded
+//! [`MAX_INTERP_RING`](crate::interp::MAX_INTERP_RING) anchors of bounded slots each; one bounded
 //! [`FullSnap`] clone per query (render-time only, never per simulation tick).
 
 use std::collections::VecDeque;

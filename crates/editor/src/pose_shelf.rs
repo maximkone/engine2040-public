@@ -69,6 +69,19 @@ impl PoseShelf {
         rows
     }
 
+    /// Save the next automatic name (`pose N`) for the held tape and return the
+    /// line the panel draws: `saved pose 3` or the refusal text.
+    pub fn save_next(&mut self, tape: Option<&PoseTape>) -> String {
+        let Some(tape) = tape else {
+            return "no tape recorded; record a pose first".to_string();
+        };
+        let name = format!("pose {}", self.entries.len() + 1);
+        match self.save_from_tape(&name, tape, None) {
+            Ok(()) => format!("saved {name}"),
+            Err(error) => error.to_string(),
+        }
+    }
+
     /// One panel line per pose, name order: `crouch  joints=24 frames=8
     /// thumb=yes`.
     pub fn rows(&self) -> Vec<String> {
@@ -200,6 +213,37 @@ impl std::fmt::Display for ShelfError {
 
 impl std::error::Error for ShelfError {}
 
+/// Pose panel state: a cursor over [`PoseShelf::rows`] order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PosePanel {
+    cursor: usize,
+}
+
+impl PosePanel {
+    /// Fresh panel with the cursor on the first row.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Row the cursor sits on.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Move the cursor within `len` rows.
+    pub fn move_cursor(&mut self, down: bool, len: usize) {
+        crate::shell::panels::move_cursor(&mut self.cursor, down, len);
+    }
+
+    /// Name of the selected row in [`PoseShelf::rows`] order (name order).
+    pub fn selected<'a>(&self, shelf: &'a PoseShelf) -> Option<&'a str> {
+        shelf
+            .sorted()
+            .get(self.cursor)
+            .map(|entry| entry.name.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +335,34 @@ mod tests {
         );
         assert_eq!(shelf.len(), 2, "a refused save keeps the shelf");
         assert!(ShelfError::EmptyTape.to_string().contains("record"));
+    }
+
+    #[test]
+    fn the_pose_panel_picks_by_name_and_saves_the_held_tape() {
+        let mut shelf = PoseShelf::new();
+        shelf.save_from_tape("b", &tape(&[1_000]), None).unwrap();
+        shelf.save_from_tape("a", &tape(&[2_000]), None).unwrap();
+        let mut panel = PosePanel::new();
+        assert_eq!(panel.selected(&shelf), Some("a"), "name order drives rows");
+        panel.move_cursor(true, shelf.rows().len());
+        assert_eq!(panel.selected(&shelf), Some("b"));
+        panel.move_cursor(true, shelf.rows().len());
+        assert_eq!(panel.selected(&shelf), Some("b"), "the cursor clamps");
+        panel.move_cursor(false, shelf.rows().len());
+        assert_eq!(panel.selected(&shelf), Some("a"));
+        assert_eq!(
+            shelf.save_next(None),
+            "no tape recorded; record a pose first"
+        );
+        assert_eq!(shelf.save_next(Some(&tape(&[0]))), "saved pose 3");
+        assert_eq!(shelf.len(), 3);
+        // The shelf fills, then the refusal text names the remedy.
+        for n in shelf.len()..MAX_POSES {
+            shelf
+                .save_from_tape(&format!("fill {n}"), &tape(&[0]), None)
+                .unwrap();
+        }
+        let text = shelf.save_next(Some(&tape(&[0])));
+        assert!(text.contains("delete one before saving"), "{text}");
     }
 }

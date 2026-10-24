@@ -2,7 +2,7 @@
 //! Owner: net lane, consumer: the packaged game and the ui lobby screen.
 //! Units: whole ms for pacing/browser, fixed ticks for match start.
 //! Determinism: slot order plus ready transitions are pure input order;
-//! ms timing never enters match seed or state. Errors: [`LobbyError`].
+//! ms timing never enters match seed or state. Errors: [`LobbyError`](crate::lobby::LobbyError).
 //! Budget: at most `MAX_PARTICIPANTS` slots, 16 beacons, wire messages at
 //! most 33 bytes; browser and lobby ops are O(MAX_PARTICIPANTS) with no
 //! per-tick sim allocation.
@@ -106,7 +106,7 @@ pub enum LobbyError {
     Truncated,
     /// Magic bytes do not match [`LOBBY_MAGIC`].
     BadMagic,
-    /// Kind byte is not a [`KIND_*`] constant.
+    /// Kind byte is not a `KIND_*` constant.
     BadKind(u8),
     /// Wire version byte is not [`LOBBY_VERSION`]; culprit carried.
     BadVersion {

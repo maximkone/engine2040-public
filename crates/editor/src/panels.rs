@@ -13,6 +13,20 @@
 
 use super::{Panel, Shell};
 
+/// Move one panel cursor, holding it inside `len` rows.
+///
+/// Every dock list (history, timeline, poses) uses this, so Up and Down feel
+/// the same in each tab. `down` is the row direction that panel draws.
+pub fn move_cursor(cursor: &mut usize, down: bool, len: usize) {
+    if down {
+        if *cursor + 1 < len {
+            *cursor += 1;
+        }
+    } else {
+        *cursor = cursor.saturating_sub(1);
+    }
+}
+
 /// One dock panel: a stable id plus the dock tab it opens. Titles render
 /// through [`Panel::title`], so the descriptor carries no title or menu copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,9 +37,9 @@ pub struct PanelDescriptor {
     pub panel: Panel,
 }
 
-/// The ten dock panels in default order: the single source of truth behind
+/// The twelve dock panels in default order: the single source of truth behind
 /// [`builtin_registry`] and [`ensure_builtin_panels`].
-pub const BUILTIN: [(&str, Panel); 10] = [
+pub const BUILTIN: [(&str, Panel); 12] = [
     ("hierarchy", Panel::Hierarchy),
     ("inspector", Panel::Inspector),
     ("viewport", Panel::Viewport),
@@ -33,6 +47,8 @@ pub const BUILTIN: [(&str, Panel); 10] = [
     ("tuning", Panel::Tuning),
     ("templates", Panel::Templates),
     ("history", Panel::History),
+    ("timeline", Panel::Timeline),
+    ("poses", Panel::Poses),
     ("browser", Panel::Browser),
     ("activity", Panel::Activity),
     ("log", Panel::Log),
@@ -63,7 +79,7 @@ impl PanelRegistry {
     }
 }
 
-/// The ten dock panels in default order.
+/// The twelve dock panels in default order.
 pub fn builtin_registry() -> PanelRegistry {
     let mut registry = PanelRegistry::new();
     for (id, panel) in BUILTIN {
@@ -103,7 +119,7 @@ mod tests {
         }
         assert!(shell.is_open(Panel::Log));
         assert_eq!(builtin_registry().panels(), Panel::all());
-        assert_eq!(builtin_registry().panels().len(), 10);
+        assert_eq!(builtin_registry().panels().len(), 12);
     }
 
     #[test]
@@ -120,7 +136,7 @@ mod tests {
         assert_eq!(Panel::Activity.title(), "activity");
         assert!(Panel::all().contains(&Panel::Activity));
         assert_eq!(builtin_registry().panels(), Panel::all());
-        assert_eq!(builtin_registry().panels().len(), 10);
+        assert_eq!(builtin_registry().panels().len(), 12);
     }
 
     #[test]

@@ -8,10 +8,10 @@
 //! a false alarm.
 //!
 //! The rollback-library shape as an idea only, reimplemented std-only with
-//! zero donor bytes (MIT OR Apache-2.0): [`InputPredictor`] guesses a remote
-//! input that has not arrived, [`PredictionTracker`] files each guess by tick
+//! zero donor bytes (MIT OR Apache-2.0): [`InputPredictor`](crate::prediction::InputPredictor) guesses a remote
+//! input that has not arrived, [`PredictionTracker`](crate::prediction::PredictionTracker) files each guess by tick
 //! and reports the guesses a true input later contradicts plus the streak
-//! that says a peer stopped sending, and [`DesyncDetector`] compares one
+//! that says a peer stopped sending, and [`DesyncDetector`](crate::prediction::DesyncDetector) compares one
 //! checksum per tick at a check interval and names the first divergent tick.
 //! The peer-to-peer session model is not taken: no request loop, no state
 //! ring and no resimulation lives here; the session layer owns those.

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { sandFrames } from "./iqa-gate.mjs";
-import { crashName, failLines, lastGreenRun, lookScore, middleCapture, newestFirst, parseReceipt, parseView, passFloors, pruneRuns, redFloors, referenceInterval, scoreCaptures, summary } from "./product-check.mjs";
+import { aaFlickerLine, crashName, failLines, lastGreenRun, lookScore, middleCapture, newestFirst, parseReceipt, parseView, passFloors, pruneRuns, redFloors, referenceInterval, scoreCaptures, summary } from "./product-check.mjs";
 
 const RECEIPT = `arena smoke: ticks=300 frames=300
 arena frame-split: sim=0.085ms present=117.519ms fighters=2.932ms per frame (mean over 300 frames) cpu_ms p50=7.501 p99=407.215 interval_ms p50=59.597 p99=407.881 gpu_ms p50=0.244 p99=4.156 (forward p50=0.135 blit p50=0.109; 299 frames) acquire=0.068ms present_mode=Fifo
@@ -246,4 +246,14 @@ test("a broken floor shows as a FAIL line in the output and in latest.md", () =>
   assert.match(broken, /^Verdict: RED \(strobe\)/m);
   assert.match(broken, /^- FAIL strobe: 83% of drawn bodies wore the red hit tint \(floor 25%\)$/m);
   assert.match(summary({ ...base, red: {} }), /^Verdict: GREEN/m);
+});
+
+test("latest.md carries the AA-flicker field, and says why when nothing measured it", () => {
+  const reading = { sha: "abc1234", at: "2026-10-24T03:00:00.000Z", host: "pc", source: "crates/render sand_edge_aa_default", taa_levels: 10.6, msaa_levels: 0, edge_step: 201.68, calmer: "4x msaa" };
+  assert.match(aaFlickerLine(reading), /^AA flicker \(sand edge fixture `sand_edge_aa_default`\): taa 10\.6 levels, 4x msaa 0 levels \(edge step 201\.68\), calmer 4x msaa; reading abc1234/);
+  assert.match(aaFlickerLine(null), /none \(no reading: run node tools\/aa-flicker\.mjs on a GPU machine\)/);
+  assert.match(aaFlickerLine({ skipped: "no wgpu adapter on this machine" }), /none \(no wgpu adapter on this machine\)/, "a skip is not a zero");
+  const look = { ...parseReceipt(RECEIPT), tinted_share: 0, exit: 0, timedOut: false, flip: null, flip_why: "no green run to compare against" };
+  const md = summary({ sha: "abc1234", at: "2026-10-24T03:00:00.000Z", build: "fresh", red: {}, look, caps: quietCaps, timing: null, ref: null, runDir: "target/reports/product/runs/x", bar: BAR, passBar: null, aa: reading });
+  assert.match(md, /^AA flicker .*calmer 4x msaa/m, "the field is a line of the generated latest.md");
 });

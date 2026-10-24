@@ -442,7 +442,7 @@ pub const MAX_RELAY_DATAGRAM: usize = MAX_RELAY_BYTES + 22;
 /// and the peer's, so the punch only decides the road while bytes always
 /// have a path. Registration and the STUN echo are best-effort sends plus
 /// flags the caller polls; no wall clock lives here, so sim hashes never
-/// see it. On receive, stream classes come back through [`classify`], the
+/// see it. On receive, stream classes come back through `classify`, the
 /// same downgrade the UDP path uses.
 pub struct RelayTransport {
     sock: UdpSocket,

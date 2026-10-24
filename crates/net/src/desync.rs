@@ -10,7 +10,7 @@
 //! `renew-engine/renew` (`crates/net/src/desync.rs`, Apache-2.0, read
 //! 2026-10-22): the report carries the tick, the local peer id, per-peer
 //! state digests, per-peer input digests and a last-agreed watermark, and
-//! one bit — [`DesyncReport::inputs_agree`] — answers the first question a
+//! one bit — [`DesyncReport::inputs_agree`](crate::desync::DesyncReport::inputs_agree) — answers the first question a
 //! developer asks: *whose fault is it*. Reimplemented std-only in our own
 //! words, ideas only, no vendor bytes, no new dependency.
 //!
@@ -31,7 +31,7 @@
 //! explanation, the fault a rollback tape can actually be lying about.
 //!
 //! Units: frames (`u32`), digests (`u64`), peer ids (`u8`, the tape seat).
-//! Determinism: integer-only folds through the shared [`Fnv64`] owner.
+//! Determinism: integer-only folds through the shared [`Fnv64`](engine_core::Fnv64) owner.
 //! Errors: none — a report is data; construction cannot fail and nothing
 //! here panics.
 
@@ -60,7 +60,7 @@ pub struct DesyncReport {
     /// This side's tape hash at `tick`.
     pub local_state: u64,
     /// This side's input digest at `tick` (the fold of the input row it
-    /// played, [`Self::digest_inputs`]); `None` when the row dropped off
+    /// played, `Self::digest_inputs`); `None` when the row dropped off
     /// the tape and cannot be re-folded.
     pub local_inputs: Option<u64>,
     /// Per-peer state digests at `tick`, indexed by peer id; `None` where

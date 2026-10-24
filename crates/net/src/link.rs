@@ -1,7 +1,7 @@
 //! link: seeded fault-injection wire for played bouts.
 //!
-//! Purpose: the loopback network of the two-machine proofs. One [`FaultLink`]
-//! is one direction between two peers; a [`Wire`] joins a server and two
+//! Purpose: the loopback network of the two-machine proofs. One [`FaultLink`](crate::link::FaultLink)
+//! is one direction between two peers; a [`Wire`](crate::link::Wire) joins a server and two
 //! clients. Datagrams ride the lossy lane (loss, jitter, reorder, scripted
 //! outage); streams ride the reliable lane (ordered, never lost, held across
 //! an outage), the QUIC channel split. Owner: net lane.
@@ -34,7 +34,7 @@ pub struct LinkProfile {
     pub jitter: u32,
     /// Datagram loss in percent.
     pub loss_pct: u32,
-    /// Datagrams held back [`REORDER_HOLD_TICKS`] extra ticks, in percent.
+    /// Datagrams held back `REORDER_HOLD_TICKS` extra ticks, in percent.
     pub reorder_pct: u32,
 }
 

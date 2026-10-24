@@ -25,7 +25,8 @@ use engine_anim::clip_rot::{bake_rot_blob, rot_blob_hash, sample_rot_blob};
 use engine_anim::edit;
 use engine_anim::pose::QuatTrack;
 use engine_anim::state_machine::anim_door::{AnimDoor, DoorRefusal};
-use engine_core::checked::f32_from_u64;
+use engine_anim::timeline::{Easing, Key, Timeline, TimelineDoc};
+use engine_core::checked::{f32_from_f64, f32_from_u64};
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::de::DeserializeOwned;
 use rmcp::serde::{Deserialize, Serialize};
@@ -128,6 +129,10 @@ pub struct PreviewArgs {
     /// The tape: `{"ticks":N,"params":[{"at":T,"name":..,"value":..}],"travel":[{"at":T,"to":..}]}`;
     /// at most 10000 ticks; writes and travel requests apply before tick `at` runs.
     pub script: Value,
+    /// Ticks to sample the session timeline at, when one is set: the pose comes from the
+    /// same clip sampler the playback uses. A session without one refuses `no_timeline`.
+    #[serde(default)]
+    pub timeline_ticks: Option<Vec<u32>>,
 }
 
 /// One transition seen in a preview.
@@ -156,6 +161,9 @@ pub struct PreviewOutput {
     pub final_state: String,
     /// Playback digest (16 hex digits): equal on every replay.
     pub digest: String,
+    /// Timeline poses at `timeline_ticks`, one per tick; empty when none were asked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline_samples: Vec<TimelineSample>,
 }
 
 fn refuse(refusal: DoorRefusal) -> McpToolError {
@@ -329,7 +337,21 @@ fn preview(server: &McpServer, args: &PreviewArgs) -> Result<PreviewOutput, McpT
     let value = with_door(server, TOOL_ANIM_PREVIEW, |door| {
         door.preview(graph.as_deref(), &script)
     })?;
-    typed(TOOL_ANIM_PREVIEW, value)
+    let mut output: PreviewOutput = typed(TOOL_ANIM_PREVIEW, value)?;
+    if let Some(ticks) = &args.timeline_ticks {
+        if ticks.len() > MAX_TIMELINE_SAMPLES {
+            return Err(McpToolError::new(
+                "too_many_samples",
+                format!(
+                    "{} sample ticks is past the cap {MAX_TIMELINE_SAMPLES}; recovery: ask for at \
+                     most {MAX_TIMELINE_SAMPLES} ticks",
+                    ticks.len()
+                ),
+            ));
+        }
+        output.timeline_samples = sample_timeline(server, TOOL_ANIM_PREVIEW, ticks)?;
+    }
+    Ok(output)
 }
 
 crate::e2_tool!(
@@ -745,13 +767,267 @@ crate::e2_tool!(
     invoke = rot_preview
 );
 
+/// Verb: validate a keyframe timeline and make it the session's playback clip.
+pub const TOOL_ANIM_TIMELINE_SET: &str = "anim.timeline.set";
+
+/// Ticks one `anim.timeline.set` call samples at most.
+const MAX_TIMELINE_SAMPLES: usize = 240;
+
+/// Args for `anim.timeline.set`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct TimelineSetArgs {
+    /// The document: `{"tracks":["hips","head"],"keys":[{"track":"hips","tick":0,
+    /// "value":[0,1,0],"easing":"linear"}]}`. A key naming a track the document
+    /// does not declare is refused by name; a track's keys must be
+    /// non-decreasing in tick. `easing` is one of linear, step, ease_in,
+    /// ease_out, ease_in_out (default linear).
+    pub doc: Value,
+    /// Ticks to sample after the set, at most 240; default the last key tick.
+    /// Samples run through the same clip sampler the playback uses.
+    #[serde(default)]
+    pub sample_ticks: Option<Vec<u32>>,
+}
+
+/// One sampled tick of a timeline.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct TimelineSample {
+    /// Tick sampled.
+    pub tick: u32,
+    /// One three-value pose per declared track, in `tracks` order.
+    pub values: Vec<[f32; 3]>,
+}
+
+/// Result of `anim.timeline.set`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct TimelineSetOutput {
+    /// Digest (16 hex digits) of the compiled clip.
+    pub digest: String,
+    /// Declared track count.
+    pub tracks: u32,
+    /// Key count.
+    pub keys: u32,
+    /// Last key tick.
+    pub dur_ticks: u32,
+    /// Sampled ticks, in the order asked.
+    pub samples: Vec<TimelineSample>,
+}
+
+/// A timeline document outside the shape this verb reads.
+fn bad_timeline(detail: String) -> McpToolError {
+    McpToolError::new("bad_timeline", detail)
+}
+
+/// Read the wire document into the library's plain types, naming the path of
+/// the first field that is outside its shape.
+fn parse_timeline(doc: &Value) -> Result<TimelineDoc, McpToolError> {
+    let Some(track_list) = doc.get("tracks").and_then(Value::as_array) else {
+        return Err(bad_timeline(
+            "`tracks` must be an array of track names; recovery: list every track once".to_owned(),
+        ));
+    };
+    let mut tracks = Vec::with_capacity(track_list.len());
+    for (index, name) in track_list.iter().enumerate() {
+        let Some(name) = name.as_str() else {
+            return Err(bad_timeline(format!(
+                "`tracks[{index}]` is not a string; recovery: name each track with its own string"
+            )));
+        };
+        tracks.push(name.to_owned());
+    }
+    let Some(key_list) = doc.get("keys").and_then(Value::as_array) else {
+        return Err(bad_timeline(
+            "`keys` must be an array of keys; recovery: give each key a track, tick and value"
+                .to_owned(),
+        ));
+    };
+    let mut keys = Vec::with_capacity(key_list.len());
+    for (index, key) in key_list.iter().enumerate() {
+        keys.push(parse_key(index, key)?);
+    }
+    Ok(TimelineDoc { tracks, keys })
+}
+
+/// Read one wire key, naming the field that is outside its shape.
+fn parse_key(index: usize, key: &Value) -> Result<Key, McpToolError> {
+    let Some(track) = key.get("track").and_then(Value::as_str) else {
+        return Err(bad_timeline(format!(
+            "`keys[{index}].track` must be a track name; recovery: name a track listed in `tracks`"
+        )));
+    };
+    let Some(tick) = key.get("tick").and_then(Value::as_u64) else {
+        return Err(bad_timeline(format!(
+            "`keys[{index}].tick` must be an integer tick; recovery: count ticks from 0"
+        )));
+    };
+    let Some(tick) = u32::try_from(tick).ok() else {
+        return Err(bad_timeline(format!(
+            "`keys[{index}].tick` {tick} is past the 32-bit tick range; recovery: keep ticks below \
+             4294967296"
+        )));
+    };
+    let Some(values) = key.get("value").and_then(Value::as_array) else {
+        return Err(bad_timeline(format!(
+            "`keys[{index}].value` must be three numbers; recovery: pass a three-value pose"
+        )));
+    };
+    if values.len() != 3 {
+        return Err(bad_timeline(format!(
+            "`keys[{index}].value` holds {} numbers, not 3; recovery: pass a three-value pose",
+            values.len()
+        )));
+    }
+    let mut pose = [0.0f32; 3];
+    for (axis, item) in values.iter().enumerate() {
+        let Some(number) = item.as_f64() else {
+            return Err(bad_timeline(format!(
+                "`keys[{index}].value[{axis}]` is not a number; recovery: pass a three-value pose"
+            )));
+        };
+        pose[axis] = f32_from_f64(number);
+    }
+    let easing = match key.get("easing") {
+        None => Easing::Linear,
+        Some(word) => {
+            let word_text = word.as_str().unwrap_or_default();
+            Easing::from_word(word_text).ok_or_else(|| {
+                McpToolError::new(
+                    "bad_easing",
+                    format!(
+                        "`keys[{index}].easing` is `{word_text}`; recovery: use one of linear, \
+                         step, ease_in, ease_out, ease_in_out"
+                    ),
+                )
+            })?
+        }
+    };
+    Ok(Key {
+        track: track.to_owned(),
+        tick,
+        value: pose,
+        easing,
+    })
+}
+
+/// Run `f` on this session's timeline under the audited dispatch seam.
+/// The per-session timeline table: one compiled timeline per door session.
+static TIMELINES: OnceLock<Mutex<BTreeMap<u64, Timeline>>> = OnceLock::new();
+
+/// The table, or the poisoned-lock refusal naming the restart.
+fn timelines() -> Result<std::sync::MutexGuard<'static, BTreeMap<u64, Timeline>>, McpToolError> {
+    TIMELINES.get_or_init(Mutex::default).lock().map_err(|_| {
+        McpToolError::new(
+            "lock_poisoned",
+            "anim timeline table is poisoned; restart the door",
+        )
+    })
+}
+
+/// Keep `timeline` as this session's playback clip under the audited dispatch seam.
+fn store_timeline(server: &McpServer, tool: &str, timeline: Timeline) -> Result<(), McpToolError> {
+    server.dispatch(tool, |state| {
+        timelines()?.insert(state.session(), timeline);
+        Ok(())
+    })
+}
+
+/// Sample this session's timeline at `ticks` under the audited dispatch seam;
+/// `no_timeline` when the session has none yet.
+fn sample_timeline(
+    server: &McpServer,
+    tool: &str,
+    ticks: &[u32],
+) -> Result<Vec<TimelineSample>, McpToolError> {
+    server.dispatch(tool, |state| {
+        let table = timelines()?;
+        let Some(timeline) = table.get(&state.session()) else {
+            return Err(McpToolError::new(
+                "no_timeline",
+                "no timeline is set for this session; recovery: call anim.timeline.set first",
+            ));
+        };
+        Ok(ticks
+            .iter()
+            .map(|tick| TimelineSample {
+                tick: *tick,
+                values: timeline.sample(*tick),
+            })
+            .collect())
+    })
+}
+
+/// `anim.timeline.set`: validate a keyframe document, keep it as the session's
+/// playback clip, and sample the ticks asked through the clip sampler.
+fn timeline_set(
+    server: &McpServer,
+    args: &TimelineSetArgs,
+) -> Result<TimelineSetOutput, McpToolError> {
+    let doc = parse_timeline(&args.doc)?;
+    let timeline = Timeline::compile(&doc).map_err(|error| {
+        McpToolError::new(
+            error.code(),
+            format!("{}: {}", error.code(), error.message()),
+        )
+    })?;
+    let ticks = match &args.sample_ticks {
+        Some(ticks) if ticks.len() > MAX_TIMELINE_SAMPLES => {
+            return Err(McpToolError::new(
+                "too_many_samples",
+                format!(
+                    "{} sample ticks is past the cap {MAX_TIMELINE_SAMPLES}; recovery: ask for at \
+                     most {MAX_TIMELINE_SAMPLES} ticks",
+                    ticks.len()
+                ),
+            ));
+        }
+        Some(ticks) => ticks.clone(),
+        None => vec![timeline.dur_ticks()],
+    };
+    let digest = format!("{:016x}", timeline.digest());
+    let tracks = u32::try_from(timeline.tracks().len()).unwrap_or(u32::MAX);
+    let keys = u32::try_from(timeline.keys()).unwrap_or(u32::MAX);
+    let dur_ticks = timeline.dur_ticks();
+    let samples: Vec<TimelineSample> = ticks
+        .iter()
+        .map(|tick| TimelineSample {
+            tick: *tick,
+            values: timeline.sample(*tick),
+        })
+        .collect();
+    store_timeline(server, TOOL_ANIM_TIMELINE_SET, timeline)?;
+    Ok(TimelineSetOutput {
+        digest,
+        tracks,
+        keys,
+        dur_ticks,
+        samples,
+    })
+}
+
+crate::e2_tool!(
+    /// `anim.timeline.set`: validate a cutscene keyframe timeline and keep it.
+    TimelineSetTool,
+    name = TOOL_ANIM_TIMELINE_SET,
+    description = "Validate a cutscene keyframe document (declared tracks plus keys carrying a tick, a three-value pose and an easing word), keep it as the session's playback clip, and sample the ticks asked through the same clip sampler the playback uses. Refuses a key on an undeclared track by name and a key tick behind its predecessor.",
+    readonly = false,
+    args = TimelineSetArgs,
+    output = TimelineSetOutput,
+    invoke = timeline_set
+);
+
 /// The anim pack: state machine and clip verbs, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
         "animation: the state machine as versioned data (set, undo, get, preview on a tape), \
-         clip edits (trim, retime, mirror, undo) over the session clip, and a read-only \
-         rotation sidecar preview per joint",
+         clip edits (trim, retime, mirror, undo) over the session clip, a cutscene keyframe \
+         timeline that compiles onto the same clip sampler, and a read-only rotation sidecar \
+         preview per joint",
         false,
     );
     pack.add(VerbSpec::of::<GraphSetTool>(
@@ -799,6 +1075,11 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         CapabilityCard::Observe,
     )?);
+    pack.add(VerbSpec::of::<TimelineSetTool>(
+        TOOL_ANIM_TIMELINE_SET,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
     Ok(pack)
 }
 
@@ -829,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_registers_nine_annotated_verbs() {
+    fn pack_registers_ten_annotated_verbs() {
         let pack = pack().expect("registers");
         assert_eq!(
             pack.verb_names(),
@@ -842,7 +1123,8 @@ mod tests {
                 TOOL_ANIM_CLIP_RETIME,
                 TOOL_ANIM_CLIP_MIRROR,
                 TOOL_ANIM_CLIP_UNDO,
-                TOOL_ANIM_ROT_PREVIEW
+                TOOL_ANIM_ROT_PREVIEW,
+                TOOL_ANIM_TIMELINE_SET
             ]
         );
         for verb in pack.verbs() {
@@ -886,6 +1168,7 @@ mod tests {
             PreviewArgs {
                 graph: None,
                 script: tape.clone(),
+                timeline_ticks: None,
             },
         )
         .expect("preview");
@@ -894,6 +1177,7 @@ mod tests {
             PreviewArgs {
                 graph: None,
                 script: tape,
+                timeline_ticks: None,
             },
         )
         .expect("preview");
@@ -963,6 +1247,7 @@ mod tests {
             PreviewArgs {
                 graph: None,
                 script: script.clone(),
+                timeline_ticks: None,
             },
         )
         .expect_err("no graph");
@@ -972,6 +1257,7 @@ mod tests {
             PreviewArgs {
                 graph: Some(machine(3)),
                 script,
+                timeline_ticks: None,
             },
         )
         .expect("a candidate runs without a set graph");
@@ -1231,5 +1517,151 @@ mod clip_tests {
         assert_eq!(back.after, clip_digest(&fixture));
         let empty = ClipUndoTool::invoke(&server, NoArgs {}).expect_err("nothing left");
         assert_eq!(empty.code, "nothing_to_undo");
+    }
+
+    fn two_track_doc() -> Value {
+        use rmcp::serde_json::json;
+        json!({
+            "tracks": ["hips", "head"],
+            "keys": [
+                {"track": "hips", "tick": 0, "value": [0.0, 1.0, 0.0]},
+                {"track": "hips", "tick": 30, "value": [0.0, 2.0, 0.0]},
+                {"track": "head", "tick": 15, "value": [10.0, 0.0, 0.0]},
+                {"track": "head", "tick": 45, "value": [20.0, 0.0, 0.0]}
+            ]
+        })
+    }
+
+    /// F2P: a two-track timeline set through the door samples exactly as the
+    /// hand-built clip does at the same ticks.
+    #[test]
+    fn timeline_set_plays_through_the_clip_sampler() {
+        use engine_anim::clip::{sample_all, Cursor};
+        use rmcp::serde_json::json;
+        let server = server();
+        let ticks = vec![0u32, 7, 15, 22, 30, 44];
+        let out = TimelineSetTool::invoke(
+            &server,
+            TimelineSetArgs {
+                doc: two_track_doc(),
+                sample_ticks: Some(ticks.clone()),
+            },
+        )
+        .expect("timeline sets");
+        assert_eq!((out.tracks, out.keys, out.dur_ticks), (2, 4, 45));
+        assert_eq!(out.samples.len(), ticks.len());
+        let t = |tick: u64| f32_from_u64(tick) * TICK_DT;
+        let hand = bake_clip(vec![
+            bake_track(vec![t(0), t(30)], vec![[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]]),
+            bake_track(vec![t(15), t(45)], vec![[10.0, 0.0, 0.0], [20.0, 0.0, 0.0]]),
+        ]);
+        assert_eq!(out.digest, format!("{:016x}", qclip_hash(&hand)));
+        let mut cursor = Cursor::new(2);
+        let mut want = [[0.0f32; 3]; 2];
+        for sample in &out.samples {
+            sample_all(
+                &hand,
+                f32_from_u64(u64::from(sample.tick)) * TICK_DT,
+                &mut cursor,
+                &mut want,
+            );
+            assert_eq!(sample.values.len(), 2);
+            for track in 0..2 {
+                for axis in 0..3 {
+                    assert!(
+                        (sample.values[track][axis] - want[track][axis]).abs() <= 1e-5,
+                        "tick {} track {track} axis {axis}: {} vs {}",
+                        sample.tick,
+                        sample.values[track][axis],
+                        want[track][axis]
+                    );
+                }
+            }
+        }
+        // The same timeline plays through `anim.preview`: the door samples it there too.
+        let graph = json!({
+            "version": 1, "name": "timeline", "start": "idle", "params": [],
+            "states": [{"name": "idle", "clip": 0, "length_ticks": 30, "looping": true}],
+            "transitions": []
+        });
+        let preview = PreviewTool::invoke(
+            &server,
+            PreviewArgs {
+                graph: Some(graph),
+                script: json!({"ticks": 30}),
+                timeline_ticks: Some(ticks.clone()),
+            },
+        )
+        .expect("preview samples the timeline");
+        assert_eq!(preview.timeline_samples.len(), ticks.len());
+        for (played, sampled) in preview.timeline_samples.iter().zip(out.samples.iter()) {
+            assert_eq!(played, sampled, "preview and set sample the same pose");
+        }
+    }
+
+    #[test]
+    fn timeline_set_refuses_an_undeclared_track_by_name() {
+        use rmcp::serde_json::json;
+        let server = server();
+        let refused = TimelineSetTool::invoke(
+            &server,
+            TimelineSetArgs {
+                doc: json!({
+                    "tracks": ["hips"],
+                    "keys": [{"track": "tail", "tick": 0, "value": [0.0, 0.0, 0.0]}]
+                }),
+                sample_ticks: None,
+            },
+        )
+        .expect_err("undeclared track refuses");
+        assert_eq!(refused.code, "unknown_track");
+        assert!(refused.message.contains("tail"), "{}", refused.message);
+        let backwards = TimelineSetTool::invoke(
+            &server,
+            TimelineSetArgs {
+                doc: json!({
+                    "tracks": ["hips", "head"],
+                    "keys": [
+                        {"track": "hips", "tick": 40, "value": [0.0, 0.0, 0.0]},
+                        {"track": "hips", "tick": 30, "value": [0.0, 0.0, 0.0]},
+                        {"track": "head", "tick": 0, "value": [0.0, 0.0, 0.0]}
+                    ]
+                }),
+                sample_ticks: None,
+            },
+        )
+        .expect_err("backwards key refuses");
+        assert_eq!(backwards.code, "non_monotonic");
+        assert!(backwards.message.contains("hips"), "{}", backwards.message);
+        let easing = TimelineSetTool::invoke(
+            &server,
+            TimelineSetArgs {
+                doc: json!({
+                    "tracks": ["hips"],
+                    "keys": [{"track": "hips", "tick": 0, "value": [0.0, 0.0, 0.0],
+                               "easing": "bounce"}]
+                }),
+                sample_ticks: None,
+            },
+        )
+        .expect_err("unknown easing refuses");
+        assert_eq!(easing.code, "bad_easing");
+        assert!(easing.message.contains("bounce"), "{}", easing.message);
+        // A session with no timeline refuses the preview sampling by name.
+        let fresh = McpServer::new(78, Capability::unrestricted(78));
+        let refused = PreviewTool::invoke(
+            &fresh,
+            PreviewArgs {
+                graph: Some(json!({
+                    "version": 1, "name": "timeline", "start": "idle", "params": [],
+                    "states": [{"name": "idle", "clip": 0, "length_ticks": 30, "looping": true}],
+                    "transitions": []
+                })),
+                script: json!({"ticks": 1}),
+                timeline_ticks: Some(vec![0]),
+            },
+        )
+        .expect_err("no timeline refuses");
+        assert_eq!(refused.code, "no_timeline");
     }
 }

@@ -9,9 +9,9 @@
 //!
 //! Pure logic over futures: no sockets, no clock, no executor, so it runs
 //! natively under fake legs and in the browser under `spawn_local`. A leg that
-//! can hang is wrapped in [`bounded`] with the caller's own timer.
+//! can hang is wrapped in [`bounded`](crate::connect_race::bounded) with the caller's own timer.
 //!
-//! Errors: [`RaceError`] with one [`LegError`] per failed leg.
+//! Errors: [`RaceError`](crate::connect_race::RaceError) with one [`LegError`](crate::connect_race::LegError) per failed leg.
 
 use std::fmt;
 use std::future::{poll_fn, Future};

@@ -15,6 +15,11 @@
 //!
 //! Errors: [`McpToolError`] with `bad_args` naming the argument, the legal
 //! range and one recovery; a physfx refusal leaves the world as it was.
+//!
+//! Emitter presets: the `presets` submodule owns the authored data and the four
+//! `fx.preset.*` verbs (list, preview, set, clear). The preview is pure
+//! integer math over the preset digest, so the same preset and ticks always
+//! answer the same samples; it renders nothing and feeds no hash.
 
 use std::collections::btree_map::Entry as MapEntry;
 use std::collections::BTreeMap;
@@ -33,6 +38,8 @@ use super::bad_args as bad;
 use super::{PackDef, PackError, VerbSpec};
 use crate::mcp::{McpServer, McpToolError};
 use crate::tool_capabilities::CapabilityCard;
+
+mod presets;
 
 /// Pack name.
 pub const PACK: &str = "fx";
@@ -662,13 +669,15 @@ crate::e2_tool!(
     invoke = undo
 );
 
-/// The fx pack: four effect verbs plus the undo that drops the newest.
+/// The fx pack: four effect verbs plus the undo that drops the newest, and the
+/// four emitter-preset verbs an artist authors with.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
         "physical effects: a ragdoll, a severed limb, a debris break and a blast over a \
-         session's float physfx world, one recorded action and one undo entry each, and one \
-         undo verb that drops the newest",
+         session's float physfx world, one recorded action and one undo entry each, one \
+         undo verb that drops the newest, and authorable emitter presets (list, preview, \
+         set, clear)",
         false,
     );
     pack.add(VerbSpec::of::<FxRagdollTool>(
@@ -696,6 +705,8 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         CapabilityCard::Commit,
     )?);
+    // Authorable emitter presets: the data plus list, preview, set and clear.
+    presets::register(&mut pack)?;
     Ok(pack)
 }
 
@@ -775,7 +786,7 @@ mod fx_verbs {
     }
 
     #[test]
-    fn pack_registers_five_annotated_verbs() {
+    fn pack_registers_five_effect_verbs_and_four_preset_verbs() {
         let pack = pack().expect("registers");
         assert_eq!(
             pack.verb_names(),
@@ -784,11 +795,20 @@ mod fx_verbs {
                 TOOL_FX_LIMB,
                 TOOL_FX_BREAK,
                 TOOL_FX_BLAST,
-                TOOL_FX_UNDO
+                TOOL_FX_UNDO,
+                presets::TOOL_FX_PRESET_LIST,
+                presets::TOOL_FX_PRESET_PREVIEW,
+                presets::TOOL_FX_PRESET_SET,
+                presets::TOOL_FX_PRESET_CLEAR
             ]
         );
         for verb in pack.verbs() {
-            assert_eq!(verb.card(), CapabilityCard::Commit);
+            let expected = if verb.readonly() {
+                CapabilityCard::Observe
+            } else {
+                CapabilityCard::Commit
+            };
+            assert_eq!(verb.card(), expected, "{}", verb.name());
             assert!(
                 verb.model().annotations.is_some(),
                 "{} is annotated",

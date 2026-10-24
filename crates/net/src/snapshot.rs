@@ -1,7 +1,7 @@
 //! snapshot: save/load plus delayed confirmed history with a timeline sampler.
 //!
 //! One owner for snapshot bytes in tests: [`save_snapshot`] encodes a
-//! [`FullSnap`](crate::delta::FullSnap) with the frozen session codec,
+//! [`FullSnap`] with the frozen session codec,
 //! [`load_snapshot`] decodes it back. File helpers cover temp-dir fixtures.
 //! [`ConfirmedHistory`] holds delayed authoritative snapshots with
 //! unchanged-marker compression; [`TimelineSampler`] trails the newest
@@ -10,7 +10,7 @@
 //! PORT(cBournhonesque/lightyear@96ded4ed27a8d6a465cbc10382518a7a371107f4:
 //! crates/core/core/src/confirmed_history.rs,
 //! crates/replication/interpolation/src/timeline.rs) MIT OR Apache-2.0, read
-//! live 2026-10-09; reimplemented std-only over [`FullSnap`](crate::delta::FullSnap)
+//! live 2026-10-09; reimplemented std-only over [`FullSnap`]
 //! and `u32` ticks, zero donor bytes.
 //!
 //! Consumer: net tests plus [`TimelineSampler`], which samples
@@ -18,7 +18,7 @@
 //! module only copies bytes. Units: ticks plus quantized mm/ddeg/hp/stamina.
 //! Determinism scope: same snapshot gives the same bytes on every machine;
 //! same history inserts give the same anchors (integer ticks only).
-//! Error type: [`NetError`](super::session::NetError) for bytes,
+//! Error type: [`NetError`] for bytes,
 //! [`std::io::Error`] for files. Invalid bytes reject loudly, never panic.
 
 use std::collections::VecDeque;
@@ -121,7 +121,7 @@ enum RawEntry {
 ///
 /// Anchors stay ordered oldest to newest by tick; late (out-of-order) inserts
 /// keep the order, and an insert that equals the fighter state strictly before
-/// its tick compresses to a [`RawEntry::SameAsPrecedent`] marker (anchors
+/// its tick compresses to a `RawEntry::SameAsPrecedent` marker (anchors
 /// compare fighter state, never the tick key). Past the cap the oldest anchor
 /// evicts and the next marker materializes, so lookups keep resolving.
 /// Integer ticks only, no wall clock: the same inserts give the same anchors.

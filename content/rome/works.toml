@@ -1,0 +1,60 @@
+# The eight camp works a camp day holds, and what each costs in man-ticks: one
+# man-ticks is one man working one fixed tick (60 Hz), so an hour of one man is
+# `ticks_per_man_hour` below. Every entry that holds a number names its source in
+# `ref`, and an entry without one is refused.
+#
+# Donor costs (idea only, no data copied):
+# - 0 A.D. structure templates give a `BuildTime` in seconds (one builder works
+#   at 1x, every extra builder adds its rate): the small works are seconds,
+#   the tower is the longest job on the list.
+# - CDDA basecamp recipes give a job as worker-minutes with required tools and a
+#   skill: the well is the long job, the latrine and the fence are short ones.
+# The rows below scale those magnitudes to the camp's eight-man tent group; the
+# exact hours are ours where the donors give no matching job.
+#
+# The ditch's shape (width and depth by threat) lives in `crates/rome/src/camp.rs`
+# over `content/rome/camp.toml`; this table only prices the digging.
+
+[units]
+ticks_per_man_hour = 216000
+ref = "engine: 60 fixed ticks per second, so 3600 s of one man is 216000 man-ticks"
+
+[work.ditch]
+man_hours = 8
+prop = "camp_ditch"
+ref = "0 A.D. builder costs and CDDA basecamp worker-minutes: digging the ditch is the longest earthwork of the night (rome.md section 4.3, ditch in crates/rome/src/camp.rs)"
+
+[work.rampart]
+man_hours = 6
+prop = "turf_rampart"
+ref = "0 A.D. builder costs: the turf rampart behind the ditch is half the earthwork again of the ditch (rome.md section 4.3)"
+
+[work.palisade]
+man_hours = 5
+prop = "palisade_wall"
+ref = "CDDA basecamp recipes: a fence run is a short worker-minute job per post, and a camp palisade is a run of posts (rome.md section 4.3)"
+
+[work.tower]
+man_hours = 6
+prop = "watchtower"
+ref = "0 A.D. builder costs: a tower is the longest single structure a builder crew raises (rome.md section 4.3)"
+
+[work.well]
+man_hours = 4
+prop = "camp_well"
+ref = "CDDA basecamp recipes: the well is the long craft job of the camp day, dug and lined in one shift (rome.md section 4.3)"
+
+[work.gate]
+man_hours = 2
+prop = "camp_gate"
+ref = "0 A.D. builder costs: a gate is a small structure, a morning's work for the tent group (rome.md section 4.3, gates in crates/rome/src/camp.rs)"
+
+[work.latrine]
+man_hours = 2
+prop = "camp_latrine"
+ref = "CDDA basecamp recipes: the latrine is a short worker-minute job with a shovel (rome.md section 4.3)"
+
+[work.tents]
+man_hours = 1
+prop = "tent_row"
+ref = "CDDA basecamp recipes: pitching the tent row is the shortest job of the day (rome.md section 4.3)"

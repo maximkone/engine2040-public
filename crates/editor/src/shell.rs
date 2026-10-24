@@ -85,6 +85,10 @@ pub enum Panel {
     /// Visible undo history: every kept step newest first, with named versions
     /// and a jump back to any kept step.
     History,
+    /// Animation sheet: joint key rows, a key cursor and a playhead.
+    Timeline,
+    /// Named pose shelf: rows by name, Enter picks, `S` saves the held tape.
+    Poses,
 }
 
 impl Panel {
@@ -101,6 +105,8 @@ impl Panel {
             Self::Browser => "Browser",
             Self::Activity => "activity",
             Self::History => "History",
+            Self::Timeline => "Timeline",
+            Self::Poses => "Poses",
         }
     }
 

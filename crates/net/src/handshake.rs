@@ -4,19 +4,19 @@
 //! Steps, integer-only and deterministic (no wall clock: the caller passes
 //! `now`):
 //!
-//! 1. a [`TokenGenerator`] mints a [`ConnectToken`] (protocol id, timestamps,
-//!    a session nonce, the two directional keys) and [`seal_token`]s it;
+//! 1. a [`TokenGenerator`](crate::handshake::TokenGenerator) mints a [`ConnectToken`](crate::handshake::ConnectToken) (protocol id, timestamps,
+//!    a session nonce, the two directional keys) and [`seal_token`](crate::handshake::seal_token)s it;
 //! 2. the client sends a connection request carrying the sealed token;
 //! 3. the server verifies the seal, refuses a token that is expired, not yet
 //!    valid, minted for another protocol id or replayed, and answers a
 //!    challenge sealed under the token's server-to-client key;
 //! 4. the client answers a response sealed under a key derived from the
 //!    token's client-to-server key and the challenge nonce; the server
-//!    verifies it. Both ends then hold the same [`SessionKeys`].
+//!    verifies it. Both ends then hold the same [`SessionKeys`](crate::handshake::SessionKeys).
 //!
 //! Authentication: with the `crypto` feature on, every seal is HMAC-SHA256
 //! (`hmac` + `sha2`, never hand-rolled) and a wrong key or a tampered byte
-//! refuses as [`HandshakeError::BadToken`]. With `crypto` off the seal carries
+//! refuses as [`HandshakeError::BadToken`](crate::handshake::HandshakeError::BadToken). With `crypto` off the seal carries
 //! a documented 8-byte FNV fold instead: deterministic and integer-only, but
 //! NOT authentication, and the sealed token is a development-only plain shape.
 //! The feature is off by default, so the wasm bundle `engine-web` builds does

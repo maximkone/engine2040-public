@@ -23,7 +23,7 @@ export const POTATO_BOUND_CAP_BYTES = 256 * 1048576;
 export const COMFORT_BOUND_CAP_BYTES = 1024 * 1048576;
 /** Prop LOD0 triangle bar from content/arena/README.md. */
 export const PROP_TRI_BUDGET = 5000;
-/** Largest single src gltf the kit may commit (ratchet: current max banner.gltf is 7.5 MiB). */
+/** Largest single src gltf the kit may commit (ratchet: current max crate.gltf is 6.6 MiB, after the banner cloth base dropped to 1k). */
 export const SRC_BYTES_BUDGET = 8 * 1048576;
 /** Fighters in the CT61 baseline scene (4 variants, 2 of each). */
 export const SOAK_FIGHTERS = 8;

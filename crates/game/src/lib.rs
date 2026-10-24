@@ -62,6 +62,9 @@ pub mod camera_feed;
 /// WASD and the stick relative to the camera: turns the bindings' local wish
 /// into the world wish the sim takes. Input mapping only, never hashed. Std-only.
 pub mod camera_wish;
+/// The camp day is a works table: eight works spend man-ticks, the finished
+/// work hands its prop to the next frame. Std-only, cold path per command.
+pub mod camp_day;
 /// Showcase clip capture: tape-bound PNG sequence plus manifest.
 /// Headless-safe: flags, tape codec, std-only PNG writer and frame sink.
 pub mod capture;

@@ -7,7 +7,7 @@
 //! codec produced, so a snapshot arrives byte-identical to the QUIC,
 //! WebTransport and in-memory paths.
 //!
-//! Layers: [`wire`] is the message layout both ends share (it compiles for the
+//! Layers: [`wire`](crate::websocket::wire) is the message layout both ends share (it compiles for the
 //! browser); `server` is the native transport on its own I/O thread, so the
 //! tick loop only ever calls the synchronous trait methods. The browser client
 //! is `browser::ws`.
@@ -16,7 +16,7 @@
 //! frames therefore ride it with head-of-line blocking (the documented
 //! downgrade of the UDP path). The send side keeps one datagram slot: while
 //! the writer is stalled a newer frame replaces the waiting one and the skip
-//! is counted ([`LatestOnly`]), so a resume writes the newest state, never a
+//! is counted (`LatestOnly`), so a resume writes the newest state, never a
 //! backlog, and the input redundancy window recovers the skipped ticks as
 //! with loss.
 //!

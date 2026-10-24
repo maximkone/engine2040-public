@@ -20,7 +20,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   unknown name with the list; the test fails on HEAD (no key).
   P2P: `cargo test -p engine2040 --bins` stays green. Accept: unknown module refused,
   known module listed by `project.inspect`.
-- [ ] WG3 projects: a package lock - a package is only a Cargo crate in this one
+- [x] WG3 projects: a package lock - a package is only a Cargo crate in this one
   workspace; no store, no fetch check. Tier C. Size L. Owns `src/project.rs`.
   F2P: `build` refuses an unlocked dependency (new test). P2P: existing project
   tests stay green. Accept: one lock file, one refusal. (Licence and supply-chain
@@ -53,7 +53,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   are refused (`mtlx_import.rs:617`). Tier B. Size M. Owns `crates/material/src/`.
   F2P: `material.from_graph` lowers Const/Op nodes (new test). P2P: existing material
   tests stay green. Accept: the same record from graph and from TOML, byte-equal.
-- [ ] WG8 anim: a cutscene keyframe document - no cutscene or dopesheet exists; the only
+- [x] WG8 anim: a cutscene keyframe document - no cutscene or dopesheet exists; the only
   sequencer is music steps (`crates/audio/src/music.rs:444`). Tier C. Size M.
   Owns `crates/anim/src/`, `crates/endpoint/src/packs/anim/`.
   F2P: `anim.timeline.set` plays through `anim.preview` (new test). P2P: anim tests stay
@@ -65,11 +65,14 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   Landed `e2c629262`: `content/ui/menus.ui.toml` -> `menus::menu_layout::MenuLayout`,
   equal to the Rust tables per locale. Open: the renderer still reads the Rust tables,
   so the pixel accept is not claimed.
-- [ ] WG10 endpoint: a remote inspector on loopback TCP - `remote_shim.rs:1-2` says
+- [x] WG10 endpoint: a remote inspector on loopback TCP - `remote_shim.rs:1-2` said
   "in-process, no socket". Tier B. Size M. Owns `crates/endpoint/src/remote_shim.rs`.
   F2P: the allowlisted `BrpRequest` table answers on a loopback port (new test).
   P2P: the in-process path stays green. Accept: two clients, one scene, read-only.
-- [ ] WG11 build: one-click export that ships a project - `tools/ship.mjs:1073` stages a
+  Landed `408b2cf94`: `remote_shim/loopback.rs` binds `127.0.0.1:0` by construction,
+  per-run token, 64 KiB frames, write verbs refused by name through the door's own
+  `readonly()` annotation. Opt-in; the in-process shim stays the default.
+- [x] WG11 build: one-click export that ships a project - `tools/ship.mjs:1073` stages a
   fixed five-file set; no version, icon or installer in the manifest. Tier B. Size L.
   Owns `src/build.rs`, `tools/ship.mjs`. F2P: `build` writes `dist/<name>/` plus
   `build.json` (version, digest) and one archive step (new test). P2P: the mirror ship
@@ -140,7 +143,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   markdown page outside `docs/archive/` (660 pages, 0 broken) and `ci.yml` runs it beside the
   tool inventory. It found and fixed one real break (`docs/library/index.md` -> `../EMPIRE.md`,
   archived 2026-10-17). Landed `c03ad5037`.
-- [ ] TG8 ci: a macOS leg - the golden matrix covers linux x86, windows, wasm, not macOS.
+- [x] TG8 ci: a macOS leg - the golden matrix covers linux x86, windows, wasm, not macOS.
   Tier B. Size M. Owns `.github/workflows/golden-matrix.yml`. F2P: no `macos` runner in
   the matrix (grep). P2P: the four current targets stay green. Accept: a fifth row, same
   golden and corpus digests.
@@ -163,6 +166,16 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   endpoint 75, combat 48, assets 43, arena 21, physfx 4, core 2, input 2; pages run
   40006304627, the last green docs build). The flag stays off; `2955c134d` records the
   count and the re-measure rule in the docs job. Burn down one crate at a time.
+  Progress 2026-10-24 (`a559ec910`, `03a97f1ee`, `ac13203c4`): core, input, physfx and
+  arena are at 0 and gated by their own `RUSTDOCFLAGS=-D warnings` step in `pages.yml`
+  (green: pages run 40056976625). 785 left over 8 crates: render 154, anim 132, game 119,
+  net 108, physics 96, endpoint 82, combat 48, assets 46.
+- [ ] TG11 ci: the wasm matrix leg survives the thread tests - `islands::tests::par_*`
+  spawn threads, which traps `unreachable` on wasm32-wasip1 (run 40056555531, exit 134
+  after 160 tests), so the compare job prints `PHYSICS RESULT FAIL` even though all 20
+  digests MATCH. Tier B. Size S. Owns `crates/physics/src/`. F2P: the wasm leg runs the
+  same test names as native. P2P: native threads stay parallel. Accept: 20/20 MATCH on a
+  green compare job.
 
 ## LLM and agent side
 
@@ -206,6 +219,10 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   `crates/endpoint/src/transport.rs`, `bin/e2040-mcp.rs`. F2P: a second binary serves the
   same door over loopback HTTP with a token (new test). P2P: stdio stays green.
   Accept: a remote client lists tools and applies one scene edit.
+  Landed `bbb803206`: `e2040-mcp --http 127.0.0.1:0` (live code in
+  `remote_shim/http_door.rs`, reusing the token helper), non-loopback bind refused,
+  64 KiB body, one request per connection; no flag = stdio unchanged. Runs
+  40058266414, 40058377790.
 - [x] LG7 endpoint: pagination and prompt arguments - `tools/list` answers
   `next_cursor: None` (`mcp.rs:1604`), `get_prompt` ignores arguments (`:1776`).
   Tier A. Size S. Owns `crates/endpoint/src/mcp.rs`. F2P: 120 tools page in two calls
@@ -232,19 +249,22 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   (`mcp.rs:1082`) serializes every call. Tier C. Size M. Owns `crates/endpoint/src/mcp.rs`.
   F2P: two `scene.read` calls overlap under the new read path (new test). P2P: the write
   path stays serialized. Accept: 8 concurrent reads, no interleaved write.
+  Landed `04b450510`: reads run under a shared `RwLock`, the audit record is sealed after
+  the read span, writes keep the exclusive lock for their whole span; a channel-based gate
+  shows 8 reads inside at once and a write waiting. Runs 40057808126, 40058160951.
 
 ## Order
 
-Done on 2026-10-24: WG1 WG6 WG9 WG11 WG13, TG1 TG2 TG3 TG5 TG6 TG7 TG9, LG1 LG2.
-Remaining is 20 rows.
+Done on 2026-10-24: WG1 WG3 WG4 WG6 WG8 WG9 WG10 WG11 WG13, TG1 TG2 TG3 TG5 TG6 TG7
+TG8 TG9, LG1 LG2 LG5 LG6 LG7 LG8 LG9 LG10. Remaining is 9 rows plus 4 follow-ups.
 
-- Small, take now: WG12 (`perf.trace`), LG9 (cost per call), LG8 (one cassette), LG5
-  (image part), LG7 (pagination and prompt args).
-- Medium: WG2 (plugin registry), WG8 (cutscene timeline), LG4 (typed memory), TG8
-  (matrix proof once the lock is clean).
-- Large or owner calls: WG3 (package lock), WG5 (terrain cook), WG11's content half,
-  TG10 (781 rustdoc warnings, one crate at a time).
-- Endpoint-held (34 files dirty by another seat): WG4, WG10, WG12, WG15, LG3, LG6,
-  LG7, LG10, and the TG4 endpoint leg. Take them the moment that set lands.
+- Small, take now: TG11 (wasm thread fallback), WG12 (`perf.trace`).
+- Medium: WG2 (plugin registry), WG7 (`material.from_graph` verb), LG4 (typed memory),
+  TG10 (785 rustdoc warnings, next: net 108, combat 48).
+- Large or owner calls: WG5 (terrain cook; assets/render busy), WG15 (project verbs),
+  TG4 (endpoint coverage leg; the door budget is red under another seat),
+  WG11's content half (dist still ships the exe only).
+- Endpoint packs (`mod.rs`, `scene.rs`, `material.rs`, `level_paint.rs`, `stage.rs`) are
+  dirty again: WG2, WG7, WG12, WG15 wait on that seat.
 
 Do not reopen parked rows; the full tables are in the three research files.

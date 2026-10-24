@@ -56,6 +56,10 @@ pub mod graph;
 /// Std-only; consumer is the TAA resolve through `post::TaaParams`.
 pub mod temporal;
 
+/// The cooked height-grid terrain: integer millimetres in, one named mesh in
+/// meters out, posted as one draw-list node. Std-only.
+pub mod terrain;
+
 pub mod quality;
 
 /// Which shading family one draw takes (stone, skin, metal, cloth), stored as
@@ -300,6 +304,12 @@ pub mod tier_rules;
 
 /// Pure integer dynres governor (GS12): GPU microseconds to scale percent.
 pub mod dynres_gov;
+
+/// Battery-aware quality cap (GS40): one Win32 power read beside the VRAM
+/// leaf plus the pure rule that steps one tier down on a low or saver
+/// battery, never onto `Web`. Cold path, off the tick, no hash input;
+/// consumer is the startup tier pick.
+pub mod power;
 
 #[cfg(feature = "window")]
 pub mod gpu;

@@ -984,12 +984,11 @@ DOMAIN_MAX 1 1 1
         };
         for (texel, table) in lut.table().iter().enumerate() {
             let base = texel * 8;
-            for channel in 0..3 {
+            for (channel, want) in table.iter().take(3).enumerate() {
                 let read = half(base + channel * 2);
                 assert!(
-                    (read - table[channel]).abs() <= 2e-3,
-                    "texel {texel} channel {channel}: f16 {read} vs table {}",
-                    table[channel]
+                    (read - want).abs() <= 2e-3,
+                    "texel {texel} channel {channel}: f16 {read} vs table {want}"
                 );
             }
             assert_eq!(half(base + 6), 1.0, "alpha marks a filled texel");

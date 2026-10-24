@@ -192,13 +192,19 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   tool, `f0fecf466` the README. Left: no seat has built `e2040-ladder.exe` in this tree yet, so the
   tool exits 2 with its build line until one does; a live planner in place of the scripted one is
   another row, not this one.
-- [ ] DOOR8 endpoint: level.paint, one call for a room. Steal: Godot GridMap painting plus LDtk
+- [x] DOOR8 endpoint: level.paint, one call for a room. Steal: Godot GridMap painting plus LDtk Landed 97458fb.
   auto-layer rules - kit cells, rules and seeded scatter in one gated call that expands to one
   batch of `Op::Insert` inside one undo step. It wires `wfc` and `scatter`, which landed with no
   caller, so 24 cells go from 24 preview+apply pairs to 1. Files: the level pack in
   `crates/endpoint/src/packs/`, `crates/spatial` (wfc).
   Accept: 24 cells placed in one call, one undo reverts all 24; the same seed gives the same scene
   digest x2; a rule that cannot be satisfied refuses and names the cell.
+  Proof: `cargo test -p engine-endpoint --features mcp --lib level_paint` 9 passed, 0 failed - a 6x4 wall
+  run lands 24 cells in one call and one `tx.undo` puts the document back; the same seed replays to the
+  same digest and the same ids; an unsatisfiable rule names its cell; a cell submitted twice names the
+  pair. The router pin passes at 130 with `level.paint` counted, and `bad_grid`, `no_kit`, `off_grid`,
+  `rule_unsatisfiable` and `too_many_cells` joined the refusal kind tables. rust-quality PASS (the split
+  of `plan` cleared its long-function and panic-site hits), rustfmt clean, `git diff --check` clean.
 - [ ] DOOR9 endpoint: anim.retarget, the clips we cannot use. Steal: Godot BoneMap over
   `bone_role_for_name`, `BoneMapping` and `bone_coverage` in `crates/anim/src/contract.rs`, which
   have no verb. A third-party clip goes from "unknown role" to intake, retarget and a preview

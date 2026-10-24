@@ -1,9 +1,9 @@
 //! webduel: the scripted duel a page plays against the native dedicated server.
 //!
-//! Purpose: one real match, over the two browser legs. [`DuelHost`] authors a
-//! [`MatchSpec`] duel (the window's rules v2 on the kit walls) with the
-//! [`HeadlessServer`] and talks to any number of [`Transport`]s (the WebSocket
-//! server, the WebTransport server, QUIC); [`DuelClient`] is the page side: it
+//! Purpose: one real match, over the two browser legs. [`DuelHost`](crate::webduel::DuelHost) authors a
+//! [`MatchSpec`](engine_arena::MatchSpec) duel (the window's rules v2 on the kit walls) with the
+//! [`HeadlessServer`] and talks to any number of [`Transport`](crate::quic::Transport)s (the WebSocket
+//! server, the WebTransport server, QUIC); [`DuelClient`](crate::webduel::DuelClient) is the page side: it
 //! joins, predicts with [`Client`], plays the scripted tape and ends on the
 //! server's hash. Both are plain state machines over the trait, so the same
 //! code runs natively under test, in the `net_serve` binary and inside the
@@ -14,7 +14,7 @@
 //! waits, tick by tick, for the seat's input datagram (lockstep with a
 //! caller-set patience, so a scripted duel is deterministic: the tape the
 //! server authors is the tape the script holds). Each authored tick goes back
-//! as a state datagram that repeats the last [`STATE_COVER`] ticks of human
+//! as a state datagram that repeats the last [`STATE_COVER`](crate::played::STATE_COVER) ticks of human
 //! inputs. The last tick also rides the reliable lane as the whole tape, so a
 //! lossy datagram path still ends on the same state. A seat that leaves is
 //! AI-filled; the same token joining again reclaims its slot and is caught up
@@ -24,7 +24,7 @@
 //! the sim are integer and fixed-point; no clock enters this module (the
 //! caller owns patience and pacing), so the same spec and script give the same
 //! hash on every machine, which is what the page and the native server compare.
-//! Errors: [`DuelError`] for setup and server faults, [`DuelFailure`] for a
+//! Errors: [`DuelError`](crate::webduel::DuelError) for setup and server faults, [`DuelFailure`](crate::webduel::DuelFailure) for a
 //! client that cannot finish, with the reason as text.
 
 use std::collections::{BTreeMap, VecDeque};

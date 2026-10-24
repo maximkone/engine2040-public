@@ -1,7 +1,7 @@
 //! heal: disconnect/reconnect plus desync resync through the supervisor.
 //!
 //! Consumer: the dedicated-server operator. Data owner: [`NetHeal`] owns
-//! the [`Supervisor`](engine_observe::supervisor::Supervisor), its
+//! the [`Supervisor`], its
 //! [`RingBuffer`], the per-slot quarantine table and the operator notices;
 //! the [`HeadlessServer`](crate::dedicated::HeadlessServer) owns slots,
 //! ticks and snapshots, and the [`Client`](crate::session::Client) owns

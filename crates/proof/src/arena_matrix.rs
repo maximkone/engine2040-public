@@ -295,8 +295,11 @@ mod tests {
         // docs/receipts/2026-10-21-tc3-body-push-shove). The sim day of
         // 2026-10-22/23 moved it again: FEEL2/4/6/10, the Fixed rounding and
         // the physics laws (receipt docs/receipts/2026-10-23-arena-digest-sim-day).
+        // BG6 moved it on 2026-10-24: the rules-v2 plan reads the
+        // match world's obstacles, so a foe behind cover never enters
+        // the view (receipt docs/receipts/2026-10-24-bg6-cover).
         let match_run = run(&Fixture::STANDARD).expect("standard match");
-        assert_eq!(match_run.digest, 0x605f_6503_a390_82f4);
+        assert_eq!(match_run.digest, 0x3886_d0f7_8453_149c);
     }
 
     /// The spine step plays the same match and must fold the same arena
@@ -305,7 +308,7 @@ mod tests {
     #[test]
     fn spine_arena_digest_is_pinned() {
         let first = spine_digest(&Fixture::STANDARD).expect("spine match");
-        assert_eq!(first, 0x605f_6503_a390_82f4);
+        assert_eq!(first, 0x3886_d0f7_8453_149c);
         let second = spine_digest(&Fixture::STANDARD).expect("spine match");
         assert_eq!(second, first);
     }

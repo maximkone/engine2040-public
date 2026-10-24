@@ -3,14 +3,14 @@
 //! Purpose: the real-hardware legs of the two-machine proofs, over a LAN and
 //! across two networks through the self-hosted relay. Machine A plays the
 //! dedicated host plus seat 0, machine B plays seat 1. Each machine drives
-//! the [`LoopbackWire`] links it sends on; once per bout step the two trade,
-//! through a [`Courier`] slot exchange, every frame due on a link that
+//! the [`LoopbackWire`](crate::link::LoopbackWire) links it sends on; once per bout step the two trade,
+//! through a [`Courier`](crate::courier::Courier) slot exchange, every frame due on a link that
 //! crosses between them. Owner: net lane. Units: bout steps, bytes.
 //! Determinism: the fault links run in step time and both machines build
 //! them from the same config, so a split bout is the same pure function of
 //! config as [`crate::played::run_loopback`] and posts the same digest; real
 //! loss costs wall time, never a frame.
-//! Errors: [`SplitError`]; decoders refuse hostile bytes, never panic.
+//! Errors: [`SplitError`](crate::courier::SplitError); decoders refuse hostile bytes, never panic.
 
 use std::net::SocketAddr;
 

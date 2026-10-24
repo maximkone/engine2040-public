@@ -339,7 +339,7 @@ fn frame_limit_message() -> String {
 /// `RandomState` is seeded by the standard library from the OS, so no
 /// dependency and no invented cipher: the token is a bearer capability that
 /// only this run's printed line reveals.
-fn run_token() -> String {
+pub(super) fn run_token() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
 
@@ -356,7 +356,7 @@ fn run_token() -> String {
 }
 
 /// Compare the run token without an early exit on the first differing byte.
-fn token_matches(expected: &str, given: &str) -> bool {
+pub(super) fn token_matches(expected: &str, given: &str) -> bool {
     let difference = expected.bytes().zip(given.bytes()).fold(
         u8::from(expected.len() != given.len()),
         |acc, (want, got)| acc | (want ^ got),

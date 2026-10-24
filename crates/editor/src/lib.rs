@@ -16,6 +16,9 @@ pub mod activity;
 #[cfg(feature = "ui")]
 pub mod app;
 /// Digest-chained audit receipts over the crash-safe journal (rotation-capped).
+/// Guided art path (W8): the five-step ladder from import to score, rooted in
+/// the host's per-step readiness. Std-only and deterministic.
+pub mod art_path;
 pub mod audit;
 /// Asset browser over asset bundles: search, drag-to-place intents,
 /// place-rule refusal. Std-only; consumed by the shell and the recorded
@@ -41,6 +44,9 @@ mod geometry;
 pub mod gizmo;
 /// Data-only node graph for material and VFX graphs; wired to Document.
 pub mod graph;
+/// Material graph canvas (E7): integer node positions, typed ports, validated
+/// links and a pan/zoom view. The material pack owns evaluation.
+pub mod graph_canvas;
 /// History panel: a cursor over [`History::rows_newest_first`] with the jump
 /// returned as data. Std-only; the dock paints its rows.
 pub mod history_panel;

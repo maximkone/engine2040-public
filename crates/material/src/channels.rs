@@ -343,7 +343,7 @@ fn permille(value: u16) -> f32 {
 /// surface gets smoother), a positive shift a lower bound (shinier), and zero
 /// leaves the number alone. A bound applies again as a no-op.
 fn shift_toward(now: f32, shift: i16) -> f32 {
-    let bound = permille(u16::try_from(shift.unsigned_abs()).unwrap_or(0));
+    let bound = permille(shift.unsigned_abs());
     if shift < 0 {
         now.min(bound)
     } else if shift > 0 {

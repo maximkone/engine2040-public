@@ -117,3 +117,23 @@ Next asset: metal (torch cup, gate fittings) — Poly Haven metal candidate
 or ambientCG equivalent, same shape: 2k albedo+normal staged, wired,
 provenanced; then gate_tunnel/debris onto the stone set; then hero props
 (torches, banners, gate) + crowd backdrop per the CT8 remainder.
+
+## 2026-10-24 - the kit's cloth base drops to 1k (potato cap)
+
+The embedded `cloth_albedo` slice in `src/banner.gltf` is re-encoded from
+the same staged `textures/cloth_albedo_2k.jpg` (lanczos, JPEG q3) at
+1024x986 = 1,009,664 px, inside
+`engine_assets::budget::POTATO.max_tex_px` (1,048,576). The 2048x1971 slot
+above is unchanged and stays the provenance of record; the normal map stays
+2k. The cloth base is a flat crimson velvet weave with no emblem or printed
+detail (checked on the 1k copy), so halving it has no pattern to lose. The
+frame gate is the machine look score against the last green run: the pass at
+`e8ac0ecdd` reads `GREEN` with FLIP 119 (x10000, floor 1200) against
+`26ea22715`, 60.4 fps loaded at 1920x1080, 0 blank, 0 frozen, 0 validation
+errors (`target/reports/product/latest.md`).
+`content/arena/manifest.json` and `content/PROVENANCE-AUDIT.md` are
+re-pinned to the new bytes (`82dba1b8...`), and `content/arena/kit.e2bundle`
+is re-cooked from the sources (`digest 5642f3b582be5f94`; a second cook of
+the same inputs writes the same digest and the same bytes). Follow-on, not
+this change: the normal map is still 2k (16 MB RGBA8), the same win one
+step later.

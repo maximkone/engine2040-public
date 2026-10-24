@@ -8,14 +8,18 @@
 //! clocks. Determinism: integer-only ordering by `(separation, slot)`; the
 //! attack tokens ([`Squad::claim_token`]) go to the nearest attackers first,
 //! so slot order never favours a fighter. Errors: none, an unseatable roster
-//! leaves every brain free to engage. Budget: `O(n^2)` integer compares on
-//! the stack, zero allocation.
+//! leaves every brain free to engage. Budget: `O(n^2)` integer compares plus
+//! one sight test per foe pair and obstacle, all on the stack, zero
+//! allocation.
 //!
 //! Each living fighter sees its nearest three living foes (teammates and the
 //! fallen are not foes) and fights the nearest one whose attack token it can
 //! get; a fighter that cannot get one waits outside the ring on its nearest
-//! foe, so at most two fighters press one target.
+//! foe, so at most two fighters press one target. A foe behind an obstacle
+//! of the match world is not seen at all: the world hands the plan its
+//! cover boxes and a sight line that crosses one leaves the view.
 
+use crate::world::CoverBox;
 use crate::{match_wire, FighterState, MAX_SLOTS};
 use engine_ai::{FoeView, MeleeView, Percept, Squad, StrikePhase};
 use engine_combat::fight::FighterState as FightFighter;
@@ -87,14 +91,45 @@ fn separation_table(
     table
 }
 
+/// Cover blocks for every unordered pair of living foes: true when an
+/// obstacle stands between them on the floor. One sight test per pair,
+/// read by both sides from the same table.
+fn cover_table(
+    mm: &[[i32; 3]; MAX_SLOTS],
+    cover: &[CoverBox],
+    fight: &FightState,
+    teams: &[u8; MAX_SLOTS],
+    count: usize,
+) -> [[bool; MAX_SLOTS]; MAX_SLOTS] {
+    let mut table = [[false; MAX_SLOTS]; MAX_SLOTS];
+    if cover.is_empty() {
+        return table;
+    }
+    for a in 0..count {
+        if fight.fighters[a].hp_permille == 0 {
+            continue;
+        }
+        for b in (a + 1)..count {
+            if fight.fighters[b].hp_permille == 0 || teams[a] == teams[b] {
+                continue;
+            }
+            table[a][b] = cover
+                .iter()
+                .any(|box_| box_.blocks_segment([mm[a][0], mm[a][2]], [mm[b][0], mm[b][2]]));
+        }
+    }
+    table
+}
+
 /// One slot's quantized sightings of every living foe, in slot order, reading
-/// the tick's pair separations.
+/// the tick's pair separations and the cover between them.
 fn sightings(
     fight: &FightState,
     teams: &[u8; MAX_SLOTS],
     count: usize,
     slot: usize,
     sep: &[[i32; MAX_SLOTS]; MAX_SLOTS],
+    cover: &[[bool; MAX_SLOTS]; MAX_SLOTS],
     out: &mut [FoeView; MAX_SLOTS],
 ) -> usize {
     let mut seen = 0;
@@ -109,6 +144,10 @@ fn sightings(
         } else {
             (other, slot)
         };
+        if cover[low][high] {
+            // An obstacle stands between them: the foe is behind cover.
+            continue;
+        }
         out[seen] = FoeView::quantize(
             u8::try_from(other).unwrap_or(u8::MAX),
             sep[low][high],
@@ -124,12 +163,14 @@ fn sightings(
 impl Plan {
     /// Plan the tick over `count` slots: convert every pose once, measure
     /// each living foe pair once, build every living fighter's view, then
-    /// hand out attack tokens nearest attacker first.
+    /// hand out attack tokens nearest attacker first. `cover` holds the
+    /// world's obstacles: a foe behind one never enters a view.
     pub(crate) fn build(
         states: &[FighterState],
         fight: &FightState,
         teams: &[u8; MAX_SLOTS],
         count: usize,
+        cover: &[CoverBox],
     ) -> Self {
         let blank = FoeView::default();
         let mut views = [MeleeView::EMPTY; MAX_SLOTS];
@@ -138,6 +179,7 @@ impl Plan {
         let mut roster = [FighterId(0); MAX_SLOTS];
         let mm = pose_mm(states, count);
         let sep = separation_table(&mm, fight, teams, count);
+        let blocked = cover_table(&mm, cover, fight, teams, count);
         let (mut ranked, mut living) = (0usize, 0usize);
         for slot in 0..count {
             let me = &fight.fighters[slot];
@@ -147,7 +189,7 @@ impl Plan {
             roster[living] = FighterId(u8::try_from(slot).unwrap_or(u8::MAX));
             living += 1;
             let mut found = [blank; MAX_SLOTS];
-            let seen = sightings(fight, teams, count, slot, &sep, &mut found);
+            let seen = sightings(fight, teams, count, slot, &sep, &blocked, &mut found);
             let stamina = me.stamina.saturating_mul(STAMINA_TO_PERMILLE);
             views[slot] = MeleeView::nearest(me.hp_permille, stamina, &found[..seen]);
             if let Some(nearest) = views[slot].foes().first() {
@@ -226,6 +268,7 @@ impl Plan {
         fight: &FightState,
         teams: &[u8; MAX_SLOTS],
         count: usize,
+        cover: &[CoverBox],
     ) -> Self {
         let blank = FoeView::default();
         let mut views = [MeleeView::EMPTY; MAX_SLOTS];
@@ -241,7 +284,7 @@ impl Plan {
             roster[living] = FighterId(u8::try_from(slot).unwrap_or(u8::MAX));
             living += 1;
             let mut found = [blank; MAX_SLOTS];
-            let seen = sightings_pairwise(states, fight, teams, count, slot, &mut found);
+            let seen = sightings_pairwise(states, fight, teams, count, slot, cover, &mut found);
             let stamina = me.stamina.saturating_mul(STAMINA_TO_PERMILLE);
             views[slot] = MeleeView::nearest(me.hp_permille, stamina, &found[..seen]);
             if let Some(nearest) = views[slot].foes().first() {
@@ -287,6 +330,7 @@ fn sightings_pairwise(
     teams: &[u8; MAX_SLOTS],
     count: usize,
     slot: usize,
+    cover: &[CoverBox],
     out: &mut [FoeView; MAX_SLOTS],
 ) -> usize {
     let mine = match_wire::pos_mm(states[slot].pos);
@@ -294,6 +338,14 @@ fn sightings_pairwise(
     for other in 0..count {
         let fighter = &fight.fighters[other];
         if other == slot || teams[other] == teams[slot] || fighter.hp_permille == 0 {
+            continue;
+        }
+        let theirs = match_wire::pos_mm(states[other].pos);
+        if cover
+            .iter()
+            .any(|box_| box_.blocks_segment([mine[0], mine[2]], [theirs[0], theirs[2]]))
+        {
+            // An obstacle stands between them: the foe is behind cover.
             continue;
         }
         let (phase, frames) = strike_phase(fighter);
@@ -312,6 +364,7 @@ fn sightings_pairwise(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::{MatchWorld, Obstacle};
     use crate::{ArenaConfig, ArenaRules, FightEvent, FighterTape, Sim};
     use engine_combat::tables::TABLES_VERSION_V2;
 
@@ -339,9 +392,20 @@ mod tests {
         oracle.pairwise_plan = true;
         let mut events = 0usize;
         while shipped.tick < config.ticks {
-            let built = Plan::build(&shipped.states, &shipped.fight, &shipped.rules.teams, 8);
-            let pairwise =
-                Plan::build_pairwise(&shipped.states, &shipped.fight, &shipped.rules.teams, 8);
+            let built = Plan::build(
+                &shipped.states,
+                &shipped.fight,
+                &shipped.rules.teams,
+                8,
+                &[],
+            );
+            let pairwise = Plan::build_pairwise(
+                &shipped.states,
+                &shipped.fight,
+                &shipped.rules.teams,
+                8,
+                &[],
+            );
             assert_eq!(
                 (built.views, built.targets),
                 (pairwise.views, pairwise.targets),
@@ -411,7 +475,7 @@ mod tests {
         for _ in 0..SAMPLES {
             let begin = std::time::Instant::now();
             for _ in 0..BATCH {
-                let plan = Plan::build(&states, &fight, &teams, count);
+                let plan = Plan::build(&states, &fight, &teams, count, &[]);
                 for slot in 0..count {
                     std::hint::black_box(plan.aim(percept, slot, &states, &fight));
                 }
@@ -419,7 +483,7 @@ mod tests {
             new_us.push(begin.elapsed().as_secs_f64() * 1.0e6 / batch);
             let begin = std::time::Instant::now();
             for _ in 0..BATCH {
-                let plan = Plan::build_pairwise(&states, &fight, &teams, count);
+                let plan = Plan::build_pairwise(&states, &fight, &teams, count, &[]);
                 for slot in 0..count {
                     std::hint::black_box(plan.aim(percept, slot, &states, &fight));
                 }
@@ -502,7 +566,7 @@ mod tests {
         // Four attackers on team 0 ring one target (slot 4) on team 1.
         let at = [[2.0, 0.0], [0.0, 3.0], [-4.0, 0.0], [0.0, -5.0], [0.0, 0.0]];
         let fight = FightState::new(5).expect("fight");
-        let plan = Plan::build(&states(&at), &fight, &teams(&[0, 0, 0, 0, 1]), 5);
+        let plan = Plan::build(&states(&at), &fight, &teams(&[0, 0, 0, 0, 1]), 5, &[]);
         let pressing: Vec<bool> = plan.views[..4].iter().map(|v| v.engage()).collect();
         assert_eq!(
             pressing,
@@ -523,7 +587,7 @@ mod tests {
         // Attackers 0..=2 are all nearest to foe 3; foe 4 stands farther off.
         let at = [[1.0, 0.0], [0.0, 1.5], [-2.0, 0.0], [0.0, 0.0], [9.0, 9.0]];
         let fight = FightState::new(5).expect("fight");
-        let plan = Plan::build(&states(&at), &fight, &teams(&[0, 0, 0, 1, 1]), 5);
+        let plan = Plan::build(&states(&at), &fight, &teams(&[0, 0, 0, 1, 1]), 5, &[]);
         assert_eq!(plan.targets[0], 3);
         assert_eq!(plan.targets[1], 3);
         assert_eq!(plan.targets[2], 4, "the third attacker takes the free foe");
@@ -535,7 +599,7 @@ mod tests {
     fn melee_percept_plan_lists_the_nearest_three_foes_in_order() {
         let at = [[0.0, 0.0], [7.0, 0.0], [3.0, 0.0], [5.0, 0.0], [1.0, 0.0]];
         let fight = FightState::new(5).expect("fight");
-        let plan = Plan::build(&states(&at), &fight, &teams(&[0, 1, 2, 3, 4]), 5);
+        let plan = Plan::build(&states(&at), &fight, &teams(&[0, 1, 2, 3, 4]), 5, &[]);
         let listed: Vec<u8> = plan.views[0].foes().iter().map(|foe| foe.slot).collect();
         assert_eq!(
             listed,
@@ -550,11 +614,54 @@ mod tests {
         let at = [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]];
         let mut fight = FightState::new(4).expect("fight");
         fight.fighters[2].hp_permille = 0;
-        let plan = Plan::build(&states(&at), &fight, &teams(&[0, 0, 1, 1]), 4);
+        let plan = Plan::build(&states(&at), &fight, &teams(&[0, 0, 1, 1]), 4, &[]);
         let listed: Vec<u8> = plan.views[0].foes().iter().map(|foe| foe.slot).collect();
         assert_eq!(listed, vec![3], "slot 1 is a teammate and slot 2 is down");
         assert!(!plan.views[2].is_live(), "a fallen fighter plans nothing");
         assert_eq!(plan.targets[2], usize::MAX);
+    }
+
+    /// The cover test: a foe 3 m behind the shipped `crate_a` box never
+    /// enters the observer's view, while a foe 6 m away in the open does.
+    /// The crate is the kit box: center [-5, -5] m, half [0.5, 0.5] m.
+    #[test]
+    fn a_foe_behind_the_crate_stays_out_of_the_view() {
+        let world =
+            MatchWorld::try_new(vec![Obstacle::aligned([-5.0, -5.0], [0.5, 0.5])]).expect("world");
+        // Slot 0 watches east from in front of the crate: slot 1 sits 3 m
+        // behind the crate's far face, slot 2 stands 6 m away in the open.
+        let at = [[-8.0, -5.0], [-1.5, -5.0], [-8.0, 1.0]];
+        let fight = FightState::new(3).expect("fight");
+        let pose = states(&at);
+        let roster = teams(&[0, 1, 2]);
+        let open = Plan::build(&pose, &fight, &roster, 3, &[]);
+        assert_eq!(
+            open.views[0]
+                .foes()
+                .iter()
+                .map(|foe| foe.slot)
+                .collect::<Vec<u8>>(),
+            vec![2, 1],
+            "without cover both foes are seen, the nearer first"
+        );
+        let covered = Plan::build(&pose, &fight, &roster, 3, world.cover_boxes());
+        let listed: Vec<u8> = covered.views[0].foes().iter().map(|foe| foe.slot).collect();
+        assert_eq!(listed, vec![2], "the foe behind the crate is absent");
+        assert_eq!(
+            covered.views[0].foes()[0].dist_cm,
+            600,
+            "the open foe is 6 m away"
+        );
+        assert_eq!(covered.targets[0], 2, "and it is the one fought");
+        assert_eq!(
+            covered.views[1]
+                .foes()
+                .iter()
+                .map(|foe| foe.slot)
+                .collect::<Vec<u8>>(),
+            vec![2],
+            "the crate hides the observer from the hidden foe too"
+        );
     }
 
     #[test]
@@ -564,7 +671,7 @@ mod tests {
         fight.fighters[2].is_attacking = true;
         fight.fighters[2].attack_age = 2;
         let pose = states(&at);
-        let plan = Plan::build(&pose, &fight, &teams(&[0, 1, 2]), 3);
+        let plan = Plan::build(&pose, &fight, &teams(&[0, 1, 2]), 3, &[]);
         let base = Percept::new(pose[0].pos, 0.0, pose[1].pos, false, 4.0, 9);
         let aimed = plan.aim(base, 0, &pose, &fight);
         assert_eq!(aimed.foe_pos, pose[2].pos, "faces the nearer foe");

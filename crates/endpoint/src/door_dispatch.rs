@@ -158,6 +158,64 @@ impl McpServer {
         }
     }
 
+    /// Audited read dispatch: the same policy and payload gates as
+    /// [`Self::dispatch_screened`], then the op runs under a **shared** lock,
+    /// so read-only calls overlap instead of queueing behind each other. The
+    /// one audit record is sealed after the shared span, under the exclusive
+    /// lock for its two words only. Writes never take this path: they hold the
+    /// exclusive lock for their whole span, so a read and a write cannot
+    /// interleave.
+    pub(crate) fn dispatch_read<A: rmcp::serde::Serialize, R>(
+        &self,
+        tool: &'static str,
+        args: &A,
+        op: impl FnOnce(&ServerState) -> Result<R, McpToolError>,
+    ) -> Result<R, McpToolError> {
+        match untrusted_text(tool, args) {
+            Ok(payload) => self.dispatch_read_with_payload(tool, &payload, op),
+            Err(refusal) => Err(self.seal_refusal(tool, refusal)),
+        }
+    }
+
+    /// [`Self::dispatch_read`] over already-rendered untrusted text: the same
+    /// gates as [`Self::dispatch_with_payload`], then the shared run.
+    pub(crate) fn dispatch_read_with_payload<R>(
+        &self,
+        tool: &str,
+        payload: &str,
+        op: impl FnOnce(&ServerState) -> Result<R, McpToolError>,
+    ) -> Result<R, McpToolError> {
+        if let Some(refusal) = refuse_tool_call_with_policy(tool, &door_policy()) {
+            return Err(self.seal_refusal(tool, refusal));
+        }
+        self.screen_payload(tool, payload)?;
+        if payload.contains("\"actions\"") {
+            if let Err(refusal) = super::packs::grammar::check_verbs(payload) {
+                return Err(self.seal_refusal(tool, refusal));
+            }
+        }
+        let (result, revision, session) = {
+            let state = self.lock_read()?;
+            #[cfg(test)]
+            if let Some(gate) = &self.read_gate {
+                gate.pass();
+            }
+            let revision = state.doc.revision;
+            let session = state.session;
+            (op(&state), revision, session)
+        };
+        let mut state = self.lock()?;
+        let (outcome, detail) = match &result {
+            Ok(_) => (AuditOutcome::Ok, revision),
+            Err(error) => {
+                note_refusal(&mut state, tool, error.code);
+                (AuditOutcome::Refused, code_hash(error.code))
+            }
+        };
+        seal_locked(&mut state, tool, session, revision, outcome, detail)?;
+        result
+    }
+
     /// Audited dispatch seam with a pre-run payload gate: the versioned
     /// scope-policy name gate first, then `sandbox::check_before_run` over the
     /// untrusted text, then the `packs::grammar` verb gate for payloads
@@ -1241,5 +1299,61 @@ mod tests {
             state.doc.revision,
         );
         gate.commit(proposal, 0, &[])
+    }
+
+    #[test]
+    fn eight_scene_reads_overlap_and_hold_a_write_out() {
+        // LG10: eight `scene.read` calls sit inside one shared span at the same
+        // time; the gate is only a way to hold them there, never a behaviour.
+        let (gate, entered, release) = super::super::mcp::ReadGate::channel();
+        let mut server = server();
+        server.set_read_gate(gate);
+        let server = std::sync::Arc::new(server);
+        let args = super::super::mcp::SceneReadArgs {
+            limit: None,
+            cursor: None,
+        };
+        let mut readers = Vec::new();
+        for _ in 0..8 {
+            let server = std::sync::Arc::clone(&server);
+            let args = args.clone();
+            readers.push(std::thread::spawn(move || {
+                server.dispatch_read(super::super::mcp::TOOL_SCENE_READ, &args, |state| {
+                    state.scene_read(&args)
+                })
+            }));
+        }
+        for _ in 0..8 {
+            entered
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("all eight reads sit inside their shared span at once");
+        }
+        // A write cannot interleave: it waits for every reader to leave.
+        let (wrote, write_done) = std::sync::mpsc::channel();
+        {
+            let server = std::sync::Arc::clone(&server);
+            std::thread::spawn(move || {
+                let _guard = server.lock();
+                wrote.send(()).ok();
+            });
+        }
+        // Generous: taking the lock is immediate, so a late send means the
+        // write really did enter while the readers were inside.
+        assert!(
+            write_done
+                .recv_timeout(std::time::Duration::from_millis(150))
+                .is_err(),
+            "a write must not interleave with the eight reads"
+        );
+        for _ in 0..8 {
+            release.send(()).ok();
+        }
+        write_done
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the write runs once every read left");
+        for reader in readers {
+            let outcome = reader.join().expect("reader thread");
+            assert!(outcome.is_ok(), "each read answers");
+        }
     }
 }

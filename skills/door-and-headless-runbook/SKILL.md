@@ -122,6 +122,21 @@ Ragdolled bodies are not judged for pops. No `arena view:` line at all means the
 
 `tools/product-check.mjs` reads these lines (`parseView`, `parseReceipt`) against `tools/product-bar.json`; run it only with `--no-build` (it writes its report and captures, nothing else). `node --test tools/product-check.test.mjs` shows the parse rules. Report: the command, the exit code, the line you read (quoted), and the PNG you opened.
 
+## Night GPU runs
+
+A GPU run left alone overnight can strand the external display. The panel on the
+NVIDIA output goes `Off Line` after the next resume and the monitor shows its
+no-signal snow while the Intel panel comes back; no TDR is logged, so the Event
+log looks clean and the topology switch does nothing. Seen 2026-10-24: a GPU
+report written 06:53, the monitor re-arrived 06:57, firmware S3 resume 06:59,
+second screen `Off Line` from then on (`Win32_DesktopMonitor` availability 8).
+
+Recover in this order: `Win+Ctrl+Shift+B`, then `Win+P` -> Extend; reseat the
+HDMI at the laptop; power-cycle the monitor and press its Source button; reboot
+if the output stays dark. Before a long GPU run: keep the lid open on AC, set
+the external display to never sleep, and prefer `--headless` for any row that
+does not need a window.
+
 ## Checks before you report
 - A run line that names a file: check the file exists first (`Test-Path <path>`).
 - Report the command, the exit code, and the output path. Never report a PNG you did not open.

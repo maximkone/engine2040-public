@@ -898,12 +898,12 @@ mod tests {
             cfg.chain.exposure.exposure_ev
         );
         let expected = [-0.025f32, 0.0, 0.035];
-        for channel in 0..3 {
+        for (channel, want) in expected.iter().enumerate() {
             assert!(
-                (cfg.chain.grade.lift[channel] - expected[channel]).abs() <= 1e-6,
+                (cfg.chain.grade.lift[channel] - want).abs() <= 1e-6,
                 "grade lift {channel} is {}, not {}",
                 cfg.chain.grade.lift[channel],
-                expected[channel]
+                want
             );
         }
         assert!(

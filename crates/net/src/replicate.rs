@@ -1,22 +1,22 @@
 //! replicate: server-authoritative component replication (2-64 entities).
 //!
 //! Owner: `engine-net`. Consumer: the LAN session path: the server mirrors
-//! its authoritative fighters into the [`ReplicationServer`] world each tick
-//! ([`publish_server_positions`]), the client applies the decoded messages
-//! into its [`ReplicationClient`] mirror, and both ends compare one
+//! its authoritative fighters into the [`ReplicationServer`](crate::replicate::ReplicationServer) world each tick
+//! ([`publish_server_positions`](crate::replicate::publish_server_positions)), the client applies the decoded messages
+//! into its [`ReplicationClient`](crate::replicate::ReplicationClient) mirror, and both ends compare one
 //! canonical world hash.
 //!
 //! Wire: the messages ride the existing LAN snapshot path
-//! ([`encode_snapshot_packet`] and [`decode_snapshot_packet`]): one
+//! ([`encode_snapshot_packet`](crate::replicate::encode_snapshot_packet) and [`decode_snapshot_packet`](crate::replicate::decode_snapshot_packet)): one
 //! datagram, one session version byte, and the replicate payload keeps its
-//! own version byte ([`REPLICATE_VERSION`]) inside. A foreign replicate
+//! own version byte ([`REPLICATE_VERSION`](crate::replicate::REPLICATE_VERSION)) inside. A foreign replicate
 //! version refuses loudly before any other parsing.
 //!
 //! Units: entity ids (`u32`), ticks (`u32`), mm/yaw-ddeg ints. Ground
 //! plane: the replicate transform carries the arena's x axis in `x_mm` and
 //! the arena's z axis in `y_mm`; the height axis is not replicated.
 //! Determinism: integer-only math, `BTreeMap` order, FNV hashes; no float,
-//! no wall clock, no `HashMap` in hashed state. Errors: [`ReplicateError`]
+//! no wall clock, no `HashMap` in hashed state. Errors: [`ReplicateError`](crate::replicate::ReplicateError)
 //! refuses loudly and changes nothing.
 //!
 //! Idea-only PORT(cBournhonesque/lightyear@main:crates/replication): the
@@ -25,8 +25,8 @@
 //! clean-room, no vendor bytes. License MIT OR Apache-2.0 (repo API spdx
 //! Apache-2.0; LICENSE-MIT + LICENSE-APACHE at root on main, verified
 //! 2026-09-26 before code).
-//! Budget: one message per client per tick, at most [`MAX_MESSAGE_BYTES`] B;
-//! history holds [`MAX_HISTORY`] snapshots; tombstones derive from diffs.
+//! Budget: one message per client per tick, at most [`MAX_MESSAGE_BYTES`](crate::replicate::MAX_MESSAGE_BYTES) B;
+//! history holds [`MAX_HISTORY`](crate::replicate::MAX_HISTORY) snapshots; tombstones derive from diffs.
 
 use std::collections::{BTreeMap, VecDeque};
 

@@ -6,7 +6,7 @@
 //! through the break-tool verbs and prove them with [`AnatomyTable::digest`]. Data
 //! owner: `engine-combat`. Units: toughness and guards in Q16 fixed point
 //! (`1.0 == 65536`), joints as [`JointId`] slots, armor as bit flags.
-//! Determinism scope: [`validate`] and [`AnatomyTable::digest`] are pure over
+//! Determinism scope: [`validate`](crate::anatomy::validate) and [`AnatomyTable::digest`] are pure over
 //! the table bytes in joint-id order; the same table gives the same digest on
 //! every PC, and validation reports the first failure in joint-id order.
 //! Errors: [`AnatomyError`] for bad versions, parents, tissue and coverage;

@@ -3,13 +3,13 @@
 //! Purpose: the internet leg of the two-machine proof, run on the real ON1
 //! and ON2 parts. Both clients join by invite code, the hole-punch machine
 //! picks direct or relay inside [`PUNCH_TIMEOUT_TICKS`], and the bout of
-//! [`crate::played`] then runs over a [`Wire`] whose lanes are QUIC datagrams
+//! [`crate::played`] then runs over a [`Wire`](crate::link::Wire) whose lanes are QUIC datagrams
 //! (inputs, state windows) and QUIC streams (join, catch-up). On the relay
 //! path every frame crosses [`RelayServer`] as a [`RelayMsg::Forward`], two
 //! hops each way. Owner: net lane. Units: ticks at 60 Hz, bytes.
 //! Determinism: [`SimQuicFabric`] is seeded and tick-ordered; the same seed
-//! gives the same loss, the same order and the same [`BoutReport::digest`].
-//! Errors: [`BoutError`]. Only the real-NAT hole punch needs a second
+//! gives the same loss, the same order and the same [`BoutReport::digest`](crate::played::BoutReport::digest).
+//! Errors: [`BoutError`](crate::played::BoutError). Only the real-NAT hole punch needs a second
 //! network; everything else here runs on one machine.
 
 use std::collections::{BTreeMap, VecDeque};
