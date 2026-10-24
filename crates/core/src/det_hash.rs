@@ -217,6 +217,36 @@ mod tests {
         );
     }
 
+    /// The `Hasher` trait's own writes fold exactly like the typed ones (AF5).
+    #[test]
+    fn the_hasher_trait_writes_fold_as_the_typed_ones() {
+        let mut wide = DetHasher::new();
+        std::hash::Hasher::write(&mut wide, b"foobar");
+        assert_eq!(
+            wide.finish(),
+            0xffb9_4d78_33da_1dab,
+            "write folds the bytes, not nothing"
+        );
+        let mut byte = DetHasher::new();
+        byte.write_u8(1);
+        assert_eq!(byte.digest(), hash_id(1), "write_u8 is one word");
+        let mut half = DetHasher::new();
+        half.write_u16(1);
+        assert_eq!(half.digest(), hash_id(1), "write_u16 is one word");
+        let mut low = DetHasher::new();
+        low.write_u128(1);
+        let mut low_words = DetHasher::new();
+        low_words.write_word(1);
+        low_words.write_word(0);
+        assert_eq!(low.digest(), low_words.digest(), "the low half comes first");
+        let mut high = DetHasher::new();
+        high.write_u128(u128::from(u64::MAX) + 1);
+        let mut high_words = DetHasher::new();
+        high_words.write_word(0);
+        high_words.write_word(1);
+        assert_eq!(high.digest(), high_words.digest(), "the high half comes second");
+    }
+
     /// The byte tiers: 8-byte words, then 4, 2 and 1, all little-endian.
     #[test]
     fn byte_tiers_match_the_word_path() {
