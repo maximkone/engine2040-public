@@ -68,6 +68,9 @@ use crate::mcp::{McpServer, McpToolError, ServerState};
 use crate::play::play_session::{encode_png_rgb, PlaySlot};
 use crate::tool_capabilities::{CapabilityCard, CheckKind};
 
+/// The art lane: contact sheet, look proposal, ignored-region compare.
+pub mod art;
+
 /// Pack name.
 pub const PACK: &str = "view";
 
@@ -140,6 +143,16 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<ViewCompareTool>(
         TOOL_VIEW_COMPARE,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<art::ViewSheetTool>(
+        art::TOOL_VIEW_SHEET,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<art::LookProposeTool>(
+        art::TOOL_LOOK_PROPOSE,
         PACK,
         CapabilityCard::Observe,
     )?);
@@ -419,6 +432,7 @@ pub struct ViewCompareArgs {
     pub right: String,
     pub diff: Option<String>,
     pub region: Option<CompareRegion>,
+    pub ignore: Option<Vec<CompareRegion>>,
 }
 
 /// Machine score over the resolved region. All scores are fixed point; 10000
@@ -444,6 +458,7 @@ pub struct ViewCompareOutput {
     pub hist_emd_x10000: u32,
     pub ssimulacra2_x10000: Option<u32>,
     pub diff_png: Option<String>,
+    pub score_x10000: Option<u32>,
     pub region: String,
     pub rect: Option<[u32; 4]>,
 }
@@ -566,6 +581,7 @@ fn compare_frames_in(
         hist_emd_x10000: compared.hist_emd_x10000,
         ssimulacra2_x10000: second,
         diff_png: None,
+        score_x10000: None,
         region: if region.is_full() { "full" } else { "rect" }.to_owned(),
         rect: region.rect().map(|rect| [rect.x, rect.y, rect.w, rect.h]),
     })
@@ -627,6 +643,9 @@ fn run_view_compare(
     let right = read_frame("right", root, &args.right)?;
     let (region, scoring) = resolve_region(args.region, &left)?;
     let mut out = compare_frames_in(&left, &right, region, scoring)?;
+    if let Some(ignore) = &args.ignore {
+        out.score_x10000 = Some(art::compare_ignoring(&left, &right, args.region, ignore)?);
+    }
     if let Some(diff) = &args.diff {
         write_diff_png(root, diff, &left, &right)?;
         out.diff_png = Some(diff.clone());
@@ -2186,6 +2205,7 @@ mod tests {
         let plain = run_view_compare(
             &root,
             &ViewCompareArgs {
+                ignore: None,
                 left: "both.png".to_owned(),
                 right: "both.png".to_owned(),
                 diff: None,
@@ -2201,6 +2221,7 @@ mod tests {
         let out = run_view_compare(
             &root,
             &ViewCompareArgs {
+                ignore: None,
                 left: "both.png".to_owned(),
                 right: "both.png".to_owned(),
                 diff: Some("reports/zero.png".to_owned()),
@@ -2234,6 +2255,7 @@ mod tests {
         let error = run_view_compare(
             &root,
             &ViewCompareArgs {
+                ignore: None,
                 left: "small.png".to_owned(),
                 right: "large.png".to_owned(),
                 diff: Some("reports/none.png".to_owned()),
@@ -2278,6 +2300,7 @@ mod tests {
             let error = run_view_compare(
                 &root,
                 &ViewCompareArgs {
+                    ignore: None,
                     left: "a.png".to_owned(),
                     right: "a.png".to_owned(),
                     diff: Some(bad.to_owned()),
@@ -2307,6 +2330,7 @@ mod tests {
         let error = run_view_compare(
             &root,
             &ViewCompareArgs {
+                ignore: None,
                 left: "a.png".to_owned(),
                 right: "a.png".to_owned(),
                 diff: Some("blocked/diff.png".to_owned()),

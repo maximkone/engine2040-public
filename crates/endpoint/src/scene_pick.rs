@@ -54,6 +54,8 @@ pub struct ScenePickArgs {
     pub object: Option<String>,
     /// Question 3: cell edge in pixels; answers the frame as rectangles of objects.
     pub cell: Option<u32>,
+    /// Question 4: a mark id from `view.observe` (a body slot) to find in the frame.
+    pub mark: Option<u64>,
 }
 
 /// Answer of `scene.pick`.
@@ -150,14 +152,60 @@ fn check_cell(size: [u32; 2], cell: u32) -> Result<(), McpToolError> {
     Ok(())
 }
 
+/// The object question's answer: where one staged object projects, with the
+/// refusal a non-finite pose gets.
+fn project_output(
+    camera: &Camera,
+    actor: &Actor,
+    object: &str,
+) -> Result<ScenePickOutput, McpToolError> {
+    let center = [actor.x, actor.y, actor.z].map(|m| f64::from(m) * 100.0);
+    if !center.iter().all(|lane| lane.is_finite()) {
+        return Err(McpToolError::new(
+            "no_pose",
+            format!("{object} has no finite position; place it first with scene.place"),
+        ));
+    }
+    let found = camera.project_px(center);
+    Ok(ScenePickOutput {
+        kind: "object".to_owned(),
+        at: found.map(|(pixel, _)| pixel),
+        depth_cm: found.map(|(_, depth)| depth),
+        in_frame: found.map(|([x, y], _)| {
+            let inside = |at: i32, side: u32| at >= 0 && i64::from(at) < i64::from(side);
+            inside(x, camera.size[0]) && inside(y, camera.size[1])
+        }),
+        ..Default::default()
+    })
+}
+
+/// The staged object a mark names: a body slot from `view.observe`.
+fn marked_id(mark: u64, actors: &[Actor]) -> Result<u32, McpToolError> {
+    let count = actors.len();
+    usize::try_from(mark)
+        .ok()
+        .filter(|at| *at < count)
+        .and_then(|at| u32::try_from(at).ok())
+        .ok_or_else(|| {
+            McpToolError::new(
+                "unknown_actor",
+                format!(
+                    "mark {mark} names no drawn body; legal marks are 0..={} for the {count} \
+                     staged objects: re-run view.observe and pick one of its marks",
+                    count.saturating_sub(1)
+                ),
+            )
+        })
+}
+
 impl ServerState {
     /// Answer one `scene.pick` call over the staged document. Read-only.
     pub fn scene_pick(&self, args: &ScenePickArgs) -> Result<ScenePickOutput, McpToolError> {
         let camera = camera_of(args)?;
         let snap = snapshot(&self.doc);
         let label = |id: u32| label_of(id, &snap.actors, &snap.ids);
-        let mut out = match (args.pixel, &args.object, args.cell) {
-            (Some([x, y]), None, None) => {
+        let mut out = match (args.pixel, &args.object, args.cell, args.mark) {
+            (Some([x, y]), None, None, None) => {
                 if x >= camera.size[0] || y >= camera.size[1] {
                     return Err(McpToolError::new(
                         "bad_pixel",
@@ -180,30 +228,20 @@ impl ServerState {
                     },
                 }
             }
-            (None, Some(object), None) => {
+            (None, Some(object), None, None) => {
                 let id = object_id(object, &snap.actors, &snap.ids)?;
                 let actor = &snap.actors[usize::try_from(id).unwrap_or(usize::MAX)];
-                let center = [actor.x, actor.y, actor.z].map(|m| f64::from(m) * 100.0);
-                if !center.iter().all(|lane| lane.is_finite()) {
-                    return Err(McpToolError::new(
-                        "no_pose",
-                        format!("{object} has no finite position; place it first with scene.place"),
-                    ));
-                }
-                let found = camera.project_px(center);
-                ScenePickOutput {
-                    kind: "object".to_owned(),
-                    at: found.map(|(pixel, _)| pixel),
-                    depth_cm: found.map(|(_, depth)| depth),
-                    in_frame: found.map(|([x, y], _)| {
-                        let inside =
-                            |at: i32, side: u32| at >= 0 && i64::from(at) < i64::from(side);
-                        inside(x, camera.size[0]) && inside(y, camera.size[1])
-                    }),
-                    ..Default::default()
-                }
+                project_output(&camera, actor, object)?
             }
-            (None, None, Some(cell)) => {
+            (None, None, None, Some(mark)) => {
+                let id = marked_id(mark, &snap.actors)?;
+                let actor = &snap.actors[usize::try_from(id).unwrap_or(usize::MAX)];
+                let mut out = project_output(&camera, actor, &label(id))?;
+                out.kind = "mark".to_owned();
+                out.entity = Some(label(id));
+                out
+            }
+            (None, None, Some(cell), None) => {
                 check_cell(camera.size, cell)?;
                 let manifest =
                     PickManifest::build(&camera, &snap.actors, cell).ok_or_else(|| {
@@ -225,8 +263,9 @@ impl ServerState {
             _ => {
                 return Err(McpToolError::new(
                     "bad_pick",
-                    "send exactly one of pixel, object or cell; pixel reads one point, \
-                     object finds a label in the frame, cell lists the frame as regions"
+                    "send exactly one of pixel, object, cell or mark; pixel reads one point, \
+                     object finds a label in the frame, cell lists the frame as regions, mark \
+                     finds one view.observe mark"
                         .to_owned(),
                 ))
             }

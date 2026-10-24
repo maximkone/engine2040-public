@@ -375,6 +375,7 @@ impl GhostingScene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::post_jitter_motion::jitter_offset;
     use crate::temporal::{HistoryDesc, TemporalRegistry};
 
     /// Frame width of the registration scene.
@@ -734,6 +735,352 @@ mod tests {
         assert_eq!(
             out, current,
             "no old-size content on the resized first frame"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // hunt2 dB budget: price every TAA loss in dB against an exact reference
+    // instead of reporting one end-to-end number. The steal is the method of
+    // `RARS-oss/decibels` (MIT); the numbers printed below are measured here,
+    // on this fixture, with this resolve. Measurement only: `taa_resolve` and
+    // `taa_resolve_jittered` are untouched and every variant runs them.
+    // -----------------------------------------------------------------------
+
+    /// Frame width of the dB budget fixture.
+    const BUDGET_W: u32 = 64;
+    /// Frame height of the dB budget fixture.
+    const BUDGET_H: u32 = 64;
+    /// Frames the budget loop runs; a 0.9 history weight converges long
+    /// before this (0.9^48 is about 0.6 % of the first sample).
+    const BUDGET_FRAMES: u64 = 48;
+    /// History weight: the production 0.9 (a 0.1 current blend), an
+    /// effective window of about ten frames.
+    const BUDGET_WINDOW_WEIGHT: f32 = DEFAULT_HISTORY_BLEND;
+    /// Sub-samples per axis in the exact box-filter reference.
+    const BUDGET_SUPERSAMPLE: u32 = 16;
+    /// Clamp box scale in the bugged baseline: half of every box is thrown
+    /// away, the shape of a too-tight history rejection threshold.
+    const BUG_CLAMP_SCALE: f32 = 0.5;
+
+    /// The analytic scene: two soft sub-pixel edges at non-integer positions
+    /// over a flat base, plus one fine wiggle. A one-sample-per-pixel raster
+    /// lands its edges at the wrong sub-pixel place, which is the aliasing
+    /// TAA averages away; the box integral over the footprint is the coverage
+    /// a correct chain reaches.
+    fn budget_scene(x: f32, y: f32) -> [f32; 3] {
+        // A linear ramp 1.5 px wide either side of the edge, the shape of a
+        // resampled edge rather than a hard step (a hard step at a half-pixel
+        // position would swamp every number below).
+        let soft = |d: f32| ((d + 1.5) / 3.0).clamp(0.0, 1.0);
+        let along_a = x - 0.30 * y - 21.3;
+        let along_b = y - 0.20 * x - 17.9;
+        let bands = 0.30 + 0.30 * soft(along_a) + 0.22 * soft(along_b);
+        let wiggle = 0.05 * (std::f32::consts::TAU * (x + 2.0 * y) / 5.1).sin();
+        let v = (bands + wiggle).clamp(0.0, 1.0);
+        [v, v * 0.90, v * 0.80]
+    }
+
+    /// One raster of the scene, point-sampled at the jittered pixel centers.
+    /// The jitter lives in the raster and nowhere else: the resolve must
+    /// compare pixel-grid to pixel-grid, which is what lets the history
+    /// accumulate the sub-pixel diversity the jitter created.
+    fn budget_raster(jitter: [f32; 2]) -> Vec<[f32; 3]> {
+        let mut out = Vec::with_capacity((BUDGET_W * BUDGET_H) as usize);
+        for y in 0..BUDGET_H {
+            for x in 0..BUDGET_W {
+                out.push(budget_scene(x as f32 + jitter[0], y as f32 + jitter[1]));
+            }
+        }
+        out
+    }
+
+    /// The exact reference: the box-filter integral over each pixel
+    /// footprint, by 16x16 stratified supersampling. TAA at convergence
+    /// averages the jittered point samples over the same footprint, so this
+    /// is the image the chain is trying to reach.
+    fn budget_reference() -> Vec<[f32; 3]> {
+        let n = BUDGET_SUPERSAMPLE;
+        let mut out = Vec::with_capacity((BUDGET_W * BUDGET_H) as usize);
+        for y in 0..BUDGET_H {
+            for x in 0..BUDGET_W {
+                let mut acc = [0.0f64; 3];
+                for sy in 0..n {
+                    for sx in 0..n {
+                        let fx = x as f32 - 0.5 + (sx as f32 + 0.5) / n as f32;
+                        let fy = y as f32 - 0.5 + (sy as f32 + 0.5) / n as f32;
+                        let p = budget_scene(fx, fy);
+                        for c in 0..3 {
+                            acc[c] += f64::from(p[c]);
+                        }
+                    }
+                }
+                let count = f64::from(n * n);
+                out.push([
+                    (acc[0] / count) as f32,
+                    (acc[1] / count) as f32,
+                    (acc[2] / count) as f32,
+                ]);
+            }
+        }
+        out
+    }
+
+    /// PSNR in dB against `reference`, peak 1.0 (the scene's white point),
+    /// averaged over every channel sample.
+    fn psnr_db(frame: &[[f32; 3]], reference: &[[f32; 3]]) -> f64 {
+        let mut sum = 0.0f64;
+        let mut count = 0u64;
+        for (a, b) in frame.iter().zip(reference) {
+            for c in 0..3 {
+                let d = f64::from(a[c]) - f64::from(b[c]);
+                sum += d * d;
+                count += 1;
+            }
+        }
+        let mse = sum / count as f64;
+        10.0 * (1.0 / mse).log10()
+    }
+
+    /// One budget frame: the production sampler and blend, with the clamp box
+    /// scaled by `scale` (1.0 is the production box; 0.5 throws away half of
+    /// every box, the shape of a too-tight rejection scale). The production
+    /// resolve runs with its clamp off, which hands back
+    /// `c + (s - c) * history_weight` for its bilinear sample `s`; recovering
+    /// `s` is exact up to rounding, so only the rejection threshold differs
+    /// from production.
+    fn budget_step(
+        current: &[[f32; 3]],
+        history: &[[f32; 3]],
+        motion: &MotionField,
+        jitter_px: [f32; 2],
+        history_weight: f32,
+        scale: f32,
+    ) -> Vec<[f32; 3]> {
+        let params = TaaParams {
+            history_blend: history_weight,
+            use_clamp: false,
+            ..TaaParams::default()
+        };
+        let raw = taa_resolve_jittered(
+            current, history, motion, BUDGET_W, BUDGET_H, &params, jitter_px,
+        )
+        .expect("budget resolve runs");
+        let mut out = Vec::with_capacity(raw.len());
+        for y in 0..BUDGET_H {
+            for x in 0..BUDGET_W {
+                let i = (y * BUDGET_W + x) as usize;
+                let c = current[i];
+                let sample: [f32; 3] =
+                    [0, 1, 2].map(|ci| c[ci] + (raw[i][ci] - c[ci]) / history_weight);
+                let (lo, hi) = neighborhood_minmax(current, BUDGET_W, BUDGET_H, x, y);
+                let centre = to_ycocg(c);
+                let scaled = |bound: [f32; 3]| {
+                    [0, 1, 2].map(|ci| centre[ci] + (bound[ci] - centre[ci]) * scale)
+                };
+                let kept = clamp_history(sample, scaled(lo), scaled(hi));
+                out.push([0, 1, 2].map(|ci| c[ci] + (kept[ci] - c[ci]) * history_weight));
+            }
+        }
+        out
+    }
+
+    /// The three defects the budget baseline carries, one per cause the row
+    /// names.
+    #[derive(Clone, Copy)]
+    struct BudgetDefects {
+        /// Sample the history half a texel right and down: the classic
+        /// pixel-center convention bug (the resolve thinks pixel centres sit
+        /// at `x + 0.5`, so the history lands half a pixel off).
+        half_texel: bool,
+        /// Clamp box scale; 1.0 is the production box.
+        clamp_scale: f32,
+        /// Feed the previous *raster* to the resolve (one frame of history)
+        /// instead of the previous resolved frame (recursive history).
+        non_recursive: bool,
+    }
+
+    /// One full budget run: 48 jittered frames of a static camera, returning
+    /// the last resolved frame. History and current are both pixel-grid
+    /// aligned, so a correct resolve is handed zero sample offset; the jitter
+    /// only reaches it through the content of each raster.
+    fn budget_run(d: BudgetDefects) -> Vec<[f32; 3]> {
+        let offset = if d.half_texel { [0.5, 0.5] } else { [0.0, 0.0] };
+        let motion = MotionField::zero(BUDGET_W, BUDGET_H).expect("zero motion builds");
+        let mut last = Vec::new();
+        let mut history: Vec<[f32; 3]> = Vec::new();
+        for k in 0..BUDGET_FRAMES {
+            let current = budget_raster(jitter_offset(k));
+            if k == 0 {
+                // First use: no history, the resolve follows the frame.
+                last = current.clone();
+            } else {
+                last = budget_step(
+                    &current,
+                    &history,
+                    &motion,
+                    offset,
+                    BUDGET_WINDOW_WEIGHT,
+                    d.clamp_scale,
+                );
+            }
+            history = if d.non_recursive {
+                current
+            } else {
+                last.clone()
+            };
+        }
+        last
+    }
+
+    #[test]
+    fn taa_hunt2_db_budget_prices_each_cause_against_an_exact_reference() {
+        let reference = budget_reference();
+
+        // Self-check first: at scale 1.0 the harness clamp is the production
+        // clamp, so every number below is a threshold or registration delta
+        // and not a second, rewritten resolve.
+        let motion = MotionField::zero(BUDGET_W, BUDGET_H).expect("zero motion builds");
+        let current = budget_raster(jitter_offset(5));
+        let history = budget_raster(jitter_offset(4));
+        let offset = [0.0f32, 0.0];
+        let harness = budget_step(
+            &current,
+            &history,
+            &motion,
+            offset,
+            BUDGET_WINDOW_WEIGHT,
+            1.0,
+        );
+        let production = taa_resolve_jittered(
+            &current,
+            &history,
+            &motion,
+            BUDGET_W,
+            BUDGET_H,
+            &TaaParams::default(),
+            offset,
+        )
+        .expect("production resolve runs");
+        let mut worst = 0.0f32;
+        for (a, b) in harness.iter().zip(&production) {
+            for c in 0..3 {
+                worst = worst.max((a[c] - b[c]).abs());
+            }
+        }
+        assert!(
+            worst <= 1e-5,
+            "harness clamp at scale 1.0 drifts {worst} from the production \
+             resolve: it would be measuring a rewrite, not a threshold"
+        );
+
+        let baseline = BudgetDefects {
+            half_texel: true,
+            clamp_scale: BUG_CLAMP_SCALE,
+            non_recursive: true,
+        };
+        let all_fixed = BudgetDefects {
+            half_texel: false,
+            clamp_scale: 1.0,
+            non_recursive: false,
+        };
+        let base_db = psnr_db(&budget_run(baseline), &reference);
+        let all_db = psnr_db(&budget_run(all_fixed), &reference);
+        let jitter_only = psnr_db(
+            &budget_run(BudgetDefects {
+                half_texel: false,
+                ..baseline
+            }),
+            &reference,
+        );
+        let clamp_only = psnr_db(
+            &budget_run(BudgetDefects {
+                clamp_scale: 1.0,
+                ..baseline
+            }),
+            &reference,
+        );
+        let history_only = psnr_db(
+            &budget_run(BudgetDefects {
+                non_recursive: false,
+                ..baseline
+            }),
+            &reference,
+        );
+        let jitter_db = jitter_only - base_db;
+        let clamp_db = clamp_only - base_db;
+        let history_db = history_only - base_db;
+        let end_to_end_db = all_db - base_db;
+        let sum_db = jitter_db + clamp_db + history_db;
+        let raster_db = psnr_db(&budget_raster(jitter_offset(BUDGET_FRAMES - 1)), &reference);
+
+        eprintln!(
+            "hunt2 taa dB budget: {BUDGET_W}x{BUDGET_H}, {BUDGET_FRAMES} frames, \
+             history weight {BUDGET_WINDOW_WEIGHT}, exact ref \
+             {BUDGET_SUPERSAMPLE}x{BUDGET_SUPERSAMPLE} box"
+        );
+        eprintln!(
+            "  baseline (history sampled half a texel off, clamp x{BUG_CLAMP_SCALE}, \
+             non-recursive) {base_db:.2} dB"
+        );
+        eprintln!(
+            "  cause 1 jitter registration (half-texel history -> pixel grid) {jitter_db:+.2} dB \
+             -> {jitter_only:.2}"
+        );
+        eprintln!(
+            "  cause 2 depth-rejection scale (clamp x{BUG_CLAMP_SCALE} -> x1.0)  {clamp_db:+.2} dB \
+             -> {clamp_only:.2}"
+        );
+        eprintln!(
+            "  cause 3 history length (non-recursive -> recursive)          {history_db:+.2} dB \
+             -> {history_only:.2}"
+        );
+        eprintln!(
+            "  sum of causes {sum_db:+.2} dB, end to end {end_to_end_db:+.2} dB, \
+             gap {:.2} dB",
+            (sum_db - end_to_end_db).abs()
+        );
+        eprintln!(
+            "  no-TAA raster {raster_db:.2} dB, all fixed {all_db:.2} dB vs the exact reference"
+        );
+        eprintln!(
+            "  LPIPS: not measured - this repo has no LPIPS owner; PSNR only, so a \
+             rejection change that trades PSNR for structure is invisible here"
+        );
+
+        // Each cause is a real, measured magnitude on this fixture. The
+        // signs are the measurement: cause 1 and cause 3 are losses (the fix
+        // gains dB), cause 2 came out negative, so on this fixture a tighter
+        // box masks the misregistration instead of adding loss of its own.
+        assert!(
+            all_db - raster_db > 10.0,
+            "the fixture must be a real TAA win, got {:.2} dB over the raster",
+            all_db - raster_db
+        );
+        assert!(
+            jitter_db > 1.0,
+            "the half-texel history must cost measurable dB, got {jitter_db:+.2}"
+        );
+        assert!(
+            clamp_db.abs() >= 0.5,
+            "the clamp scale must move the budget by a measurable amount, \
+             got {clamp_db:+.2}"
+        );
+        assert!(
+            history_db > 0.5,
+            "one frame of history must cost dB against the recursive resolve, \
+             got {history_db:+.2}"
+        );
+        // The row's 1 dB bar, printed and not asserted: the three causes
+        // overlap on the same pixels here, so the dB sum does not close and
+        // the row records the gap. Closing it needs a converged per-cause
+        // reference (the oracle the donor's method uses), which this resolve
+        // has no jitter-aware gather to build yet.
+        let bar_met = (sum_db - end_to_end_db).abs() <= 1.0;
+        eprintln!(
+            "  additivity: sum {sum_db:+.2} vs end to end {end_to_end_db:+.2} dB, \
+             gap {:.2} dB, row bar 1.00 dB {}",
+            (sum_db - end_to_end_db).abs(),
+            if bar_met { "met" } else { "NOT met" }
         );
     }
 }

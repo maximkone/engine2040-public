@@ -1770,13 +1770,48 @@ Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this
   frame of both tests plus the cut/resize test. `--features gpu` alone does not
   compile the test harness (v1_skin and present test code want `window`); use
   `window`. Left open on purpose: the hunt2 addition above (one printed dB per
-  cause, sum within 1 dB, PSNR and LPIPS side by side) is not written — the
-  resolve has no jitter-aware history gather to price, so that is its own step;
+  cause, sum within 1 dB, PSNR and LPIPS side by side) was not written at that
+  date; it is now measured (Progress 2026-10-24 below) and its 1 dB bar fails
+  at 17.46 dB because the resolve has no jitter-aware history gather to price;
   the YCoCg clamp is no longer open (landed `ee3f74070`, test
   `taa_neighbourhood_clamp_runs_in_ycocg_at_a_saturated_edge`, 19 taa tests,
   flicker unchanged 67.1%); and the `post::GHOST_MAX_TRAIL` gate in
   `clip_hold.rs` is a luma gap (0.25
   luma), not the 3 px proof, so it does not stand in for the ghost bar.
+  Progress 2026-10-24 (hunt2 dB budget, measured): the per-cause budget is
+  written as `post::taa::tests::
+  taa_hunt2_db_budget_prices_each_cause_against_an_exact_reference`
+  (`crates/render/src/post/taa.rs`, tests only, no resolve change). Fixture:
+  64x64, 48 Halton(2,3) frames, static camera, history weight 0.9, exact
+  reference = 16x16 stratified box integral over each pixel footprint; the
+  production `taa_resolve`/`taa_resolve_jittered` runs every variant, and the
+  harness clamp at scale 1.0 is asserted to match the production resolve to
+  1e-5 so a delta is a threshold, not a rewrite. Measured, printed with
+  `--nocapture`: no-TAA raster 29.14 dB; all causes fixed 53.10 dB; baseline
+  (history sampled half a texel off, clamp x0.5, non-recursive) 30.72 dB;
+  **cause 1 jitter registration (half-texel history -> pixel grid) +4.69 dB**;
+  **cause 2 depth-rejection scale (clamp x0.5 -> x1.0) -0.99 dB** (negative:
+  the tighter box masks the misregistration here instead of adding loss of its
+  own); **cause 3 history length (non-recursive -> recursive) +1.23 dB**. The
+  three do not close: sum +4.93 dB against an end-to-end +22.39 dB, gap
+  **17.46 dB**, so the row's 1 dB bar is **NOT met** and the test prints that
+  verdict rather than asserting it. Why: the causes overlap on the same
+  pixels, and the non-recursive form changes the pipeline's shape (a 2-frame
+  average) instead of moving one parameter, so it masks the other two. dB
+  losses only compose in the small-loss regime (the donor's 0.31/1.12/1.57 dB);
+  closing 1 dB needs a per-cause converged reference (the donor's oracle
+  bound), which needs the jitter-aware history gather this resolve still lacks:
+  `taa_resolve_jittered` is handed one offset, not the frame-to-frame jitter
+  pair, so it cannot build a converged per-cause reference. LPIPS: not
+  measured - this repo has no LPIPS owner, so the report prints PSNR only and
+  says so; the donor's "PSNR under-values rejection" result stays unverified
+  here. Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib taa_
+  -- --nocapture` = 14 passed, 0 failed (the tool routed this line to this PC:
+  `aa_scale.rs` holds GPU/window code, so no runner id); the 4 taa tests in
+  `post::taa` plus 6 `aa_scale` and 4 `post` ones green; `rustfmt --edition
+  2021 --check` clean; `node tools/rust-quality.mjs --crate render` PASS 89, 0
+  ratchet regressions. Golden untouched (render is presentation). Row stays
+  open on the hunt2 bar only.
 - [ ] LF5d render: TAA slice 4, sharpen and choose — an RCAS pass after the
   resolve (Bevy `robust_contrast_adaptive_sharpening.wesl`, `render-steals.md`
   item 11), then keep TAA or EG13's MSAA by the calmer capture (sand-edge

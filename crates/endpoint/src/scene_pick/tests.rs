@@ -122,6 +122,7 @@ fn ask(server: &McpServer, camera: &ScenePickArgs, question: ScenePickArgs) -> S
         pixel: question.pixel,
         object: question.object,
         cell: question.cell,
+        mark: question.mark,
         ..camera.clone()
     };
     ScenePickTool::invoke(server, args).expect("pick serves")
@@ -213,6 +214,51 @@ fn pick_door_finds_an_object_and_the_pixel_picks_it_back() {
     };
     let out = ScenePickTool::invoke(&server, behind).expect("pick serves");
     assert_eq!((out.at, out.depth_cm, out.in_frame), (None, None, None));
+}
+
+/// A mark answers the same object its label does, and an unknown mark refuses
+/// with the legal range and one recovery.
+#[test]
+fn pick_door_mark_answers_the_object_its_label_does() {
+    let gold = gold();
+    let server = door(&gold);
+    let labels = SceneBriefTool::invoke(&server, SceneBriefArgs::default())
+        .expect("brief reads")
+        .objects;
+    for index in [1u64, 5] {
+        let label = &labels[usize::try_from(index).expect("small")];
+        let found = ask(
+            &server,
+            &gold.camera,
+            ScenePickArgs {
+                mark: Some(index),
+                ..Default::default()
+            },
+        );
+        assert_eq!(found.kind, "mark");
+        assert_eq!(found.entity.as_ref(), Some(label));
+        let by_label = ask(
+            &server,
+            &gold.camera,
+            ScenePickArgs {
+                object: Some(label.clone()),
+                ..Default::default()
+            },
+        );
+        assert_eq!((found.at, found.depth_cm), (by_label.at, by_label.depth_cm));
+    }
+    let args = ScenePickArgs {
+        mark: Some(u64::try_from(labels.len()).expect("small")),
+        ..gold.camera.clone()
+    };
+    let error = ScenePickTool::invoke(&server, args).expect_err("unknown mark");
+    assert_eq!(error.code, "unknown_actor");
+    assert!(
+        error.message.contains("legal marks are 0..="),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("view.observe"), "{}", error.message);
 }
 
 /// The bracketed id decides: a label with another object's name still finds
