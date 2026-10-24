@@ -53,6 +53,9 @@ use std::sync::OnceLock;
 use super::fighter_look_inertia::{apply_offsets, begin_switch, NO_OFFSET};
 use super::{rig_index, slot_root, Act, FighterLook, Rig, SlotAnim, MAX_LOOK_FIGHTERS, TICK_HZ};
 
+#[path = "getup_pick.rs"]
+mod getup_pick;
+
 #[path = "ragdoll_look/hit.rs"]
 mod hit;
 
@@ -94,6 +97,10 @@ const HIT_EXPLAINS_TICKS: u32 = 30;
 /// Ticks a body keeps following the sim's slide, level, after its tether ended: the sim lets
 /// the momentum drift out while the body falls and lands.
 const LAND_CARRY_TICKS: u32 = 40;
+/// How hard a towed ragdoll braces, share of the full motor gain (capped at the body's muscle):
+/// enough to keep a yanked or carried fighter's shape in flight, short of the 1.0 a fresh blow
+/// gives, so the rope's pull still swings the limbs.
+const TOW_BRACE: f32 = 0.6;
 /// A body that was towed may get up once its root is slower than this, m/s.
 const LANDED_MS: f32 = 1.2;
 
@@ -1022,6 +1029,13 @@ impl FighterLook {
         self.ragdoll.live()
     }
 
+    /// How hard the ragdoll of `slot` braces now (its motor strength: a blow or a tow raises it,
+    /// it rests at the body's tone); `None` when the slot is not a ragdoll.
+    #[must_use]
+    pub fn ragdoll_strength(&self, slot: u8) -> Option<f32> {
+        self.ragdoll.fx.as_ref()?.ragdoll_strength(slot)
+    }
+
     /// Ragdolls spawned since load.
     #[must_use]
     pub fn ragdoll_spawns(&self) -> u32 {
@@ -1053,7 +1067,8 @@ impl FighterLook {
     }
 
     /// True while `slot` lies by physics (a ragdoll) or is still rising out of one: the sand
-    /// rest then only lifts a sunk body and never pulls a flying or rising one down.
+    /// rest then only lifts a sunk body and never pulls a flying ragdoll down; a body rising on
+    /// the ground rests both ways (`pose_frame`).
     pub(super) fn ragdoll_rests(&self, slot: usize) -> bool {
         self.ragdoll.has(slot)
             || self
@@ -1185,7 +1200,7 @@ impl FighterLook {
                 continue;
             }
             self.ragdoll.pending[index] = None;
-            self.ragdoll_spawn(index, kick);
+            self.ragdoll_spawn(index, &kick);
         }
         if fresh {
             // FEEL9: standing hit reactions spawn, follow their fighter and blend back.
@@ -1251,14 +1266,14 @@ impl FighterLook {
 
     /// Hands the standing pose of `index` to the world and floors the slot: whatever the world
     /// answers, the slot lies down (on its ragdoll, or flat if it was refused).
-    fn ragdoll_spawn(&mut self, index: usize, kick: Kick) {
+    fn ragdoll_spawn(&mut self, index: usize, kick: &Kick) {
         // A fall replaces the standing reaction: the chain is gone before the body lies down.
         self.ragdoll.reactions[index] = None;
         self.ragdoll_try_spawn(index, kick);
         self.floor_slot(u8::try_from(index).unwrap_or(u8::MAX));
     }
 
-    fn ragdoll_try_spawn(&mut self, index: usize, kick: Kick) {
+    fn ragdoll_try_spawn(&mut self, index: usize, kick: &Kick) {
         let rig_index = self.rig_for_slot(index);
         let Some(rig) = self.rigs.get(rig_index) else {
             return;
@@ -1279,10 +1294,19 @@ impl FighterLook {
             standing.act = Act::Idle;
             standing.act_start = self.tick;
         }
-        let Ok(pose) = self.inertial_pose(rig, index, &standing, 0.0) else {
+        let Ok(mut pose) = self.inertial_pose(rig, index, &standing, 0.0) else {
             return;
         };
         let root = slot_root(&standing, 0.0);
+        // What the viewer saw is the finished pose: the rotation caps, the planted feet and the
+        // throwing arm sit on the clip. Seeding from the bare clip snapped a tethered thrower's
+        // hand half a meter the frame the tow began.
+        let ramp = matches!(standing.balance, GaitPhase::Steady | GaitPhase::Stumbling);
+        self.limit_pose(index, &mut pose.rotations, 0.0, ramp);
+        if self.plant_feet(rig, &standing, &mut pose, root.1, 0.0).is_ok() {
+            // A refused arm solve leaves the pose as the feet made it.
+            let _ = self.lay_throw(rig, index, &standing, &mut pose, 0.0);
+        }
         let velocity = [
             (standing.pos[0] - standing.prev_pos[0]) * TICK_HZ,
             0.0,
@@ -1301,7 +1325,7 @@ impl FighterLook {
             pose: &pose,
             root,
             velocity,
-            kick,
+            kick: *kick,
         };
         let result = self.ragdoll.spawn(index, &start);
         if result.is_err() {
@@ -1339,6 +1363,13 @@ impl FighterLook {
             Some((now, next))
         });
         let started = arriving.and_then(|(arriving_now, arriving_next)| {
+            // QR8: the chest's facing picks the front/back pair, then the clip whose first frame
+            // is nearest the lying body wins (getup_pick).
+            let stops = self
+                .rigs
+                .get(rig_index)
+                .and_then(|rig| getup_pick::stops(&rig.skeleton));
+            getup_pick::arrival_miss(&now, &arriving_now.positions, stops)?;
             let set = self.ragdoll.getup.get_mut(index)?;
             begin_switch(set, [&before, &now], 1.0, [&arriving_now, &arriving_next]).ok()
         });
@@ -1418,6 +1449,11 @@ impl FighterLook {
                     };
                     self.ragdoll
                         .carry(index, [track[0], hold + up, track[2]], speed, true);
+                    // A towed body is a fighter on a rope, not a sack: it flies braced (the
+                    // PuppetMaster pin weight) and goes back to its tone once the tow ends.
+                    if let (Ok(slot), Some(fx)) = (u8::try_from(index), self.ragdoll.fx.as_mut()) {
+                        fx.brace_ragdoll(slot, TOW_BRACE);
+                    }
                 }
                 None => {
                     if std::mem::take(&mut self.ragdoll.towed[index]) {
@@ -1440,6 +1476,35 @@ impl FighterLook {
             self.ragdoll.has(index).then_some(())?;
             self.ragdoll.fx.as_ref()?.ragdoll_root(slot)
         })
+    }
+
+    /// Every bone of every live ragdoll as drawn this tick: what a spear stuck in a fallen body
+    /// rides. Empty while no ragdoll lives. Presentation only.
+    #[must_use]
+    pub fn ragdoll_bone_frames(&self) -> Vec<crate::spear_look::BoneFrame> {
+        let Some(fx) = self.ragdoll.fx.as_ref() else {
+            return Vec::new();
+        };
+        if !(0..MAX_LOOK_FIGHTERS).any(|index| self.ragdoll.has(index)) {
+            return Vec::new();
+        }
+        let Ok(placed) = fx.transforms(1.0) else {
+            return Vec::new();
+        };
+        placed
+            .into_iter()
+            .filter_map(|one| match one.key {
+                Key::Bone { slot, bone } if self.ragdoll.has(usize::from(slot)) => {
+                    Some(crate::spear_look::BoneFrame {
+                        slot,
+                        bone,
+                        pos: one.at.pos,
+                        rot: one.at.rot,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Severs one physical bone (`bone`, an index of the `BONES` table) from the live ragdoll of
@@ -1956,6 +2021,8 @@ mod tests {
         let hp = [1000u16; 2];
         let (mut stood, mut previous) = (None, None::<Vec<[f32; 3]>>);
         let mut spawned_at = None;
+        let mut frames: Vec<Vec<[f32; 3]>> = Vec::new();
+        let mut target = None;
         let (mut lying_top_m, mut jump_cm, mut lying_step_cm) = (0.0f32, 0.0f32, 0.0f32);
         for t in 0..420u32 {
             // The sim floors the gait for two seconds, then it recovers.
@@ -1990,6 +2057,16 @@ mod tests {
                     if let Some(last) = &previous {
                         jump_cm = speed_ms(&body.joints, last) / TICK_HZ * 100.0;
                     }
+                    // QR9: the raw clip the body rises into, before the get-up offsets, is what
+                    // the 60-tick sim-to-animation blend would lerp to.
+                    let (slot, rig) = (look.slots[1], &look.rigs[look.rig_for_slot(1)]);
+                    target = look
+                        .inertial_pose_base(rig, 1, &slot, 0.0)
+                        .ok()
+                        .map(|pose| pose.positions);
+                }
+                if alpha == 0.0 {
+                    frames.push(body.joints.clone());
                 }
                 previous = Some(body.joints.clone());
             }
@@ -2015,6 +2092,26 @@ mod tests {
         assert!(
             line.contains(" pops=0 "),
             "no clip snap on the way up: {line}"
+        );
+        // QR9: A/B the same fall with one measure. A is the physics tape's 60-tick
+        // sim-to-animation blend (`ragdoll_tape::get_up`: a linear lerp off the ragdoll pose);
+        // B is the get-up this look runs, the inertial offsets at GETUP_HALFLIFE_S.
+        let target = target.expect("the arrival clip was there to blend into");
+        let stood_at = usize::try_from(stood).unwrap_or(0);
+        let (a_jump, a_pops, b_jump, b_pops) = super::getup_pick::ab_getup(
+            &frames[stood_at - 2],
+            &frames[stood_at - 1],
+            &frames[stood_at..],
+            &target,
+            GETUP_TICKS,
+            crate::view_truth::POP_M,
+        );
+        println!(
+            "ragdoll_look: get-up A 60-tick sim-to-animation blend: seam {a_jump:.1} cm, {a_pops} pops | B inertial half-life {GETUP_HALFLIFE_S} s: seam {b_jump:.1} cm, {b_pops} pops"
+        );
+        assert!(
+            a_jump.is_finite() && b_jump.is_finite(),
+            "both paths measured: A {a_jump:.1} cm, B {b_jump:.1} cm"
         );
         let truth = joints(&look, 2, 0.5);
         let body = truth.iter().find(|b| b.slot == 1).expect("drawn");
@@ -2177,6 +2274,7 @@ mod tests {
         let mut peak_m = 0.0f32;
         let mut gap_m = 0.0f32;
         let mut up_at = None;
+        let (mut towed_brace, mut after_brace) = (f32::MAX, None);
         for t in 0..420u32 {
             let towed = (5..40).contains(&t);
             if towed {
@@ -2189,6 +2287,14 @@ mod tests {
             let shown = look.ragdoll_fold_gait(1, GaitPhase::Steady);
             assert_eq!(shown, GaitPhase::Steady);
             look.ragdoll_tick();
+            if let Some(strength) = look.ragdoll_strength(1) {
+                if towed && t > 10 {
+                    towed_brace = towed_brace.min(strength);
+                }
+                if t == 70 {
+                    after_brace = Some(strength);
+                }
+            }
             if let Some(root) = look.ragdoll_roots()[1] {
                 if towed && t > 25 {
                     peak_m = peak_m.max(root[1]);
@@ -2203,6 +2309,15 @@ mod tests {
         assert_eq!(look.ragdoll_spawns(), 1, "one body for the whole flight");
         assert!(peak_m > 1.4, "the arc holds the body up: {peak_m}");
         assert!(gap_m < 0.8, "and it follows the sim's track: {gap_m}");
+        assert!(
+            towed_brace >= 0.45,
+            "a towed fighter flies braced, not as a sack: {towed_brace}"
+        );
+        let after = after_brace.expect("still a ragdoll 30 ticks after the tow");
+        assert!(
+            after < 0.25,
+            "the brace fades back to the tone once the tow ends: {after}"
+        );
         let up = up_at.expect("the body landed and got up");
         assert!(up >= 80, "not before the level carry ran out: {up}");
         assert!(look.ragdolls() == 0 && !look.ragdolled(1));
