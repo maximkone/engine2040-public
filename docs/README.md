@@ -7,6 +7,7 @@ Order of work: `FOCUS.md` "## Now". Rules for AIs: root `../AGENTS.md` (wins) an
 | What to do next | `FOCUS.md` "## Now", then `node tools/board-slice.mjs --focus` / `--ready` / `<ID>` |
 | Rows (the board) | `SPRINT.md` is the index; rows live in the `SPRINT-NN-*.md` shards. Done rows: `SPRINT-ARCHIVE.md`. Slice, never read whole |
 | Plans (one subsystem each) | `plan/README.md` indexes them; `node tools/plan-atlas.mjs --row <ID>` finds a row's plan; `plan/status-2026-10-17.md` is the truth check |
+| Demo of every built system (the showcase tour) | `plan/showcase.md` (run `play-showcase.bat`); the book pages for each system are in `book/ref-*.md` |
 | Where the engine is going | `VISION.md`, `ROADMAP.md`, `PLAN-REVIEW.md`, `AI-NATIVE.md` (tables: `VISION-TABLES.md`) |
 | Code layout | `ARCHITECTURE.md` (layers), `CRATE-MAP.md` (generated), `../.opencode/modmap.md` (files per crate, Grep only) |
 | Code rules and gates | `CODELAW.md` (guides), `RUST-QUALITY.md` (enforces), `HASH-LAW.md` (golden hash), `WORKFLOW.md` (how a change flows) |

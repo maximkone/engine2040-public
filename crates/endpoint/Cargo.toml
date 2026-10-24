@@ -13,7 +13,7 @@ workspace = true
 # `e2040-mcp` stdio binary (MIT, 1.53.1 in lock via rmcp; workspace tokio).
 # EA1e drives the local/remote provider adapters on recorded fixtures.
 [features]
-mcp = ["dep:rmcp", "dep:engine-editor", "dep:engine-scene", "engine-scene/json", "dep:engine-arena", "dep:engine-spatial", "dep:tokio", "dep:engine-provider", "dep:engine-observe", "dep:engine-game", "dep:engine-destruction", "dep:engine-combat", "dep:engine-anim", "dep:engine-material", "dep:engine-ai", "dep:engine-net", "dep:engine-physics", "dep:engine-physfx", "dep:engine-nav", "dep:engine-input", "dep:engine-playtest", "dep:engine-world", "dep:engine-ui", "dep:engine-audio", "dep:engine-assets", "dep:engine-perf"]
+mcp = ["dep:rmcp", "dep:engine-editor", "dep:engine-scene", "engine-scene/json", "dep:engine-arena", "dep:engine-spatial", "dep:tokio", "dep:engine-provider", "dep:engine-observe", "dep:engine-game", "dep:engine-destruction", "dep:engine-combat", "dep:engine-anim", "dep:engine-material", "dep:engine-ai", "dep:engine-net", "dep:engine-physics", "dep:engine-physfx", "dep:engine-nav", "dep:engine-input", "dep:engine-playtest", "dep:engine-world", "dep:engine-ui", "dep:engine-audio", "dep:engine-assets", "dep:engine-perf", "dep:engine-rome"]
 
 # The geo pack's modeling ops (boolean, unwrap, lod, collision) run on the cook-time engine-geo crate:
 # off by default so the default build has neither the donor libraries nor the xatlas C++ step.
@@ -87,6 +87,9 @@ engine-world = { workspace = true, optional = true }
 # the cue sheet and anchors (engine-audio): both owners, never a copy here.
 engine-ui = { workspace = true, optional = true }
 engine-audio = { workspace = true, optional = true }
+# The rome pack lays a marching camp from the shipped Rome tables on the dig
+# grid and undoes it: engine-rome is std-only (engine-core only).
+engine-rome = { path = "../rome", version = "0.1.0", optional = true }
 engine-perf = { path = "../perf", version = "0.1.0", optional = true }
 # AD8 verify: the proof crate's tape, bug and trace verifiers (feature `verify`).
 engine-proof = { workspace = true, optional = true }

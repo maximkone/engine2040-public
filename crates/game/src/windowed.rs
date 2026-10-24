@@ -26,8 +26,8 @@ use engine_render::{
     window::{WindowShell, FIXED_DT},
 };
 use engine_ui::{
-    text::{emit_quads, feed_lines, hp_text, layout, Align, Atlas},
-    DuelOverlay, Hud, OverlayError,
+    text::{emit_quads, layout, Align, Atlas},
+    DuelOverlay, OverlayError,
 };
 
 use self::windowed_captions::{caption_strip, push_caption_tick};
@@ -46,6 +46,9 @@ use super::pad::{
 use super::window_audio_space::AudioSpace;
 use super::{App, Checkpoint, FighterView, GameConfig, GameError, TickOutcome, HUMAN_SLOT};
 
+#[path = "windowed_hud_text.rs"]
+mod windowed_hud_text;
+pub use windowed_hud_text::{hud_cells_quads, stage_hud_text};
 #[path = "windowed_captions.rs"]
 mod windowed_captions;
 #[path = "windowed_smoke.rs"]
@@ -1007,23 +1010,6 @@ pub fn feed_tick_audio(
     space.feed(tx, tick, outcome, views);
 }
 
-/// HUD text cells plus quads for one snapshot (hp line plus kill-feed lines
-/// through the UI text path: layout cells, then one quad per cell). Pure.
-pub fn hud_cells_quads(hud: &Hud) -> (usize, usize) {
-    let mut lines = vec![hp_text(hud)];
-    lines.extend(feed_lines(&hud.feed));
-    let atlas = Atlas::new();
-    let mut cells = 0usize;
-    let mut quads = 0usize;
-    for line in &lines {
-        let laid = layout(line, 32, Align::Left);
-        let (_, _, indices) = emit_quads(&laid, atlas, 1.0);
-        cells += laid.len();
-        quads += indices.len() / 6;
-    }
-    (cells, quads)
-}
-
 /// HUD text cells plus quads for the live balance verdicts (EG45): one
 /// `slot {slot}: {label}` line per slot through
 /// [`super::balance_verdict::push_verdict_line`] plus one `down {n}` summary
@@ -1796,6 +1782,7 @@ fn smoke_present_once(
         .map_err(|err| WinError::Render(cap_message(&format!("{err}"))))?;
     let _ = overlay.to_bytes();
     stage_hp_bars(presenter, &overlay);
+    let _ = stage_hud_text(presenter, app.hud());
     let out = presenter.render_offscreen(&list)?;
     Ok(u32::from(out.receipt.presented))
 }
