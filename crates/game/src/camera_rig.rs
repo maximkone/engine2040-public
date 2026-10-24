@@ -17,6 +17,7 @@ use super::{
     fit_pair, frame_pair, select_lock_target, shake_offset, CameraError, CameraFrame, CameraPose,
     Director, DirectorParams, FighterView, Vec3, TRAUMA_SCALE,
 };
+use crate::boom_filter::BoomFilter;
 use crate::camera_arm::{arm_length, Aabb, FLOOR_LEN};
 
 // ---------------------------------------------------------------------------
@@ -592,6 +593,8 @@ pub struct FightCamSpring {
     prev_look_m: Vec3,
     damping: f32,
     ready: bool,
+    /// The boom's pillar filter (SW155): hold a graze, pull in fast, release slow.
+    boom: BoomFilter,
 }
 
 impl FightCamSpring {
@@ -608,6 +611,7 @@ impl FightCamSpring {
             prev_look_m: Vec3::ZERO,
             damping: halflife_to_damping(halflife_s)?,
             ready: false,
+            boom: BoomFilter::default(),
         })
     }
 
@@ -753,7 +757,10 @@ impl FightCamSpring {
     }
 
     /// Eye from the smoothed yaw, distance and look under `params` boom,
-    /// shortened at pillars and walls by the `camera_arm` sphere sweep.
+    /// shortened at pillars and walls by the `camera_arm` sphere sweep and held
+    /// by the [`BoomFilter`]: a pillar must clip the boom for
+    /// [`crate::boom_filter::OCCLUSION_HOLD_TICKS`] before the eye moves, the pull
+    /// in is fast and the release slow (SW155).
     /// Yaw zero sits behind on `+z` like the pair framing; other yaws orbit
     /// the boom around the look point. `obstacles` holds the arena pillar
     /// and wall boxes; the fighter focus body is excluded by the caller
@@ -762,8 +769,7 @@ impl FightCamSpring {
     /// `process_spring` shape cast gives `cast_motion`, margin off the hit.
     /// PORT(godotengine/godot docs 2026-10-15:https://docs.godotengine.org/en/stable/classes/class_springarm3d.html):
     /// `spring_length` max extent, `margin` 0.01, `get_hit_length` reads length.
-    #[must_use]
-    pub fn eye_m(&self, params: &DirectorParams, obstacles: &[Aabb]) -> Vec3 {
+    pub fn eye_m(&mut self, params: &DirectorParams, obstacles: &[Aabb], dt_s: f32) -> Vec3 {
         let sin_yaw = self.yaw_rad.sin();
         let cos_yaw = self.yaw_rad.cos();
         let smooth_eye = Vec3::new(
@@ -789,10 +795,13 @@ impl FightCamSpring {
             0.0
         };
         let hit = arm_length(pivot, raw, dist, radius, obstacles);
-        if hit >= dist {
+        // The filter owns the length: a two-tick graze moves no eye, a pillar that
+        // stays pulls the eye in fast, and the clearance releases it slowly.
+        let held = self.boom.step(dt_s, dist, hit);
+        if held >= dist {
             return smooth_eye;
         }
-        let clamped = (hit - margin).max(FLOOR_LEN).min(dist);
+        let clamped = (held - margin).max(FLOOR_LEN).min(dist);
         self.look_m + dir * (clamped / dist)
     }
 }
@@ -886,7 +895,7 @@ mod tests {
             let (sy, _sd, sl) = spring.step(yaw, dist, look, dt_s).expect("step");
             yaws.push(sy);
             looks.push(sl);
-            eyes.push(spring.eye_m(params, &[]));
+            eyes.push(spring.eye_m(params, &[], dt_s));
             pairs.push((a, b));
         }
         DuelRun {

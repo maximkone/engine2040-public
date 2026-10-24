@@ -226,6 +226,63 @@ mod tests {
     }
 
     #[test]
+    fn a_break_names_its_tick_and_an_exact_rise_is_inside_the_energy_law() {
+        let broke = Break {
+            law: "steady rate",
+            tick: 7,
+            detail: "moved 0".into(),
+        };
+        assert_eq!(
+            broke.to_string(),
+            "law 'steady rate' broke at tick 7: moved 0"
+        );
+        let mut calls = 0_i32;
+        let hidden = replay(
+            Mover {
+                x: 0,
+                v: 0,
+                carry: 0,
+            },
+            3,
+            |m, _| {
+                calls += 1;
+                m.x += calls;
+            },
+        )
+        .expect_err("a step that is not a function of the state breaks replay");
+        assert_eq!(
+            (hidden.law, hidden.tick),
+            ("replay", 1),
+            "the first tick is named, not tick zero"
+        );
+        assert!(
+            energy_never_rises(0u32, 3, |s| *s += 1, |s| f64::from(*s), 1.0).is_ok(),
+            "a rise of exactly the slack is inside the law"
+        );
+        let mover = Mover {
+            x: 100,
+            v: 120,
+            carry: 0,
+        };
+        assert!(
+            steady_rate(mover, 10, 10, carrying, |m| f64::from(m.x), 2.0, 0.0).is_ok(),
+            "20 mm in 10 ticks after the warm-up is exactly the rate"
+        );
+        let slow = Mover {
+            x: 0,
+            v: 59,
+            carry: 0,
+        };
+        let dead = steady_rate(slow, 2, 3, truncating, |m| f64::from(m.x), 59.0 / 60.0, 0.0)
+            .expect_err("the truncation dead zone breaks the rate");
+        assert_eq!(
+            (dead.law, dead.tick),
+            ("steady rate", 5),
+            "the tick counts the warm-up"
+        );
+    }
+
+    #[test]
     fn steady_rate_catches_a_truncation_dead_zone() {
         let slow = Mover {
             x: 0,
