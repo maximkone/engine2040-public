@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       cmd:
-        description: "one cargo check|test|clippy command"
+        description: "one cargo check|test|clippy command, or one cargo mutants slice (-p <crate> and --shard k/n or -f <file>)"
         required: true
       os:
         # tools/gh-check.mjs sends lines that need Windows or a window|app|ui|device feature to Windows; the rest to Linux.
@@ -55,15 +55,47 @@ jobs:
         with:
           shared-key: ${{ runner.os == 'Windows' && 'win-check' || 'test-debug' }}
           save-if: "false"
+      # AF5 (owner 2026-10-24): a cargo mutants line only. The release is pinned (27.1.0, the one the owner installed on the PC).
+      - name: install cargo-mutants (pinned)
+        if: startsWith(inputs.cmd, 'cargo mutants ')
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      # tools/mutants.mjs (the nightly's judge) reads what cargo-mutants wrote, and needs Node 22+.
+      - name: node for tools/mutants.mjs
+        if: startsWith(inputs.cmd, 'cargo mutants ')
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
       - name: run the command
         env:
           CMD: ${{ inputs.cmd }}
         shell: bash
         run: |
           case "$CMD" in
-            "cargo check "*|"cargo test "*|"cargo clippy "*) ;;
-            *) echo "refused: only cargo check, cargo test or cargo clippy"; exit 2 ;;
+            "cargo check "*|"cargo test "*|"cargo clippy "*|"cargo mutants "*) ;;
+            *) echo "refused: only cargo check, cargo test, cargo clippy or cargo mutants"; exit 2 ;;
           esac
           case "$CMD" in *'&'*|*';'*|*'|'*|*'`'*|*'$('*|*'>'*|*'<'*) echo "refused: one plain command only"; exit 2 ;; esac
+          if [ "${CMD#cargo mutants }" != "$CMD" ]; then
+            # one crate and one slice of its mutants, never the whole workspace (gh-check's okCmd says the same)
+            case " $CMD " in *" --workspace "*|*" --all "*) echo "refused: cargo mutants never runs the whole workspace"; exit 2 ;; esac
+            case " $CMD " in *" -p "*|*" --package "*|*" --package="*) ;; *) echo "refused: cargo mutants needs -p <crate>"; exit 2 ;; esac
+            case " $CMD " in *" --shard "*|*" --shard="*|*" -f "*|*" --file "*|*" --file="*) ;; *) echo "refused: cargo mutants needs --shard k/n or -f <file>"; exit 2 ;; esac
+            echo "+ $CMD"
+            # cargo-mutants exits 0 (all caught), 2 (some missed), 3 (timeouts) or 4 (unmutated baseline failed); the judge reads what it wrote
+            bash -c "$CMD" || echo "cargo-mutants exit $? (0 all caught, 2 some missed, 3 timeouts, 4 baseline failed)"
+            # the judge: one line per missed mutant, then the counts (caught, missed, unviable, timeout) and RESULT last; exit 0 PASS, 1 FAIL
+            node tools/mutants.mjs --from-out mutants.out --max-missed 0
+            exit $?
+          fi
           echo "+ $CMD"
           bash -c "$CMD"
+      - name: keep the mutants output (outcomes.json, missed lists, logs)
+        if: always() && startsWith(inputs.cmd, 'cargo mutants ')
+        uses: actions/upload-artifact@v5
+        with:
+          name: mutants-out
+          path: mutants.out
+          if-no-files-found: ignore
+          retention-days: 14

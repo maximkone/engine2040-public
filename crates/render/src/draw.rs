@@ -37,8 +37,13 @@ pub const STORM_AGENTS: usize = 1000;
 /// Millimeters per meter for the integer depth bucket.
 const MM_PER_M: f32 = 1000.0;
 
+/// Frame height the band-era `build` assumes. The pixel LOD path divides by
+/// the real frame height through [`DrawList::build_at`]; 1080p is the height
+/// the shipped capture and the arena's default render target both use.
+pub const DEFAULT_SCREEN_H: u32 = 1080;
+
 /// Smallest usable near-plane distance in meters.
-const MIN_NEAR_M: f32 = 1e-3;
+pub(crate) const MIN_NEAR_M: f32 = 1e-3;
 
 /// Plain-data camera. Right-handed, +Y up, meters; looks along `forward`.
 #[derive(Clone, Debug)]
@@ -191,6 +196,8 @@ impl fmt::Display for DrawError {
 
 impl Error for DrawError {}
 
+use crate::occl_cpu::OcclusionBuffer;
+
 /// GPU cull shader source (GS18 slice 1): the same `-radius` rule the CPU
 /// oracle runs. `DrawList::build` pins it so the two never drift apart.
 const CULL_WGSL: &str = include_str!("shaders/cull.wgsl");
@@ -220,6 +227,19 @@ fn planes_to_packed(planes: &[Plane; 6]) -> [[f32; 4]; 6] {
         i += 1;
     }
     packed
+}
+
+/// The six frustum planes of `camera`, packed `[nx, ny, nz, dist]` in the
+/// order [`cull_cpu_flags_into`] and `shaders/cull.wgsl` both read them. The
+/// CPU occlusion pass starts from the same planes, so a Hi-Z verdict can be
+/// compared with the flag rule on one frame.
+///
+/// # Errors
+///
+/// Returns [`DrawError::BadCamera`] when the camera cannot be projected.
+pub fn frustum_planes_packed(camera: &Camera) -> Result<[[f32; 4]; 6], DrawError> {
+    let basis = validate_camera(camera)?;
+    Ok(planes_to_packed(&frustum_planes(camera, &basis)))
 }
 
 /// True when the sphere survives all six planes with the `-radius` rule
@@ -312,15 +332,15 @@ pub fn indirect_args_5(visible: u32) -> [u32; 5] {
     [36, visible, 0, 0, 0]
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+pub(crate) fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn scale(v: [f32; 3], s: f32) -> [f32; 3] {
+pub(crate) fn scale(v: [f32; 3], s: f32) -> [f32; 3] {
     [v[0] * s, v[1] * s, v[2] * s]
 }
 
@@ -328,7 +348,7 @@ fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-fn len(v: [f32; 3]) -> f32 {
+pub(crate) fn len(v: [f32; 3]) -> f32 {
     dot(v, v).sqrt()
 }
 
@@ -487,7 +507,7 @@ fn frustum_planes(camera: &Camera, basis: &Basis) -> [Plane; 6] {
 /// Hysteresis LOD: from `prev`, coarsen only past `band + hyst` and
 /// refine only below `band - hyst`, so jitter inside the band holds.
 /// With zero hysteresis this equals the raw band level from any start.
-fn pick_lod(dist: f32, prev: u8, levels: u8, bands: &[f32], hyst: f32) -> u8 {
+pub(crate) fn pick_lod(dist: f32, prev: u8, levels: u8, bands: &[f32], hyst: f32) -> u8 {
     let max_lod = levels - 1;
     let usable = bands.len().min(max_lod as usize);
     let mut lod = prev.min(max_lod);
@@ -514,8 +534,10 @@ fn pick_lod(dist: f32, prev: u8, levels: u8, bands: &[f32], hyst: f32) -> u8 {
 /// Errors: [`DrawError::BadPixelLod`] on a non-finite or negative
 /// `radius_m`, a `distance_m` that is not above zero, a `screen_h` outside
 /// 1..=65535 pixels, a non-finite `tan_half_fov_y <= 0`, `levels` of zero, a
-/// negative or non-finite `hyst_px`, or an empty `thresholds_px`. No caller
-/// yet: the pick in `cull_lod` carries no frame height in its call chain.
+/// negative or non-finite `hyst_px`, or an empty `thresholds_px`. Caller:
+/// `cull_lod`, which reads the camera optics and the frame height from
+/// [`DrawList::build_at`] and projects the table hysteresis with
+/// `pixel_hysteresis_px`.
 #[expect(clippy::too_many_arguments, reason = "8 inputs mirror the pick")]
 pub fn lod_by_pixel_error(
     radius_m: f32,
@@ -626,15 +648,41 @@ pub fn trail_strip_verts(
     out
 }
 
-/// One node through validation, frustum cull and LOD pick; `None` means
-/// culled. Shared by the per-draw list and the instanced grouping so the
-/// two never drift apart.
-fn cull_lod(
-    node: &SceneNode,
-    planes: &[Plane; 6],
-    camera_pos_m: [f32; 3],
-    lod_table: &LodTable,
-) -> Result<Option<Draw>, DrawError> {
+/// The table's metre hysteresis at the finest pixel boundary, in pixels.
+///
+/// The band path holds a level while the distance stays inside
+/// `boundary +/- hysteresis_m`. The armed path must hold the same relative
+/// band, so the metre band is projected once per node at the distance where
+/// its radius is exactly the finest boundary wide: projected size falls as
+/// `1 / distance`, so `px_per_m` there is `finest_px / boundary_m`. The
+/// result is clamped to a quarter of the finest boundary, so a huge metre
+/// band on a tiny node cannot freeze the level. Zero radius or a degenerate
+/// optics term gives zero, and [`lod_by_pixel_error`] then picks without a
+/// band.
+#[must_use]
+pub(crate) fn pixel_hysteresis_px(
+    radius_m: f32,
+    screen_h: u32,
+    tan_half_fov_y: f32,
+    thresholds_px: &[f32],
+    hysteresis_m: f32,
+) -> f32 {
+    let Some(finest_px) = thresholds_px.last().copied() else {
+        return 0.0;
+    };
+    let screen_h_px = f32::from(u16::try_from(screen_h).unwrap_or(u16::MAX));
+    // 2 * radius / (2 * distance * tan) * screen_h == finest_px, solved for
+    // the distance.
+    let boundary_m = radius_m * screen_h_px / (tan_half_fov_y * finest_px);
+    if !boundary_m.is_finite() || boundary_m <= 0.0 {
+        return 0.0;
+    }
+    (hysteresis_m * (finest_px / boundary_m)).clamp(0.0, finest_px / 4.0)
+}
+
+/// Every field a node must pass before it reaches a GPU buffer; the reason
+/// names the field so the caller fixes the cook, never the renderer.
+fn validate_node(node: &SceneNode, lod_table: &LodTable) -> Result<(), DrawError> {
     if !is_finite3(node.center_m) {
         return Err(DrawError::BadNode {
             id: node.id,
@@ -666,6 +714,78 @@ fn cull_lod(
             found: node.lod_table,
         });
     }
+    Ok(())
+}
+
+/// The LOD level and dither share for one visible node at `distance_m`.
+///
+/// Armed table: the pick projects the radius to pixels at this frame's height
+/// and lens, so a taller frame or a narrower field of view coarsens or
+/// refines the level. Unarmed: the distance bands, unchanged.
+fn lod_and_fade(
+    node: &SceneNode,
+    distance_m: f32,
+    lod_table: &LodTable,
+    screen_h: u32,
+    tan_half_fov_y: f32,
+) -> Result<(u8, u8), DrawError> {
+    match &lod_table.pixel_thresholds_px {
+        Some(thresholds) => {
+            let hyst_px = pixel_hysteresis_px(
+                node.radius_m,
+                screen_h,
+                tan_half_fov_y,
+                thresholds,
+                lod_table.hysteresis_m,
+            );
+            // The projection is undefined at the eye; the near plane is the
+            // closest a visible node can be, so a node on the camera picks
+            // the finest level instead of failing the whole frame.
+            let pick_m = distance_m.max(MIN_NEAR_M);
+            let lod = lod_by_pixel_error(
+                node.radius_m,
+                pick_m,
+                screen_h,
+                tan_half_fov_y,
+                node.lod_levels,
+                node.prev_lod,
+                thresholds,
+                hyst_px,
+            )?;
+            // The dither share dissolves a band edge; the pixel path holds
+            // every draw at full share.
+            Ok((lod, 255))
+        }
+        None => {
+            let lod = pick_lod(
+                distance_m,
+                node.prev_lod,
+                node.lod_levels,
+                &lod_table.bands_m,
+                lod_table.hysteresis_m,
+            );
+            Ok((lod, fade_for_lod(distance_m, lod, lod_table)))
+        }
+    }
+}
+
+/// One node through validation, frustum cull and LOD pick; `None` means
+/// culled. Shared by the per-draw list and the instanced grouping so the
+/// two never drift apart.
+///
+/// `screen_h` and `tan_half_fov_y` are the frame height and optics the armed
+/// pixel path projects through; a table with `pixel_thresholds_px: None`
+/// ignores both and keeps the distance bands byte for byte.
+fn cull_lod(
+    node: &SceneNode,
+    planes: &[Plane; 6],
+    camera_pos_m: [f32; 3],
+    lod_table: &LodTable,
+    screen_h: u32,
+    tan_half_fov_y: f32,
+    occl: Option<&OcclusionBuffer>,
+) -> Result<Option<Draw>, DrawError> {
+    validate_node(node, lod_table)?;
     let offset = sub(node.center_m, camera_pos_m);
     let distance_m = len(offset);
     let packed = planes_to_packed(planes);
@@ -681,14 +801,24 @@ fn cull_lod(
     if visible_count(&flag) == 0 {
         return Ok(None);
     }
-    let lod = pick_lod(
-        distance_m,
-        node.prev_lod,
-        node.lod_levels,
-        &lod_table.bands_m,
-        lod_table.hysteresis_m,
-    );
-    let fade = fade_for_lod(distance_m, lod, lod_table);
+    // SW4: the software Hi-Z pass may only remove what the frustum kept.
+    if let Some(buffer) = occl {
+        let r = node.radius_m;
+        let lo = [
+            node.center_m[0] - r,
+            node.center_m[1] - r,
+            node.center_m[2] - r,
+        ];
+        let hi = [
+            node.center_m[0] + r,
+            node.center_m[1] + r,
+            node.center_m[2] + r,
+        ];
+        if buffer.is_hidden_aabb(lo, hi) {
+            return Ok(None);
+        }
+    }
+    let (lod, fade) = lod_and_fade(node, distance_m, lod_table, screen_h, tan_half_fov_y)?;
     let depth_bucket = (distance_m * MM_PER_M).max(0.0) as u32;
     Ok(Some(Draw {
         id: node.id,
@@ -737,18 +867,70 @@ impl DrawList {
         hash
     }
 
-    /// Cull, LOD-pick and integer-sort one snapshot. The buffer is
-    /// cleared and refilled in place, so steady-state frames allocate
-    /// nothing once warm. Over-cap and unknown tables are loud errors
-    /// that leave the list empty, never a silent truncation.
+    /// Cull, LOD-pick and integer-sort one snapshot at the default 1080p
+    /// frame height. See [`DrawList::build_at`].
     pub fn build(
         &mut self,
         snapshot: &SceneSnapshot,
         camera: &Camera,
         lod_table: &LodTable,
     ) -> Result<&[Draw], DrawError> {
+        self.build_at(snapshot, camera, lod_table, DEFAULT_SCREEN_H)
+    }
+
+    /// As [`DrawList::build`], with the potato tier's software Hi-Z buffer: a
+    /// node whose AABB the buffer hides is dropped before its LOD is picked.
+    /// `None` is a GPU-tier frame, where the depth pass decides.
+    pub fn build_occl(
+        &mut self,
+        snapshot: &SceneSnapshot,
+        camera: &Camera,
+        lod_table: &LodTable,
+        occl: Option<&OcclusionBuffer>,
+    ) -> Result<&[Draw], DrawError> {
+        self.build_at_occl(snapshot, camera, lod_table, DEFAULT_SCREEN_H, occl)
+    }
+
+    /// Cull, LOD-pick and integer-sort one snapshot. The buffer is
+    /// cleared and refilled in place, so steady-state frames allocate
+    /// nothing once warm. Over-cap and unknown tables are loud errors
+    /// that leave the list empty, never a silent truncation.
+    ///
+    /// `screen_h` is the frame height in pixels. It reaches the LOD pick only
+    /// when `lod_table.pixel_thresholds_px` is armed; the same scene, camera
+    /// and table then picks a coarser level in a shorter frame, because the
+    /// projected size scales with the frame height.
+    pub fn build_at(
+        &mut self,
+        snapshot: &SceneSnapshot,
+        camera: &Camera,
+        lod_table: &LodTable,
+        screen_h: u32,
+    ) -> Result<&[Draw], DrawError> {
+        self.build_at_occl(snapshot, camera, lod_table, screen_h, None)
+    }
+
+    /// As [`DrawList::build_at`], with an optional software Hi-Z buffer (SW4).
+    ///
+    /// # Errors
+    ///
+    /// As [`DrawList::build_at`].
+    pub fn build_at_occl(
+        &mut self,
+        snapshot: &SceneSnapshot,
+        camera: &Camera,
+        lod_table: &LodTable,
+        screen_h: u32,
+        occl: Option<&OcclusionBuffer>,
+    ) -> Result<&[Draw], DrawError> {
         let basis = validate_camera(camera)?;
         validate_lod_table(lod_table)?;
+        if screen_h == 0 || screen_h > u32::from(u16::MAX) {
+            return Err(DrawError::BadPixelLod(
+                "screen_h must be 1..=65535 pixels".to_string(),
+            ));
+        }
+        let tan_half_fov_y = (camera.fov_y_rad * 0.5).tan();
         let planes = frustum_planes(camera, &basis);
         self.draws.clear();
         // Warm the buffer once toward the cap; the over-cap push path
@@ -758,7 +940,15 @@ impl DrawList {
                 .reserve(snapshot.nodes.len().min(MAX_DRAWS + 1) - self.draws.capacity());
         }
         for node in &snapshot.nodes {
-            if let Some(draw) = cull_lod(node, &planes, camera.pos_m, lod_table)? {
+            if let Some(draw) = cull_lod(
+                node,
+                &planes,
+                camera.pos_m,
+                lod_table,
+                screen_h,
+                tan_half_fov_y,
+                occl,
+            )? {
                 self.draws.push(draw);
             }
         }
@@ -868,11 +1058,8 @@ impl InstancedList {
         hash.finish()
     }
 
-    /// Cull, LOD-pick and group one snapshot into squads. Both buffers are
-    /// cleared and refilled in place, so steady-state frames allocate
-    /// nothing once warm. Over-budget squads, oversized squads and unknown
-    /// tables are loud errors that leave the list empty, never a silent
-    /// truncation.
+    /// Cull, LOD-pick and group one snapshot into squads at the default
+    /// 1080p frame height. See [`InstancedList::build_at`].
     pub fn build(
         &mut self,
         snapshot: &SceneSnapshot,
@@ -880,8 +1067,31 @@ impl InstancedList {
         lod_table: &LodTable,
         budget: InstancedBudget,
     ) -> Result<&[InstancedDraw], DrawError> {
+        self.build_at(snapshot, camera, lod_table, budget, DEFAULT_SCREEN_H)
+    }
+
+    /// Cull, LOD-pick and group one snapshot into squads. Both buffers are
+    /// cleared and refilled in place, so steady-state frames allocate
+    /// nothing once warm. Over-budget squads, oversized squads and unknown
+    /// tables are loud errors that leave the list empty, never a silent
+    /// truncation. `screen_h` feeds the armed pixel LOD pick exactly as it
+    /// does in [`DrawList::build_at`], so both lists agree on one frame.
+    pub fn build_at(
+        &mut self,
+        snapshot: &SceneSnapshot,
+        camera: &Camera,
+        lod_table: &LodTable,
+        budget: InstancedBudget,
+        screen_h: u32,
+    ) -> Result<&[InstancedDraw], DrawError> {
         let basis = validate_camera(camera)?;
         validate_lod_table(lod_table)?;
+        if screen_h == 0 || screen_h > u32::from(u16::MAX) {
+            return Err(DrawError::BadPixelLod(
+                "screen_h must be 1..=65535 pixels".to_string(),
+            ));
+        }
+        let tan_half_fov_y = (camera.fov_y_rad * 0.5).tan();
         let planes = frustum_planes(camera, &basis);
         self.scratch.clear();
         self.groups.clear();
@@ -890,7 +1100,17 @@ impl InstancedList {
                 .reserve(snapshot.nodes.len() - self.scratch.capacity());
         }
         for node in &snapshot.nodes {
-            if let Some(draw) = cull_lod(node, &planes, camera.pos_m, lod_table)? {
+            if let Some(draw) = cull_lod(
+                node,
+                &planes,
+                camera.pos_m,
+                lod_table,
+                screen_h,
+                tan_half_fov_y,
+                // The instanced path is the near tier's; the far tier's Hi-Z
+                // runs through the per-draw list.
+                None,
+            )? {
                 self.scratch.push(draw);
             }
         }
@@ -2037,14 +2257,104 @@ mod tests {
         let table = test_table();
         assert!(table.pixel_thresholds_px.is_none(), "no pixel path armed");
         let mut list = DrawList::new();
+        let mut shorter = DrawList::new();
         for (dist, prev) in [(5.0f32, 0u8), (12.0, 1), (25.0, 1), (60.0, 2)] {
             let mut n = node(1, [0.0, 0.0, -dist], 0.5);
             n.prev_lod = prev;
             let snapshot = SceneSnapshot { nodes: vec![n] };
             let draws = list.build(&snapshot, &camera, &table).expect("builds");
+            let flat = shorter
+                .build_at(&snapshot, &camera, &table, 540)
+                .expect("builds at 540p");
             let band = pick_lod(dist, prev, 4, &table.bands_m, table.hysteresis_m);
             assert_eq!(draws[0].lod, band, "band level moved at {dist} m");
+            assert_eq!(flat[0].lod, band, "the frame height is not read unarmed");
+            assert_eq!(
+                list.order_digest(),
+                shorter.order_digest(),
+                "the unarmed list is byte-identical at {dist} m"
+            );
         }
+    }
+
+    /// The armed leg: the live build path projects the node radius to pixels
+    /// through the frame height and the vertical field of view, so the same
+    /// node at the same distance lands on different levels for a different
+    /// lens or a shorter frame. The band path would hold level 0 throughout.
+    #[test]
+    fn lod_pixel_error_arms_the_live_build_path() {
+        let mut table = test_table();
+        table.bands_m = vec![1000.0];
+        table.pixel_thresholds_px = Some(vec![40.0, 120.0]);
+        let mut wide = test_camera();
+        wide.fov_y_rad = FOV_60;
+        let mut tele = test_camera();
+        tele.fov_y_rad = std::f32::consts::PI / 9.0;
+        let mut list = DrawList::new();
+
+        // One meter ball 60 m out: 31 px at 60 degrees, 102 px at 20.
+        let mut far = node(1, [0.0, 0.0, -60.0], 1.0);
+        far.prev_lod = 0;
+        let far_snapshot = SceneSnapshot { nodes: vec![far] };
+        let far_wide = list
+            .build_at(&far_snapshot, &wide, &table, 1080)
+            .expect("wide")[0];
+        let far_tele = list
+            .build_at(&far_snapshot, &tele, &table, 1080)
+            .expect("tele")[0];
+        assert_eq!((far_wide.lod, far_tele.lod), (2, 1), "31 px vs 102 px");
+        assert_ne!(
+            far_wide.lod, far_tele.lod,
+            "the live path reads the field of view"
+        );
+        assert_eq!(
+            (far_wide.fade, far_tele.fade),
+            (255, 255),
+            "the dither share is band-only"
+        );
+        assert_eq!(
+            pick_lod(60.0, 0, 4, &table.bands_m, table.hysteresis_m),
+            0,
+            "the bands alone would hold level 0 at 60 m"
+        );
+
+        // One meter ball 15.5 m out is 120.7 px at 1080p and 60.3 px at 540p.
+        let mut close = node(2, [0.0, 0.0, -15.5], 1.0);
+        close.prev_lod = 0;
+        let close_snapshot = SceneSnapshot { nodes: vec![close] };
+        let hd = list
+            .build_at(&close_snapshot, &wide, &table, 1080)
+            .expect("1080p")[0];
+        let half = list
+            .build_at(&close_snapshot, &wide, &table, 540)
+            .expect("540p")[0];
+        assert_eq!(
+            (hd.lod, half.lod),
+            (0, 1),
+            "120.7 px holds, 60.3 px coarsens"
+        );
+        assert_eq!(
+            half.lod,
+            hd.lod + 1,
+            "one level sooner in a half-height frame"
+        );
+        assert_eq!(
+            list.build(&close_snapshot, &wide, &table)
+                .expect("default build")[0]
+                .lod,
+            hd.lod,
+            "build is the 1080p default"
+        );
+
+        // A frame height outside 1..=65535 pixels is refused loudly.
+        assert!(matches!(
+            list.build_at(&close_snapshot, &wide, &table, 0),
+            Err(DrawError::BadPixelLod(_))
+        ));
+        assert!(matches!(
+            list.build_at(&close_snapshot, &wide, &table, 65_536),
+            Err(DrawError::BadPixelLod(_))
+        ));
     }
 
     #[test]
