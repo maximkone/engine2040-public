@@ -12,6 +12,7 @@
 
 use crate::depth::ActionLease;
 use crate::melee::{MeleeView, WOUNDED_PERMILLE};
+use crate::perception::{Sight, StagedAction};
 use crate::{Brain, Intent, Percept};
 use engine_input::ParticipantInput as BodyInput;
 
@@ -172,6 +173,16 @@ impl OpponentTable {
         self.last = Some((band, action));
         self.last_dist_mm = Some(dist_mm);
         self.predict(band, action)
+    }
+
+    /// Read the foe through the perception ring instead of the live frame
+    /// (SW85): the sight is one reaction beat old and carries no intent, so a
+    /// press that started inside that beat is not answered. `None` while the
+    /// ring is still filling, so an opt-in caller keeps its current read.
+    pub fn observe_sighted(&mut self, sight: Option<Sight>) -> Option<Intent> {
+        let sight = sight?;
+        let attacking = sight.action == StagedAction::Strike;
+        Some(self.observe_foe(attacking, i32::from(sight.dist_mm)))
     }
 }
 
