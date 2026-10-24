@@ -33,6 +33,10 @@ pub mod decode;
 pub mod device;
 pub mod director;
 pub mod dsp;
+/// Early reflections sized from the room: four tap delays from the wall
+/// distance, each gained by the wall's absorption, summed into the wet bus
+/// with no audio-thread allocation. Std-only.
+pub mod early_reflections;
 pub mod engine;
 pub mod feed;
 /// Gunshot, crack and shout acoustics: distance filter, delay, zone tail,
@@ -49,6 +53,8 @@ pub mod music;
 /// Std-only.
 pub mod occlude;
 pub mod playlist;
+/// Named mixer settings as data: bus gains in permille, applied to a [`dsp::BusMixer`].
+pub mod preset;
 /// Parametric reverb tails with tunnel preset: delay-line pure fns,
 /// zero audio-thread allocs. Std-only.
 pub mod reverb;
