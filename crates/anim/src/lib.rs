@@ -9,6 +9,10 @@ static TEST_ALLOC: engine_core::alloc_probe::CountingAlloc =
 use clip::clamp01;
 use engine_core::Fnv64;
 
+/// Animation budget allocator: one frame budget in milliseconds spent
+/// through the LOD tier ladder, least significant first; the player and
+/// the current opponent are never throttled.
+pub mod anim_budget;
 /// Additive spine: locomotion base, masked upper-body override and flinch
 /// additive through one inertializer, planted feet pinned by two-bone IK.
 pub mod additive;
@@ -79,6 +83,12 @@ mod motion_schema_test;
 /// Style and terrain dials for the motion-matching search: style and grade tags
 /// from the LOC2 bake steer the integer scan. Integer-only (NS7).
 pub mod motion_style;
+/// Motion Warping for melee: a window of a lunge or attack clip's root
+/// motion is scaled and turned to end on a target (the blade reach point),
+/// exact at the window end, the clip's own outside it. Presentation only.
+pub mod motion_warp;
+#[cfg(test)]
+mod motion_warp_test;
 /// Per-fighter pose-hash rings naming the first divergent tick and fighter
 /// between two clients. Diagnostics only, never authoritative.
 pub mod net_diverge;
@@ -88,6 +98,11 @@ pub mod pack_file;
 /// Per-character eval on the RC3 job pool: index-ordered chunks, one owner per
 /// character, poses identical under every chunking. Presentation and bake only.
 pub mod par;
+/// Marker-driven attack phase warp: the clip's impact frame meets the sim's
+/// impact tick for every weapon lead, the windup stretch stops at 2x (a longer
+/// lead holds the peak), and a 0..1 telegraph meter reads the windup. Pure
+/// presentation: no clock, no state, the sim hash never reads it.
+pub mod phase_warp;
 pub mod pose;
 #[cfg(test)]
 mod pose_c1_test;
@@ -127,6 +142,14 @@ mod traversal_link_test;
 mod traversal_rubble_var_test;
 #[cfg(test)]
 mod traversal_siege_test;
+/// View-driven turn in place: the activation gate, the 90/180 clip choice and
+/// the turn clip play rate mapped from the view yaw speed. Presentation only;
+/// the fighter look's root plays the clip and the authority yaw never moves.
+pub mod turn_in_place;
+/// Four damped body-frame movement axes (forward, backward, left, right) that
+/// the locomotion blend turns into a blend-space query. Presentation only; a
+/// half-life ease, a snap for spawn and teleport, no clock and no heap.
+pub mod velocity_blend;
 pub mod viseme;
 /// GASP-class ground feel: distance matching, orientation warping and
 /// stride warping over locomotion output. Std-only; arena presentation

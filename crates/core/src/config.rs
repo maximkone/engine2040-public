@@ -103,6 +103,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn try_new_keeps_the_seed_and_rate_it_was_given() {
+        assert_eq!(
+            Config::try_new(7, 120),
+            Ok(Config {
+                tick_hz: 120,
+                seed: 7,
+                budgets: Budgets::default(),
+            }),
+            "the seed and the rate come from the caller, not the defaults"
+        );
+    }
+
+    #[test]
     fn defaults_match_hash_law() {
         let c = Config::default();
         assert_eq!(c.tick_hz, 60);
