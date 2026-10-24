@@ -29,6 +29,7 @@ pub mod bt;
 /// first divergent tick between two tapes.
 pub mod decision_log;
 pub mod director;
+pub mod tell;
 /// Duel enemy tiers T1-T3: shipped rows, the win bar and the skill score.
 pub mod tier;
 pub use director::{pick_spawn, Budget, SpawnRow};

@@ -245,9 +245,9 @@ mod tests {
     /// Bad rows refuse through this door with the 1-based line.
     #[test]
     fn bad_rows_refuse_with_the_line() {
-        let float = "table enemies version 1\ntier_1 hp_permille=950.0 tell_ticks=15 stagger_permille=400 counter=1\ntier_2 hp_permille=1000 tell_ticks=15 stagger_permille=500 counter=2\ntier_3 hp_permille=1050 tell_ticks=15 stagger_permille=600 counter=1";
+        let float = "table enemies version 1\ntier_1 hp_permille=950.0 tell_ticks=30 stagger_permille=400 counter=1\ntier_2 hp_permille=1000 tell_ticks=30 stagger_permille=500 counter=2\ntier_3 hp_permille=1050 tell_ticks=30 stagger_permille=600 counter=1";
         assert_eq!(parse_tiers(float), Err(TierError::Float { line: 2 }));
-        let thin = "table enemies version 1\ntier_1 hp_permille=500 tell_ticks=15 stagger_permille=400 counter=1\ntier_2 hp_permille=1000 tell_ticks=15 stagger_permille=500 counter=2\ntier_3 hp_permille=1050 tell_ticks=15 stagger_permille=600 counter=1";
+        let thin = "table enemies version 1\ntier_1 hp_permille=500 tell_ticks=30 stagger_permille=400 counter=1\ntier_2 hp_permille=1000 tell_ticks=30 stagger_permille=500 counter=2\ntier_3 hp_permille=1050 tell_ticks=30 stagger_permille=600 counter=1";
         assert_eq!(
             parse_tiers(thin),
             Err(TierError::OutOfFence {

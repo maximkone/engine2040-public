@@ -165,7 +165,7 @@ impl Tables {
 /// replacement sets travel versioned and never mutate this row.
 pub const TABLES_V1: Tables = Tables::v1();
 
-/// The readable-timing row (version 2): startup 15 ticks, parry window 7.
+/// The readable-timing row (version 2): startup 30 ticks, parry window 7.
 /// The literals live once in [`v2_rows`](crate::tables::v2_rows); the arena
 /// steps this row through [`try_step_v2_into`].
 pub const TABLES_V2: Tables = crate::tables::v2_rows();
@@ -2176,10 +2176,10 @@ mod tests {
 
     #[test]
     fn tables_v2_startup_in_readable_range() {
-        let v2 = TABLES_V2;
+        let (v2, floor) = (TABLES_V2, crate::design::MIN_STARTUP_TICKS);
         assert!(
-            (12..=18).contains(&v2.attack_startup_ticks),
-            "v2 startup {} outside 12-18",
+            v2.attack_startup_ticks >= floor,
+            "v2 startup {} under the {floor} tick readability floor",
             v2.attack_startup_ticks
         );
         assert!(

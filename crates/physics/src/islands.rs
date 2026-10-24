@@ -1203,6 +1203,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "the wasm32 panic strategy is a compile-time cfg; the assert states the requirement and fails the wasm leg when it is built unwinding"
+    )]
     fn par_step_a_panicking_island_unwinds_on_the_caller() {
         // wasm32-wasip1 is built with `panic = "abort"`: a panic ends the
         // process, so there is no payload to hand back there. The leg keeps

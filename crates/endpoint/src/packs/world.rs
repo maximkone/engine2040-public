@@ -1045,6 +1045,16 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         CapabilityCard::Commit,
     )?);
+    pack.add(VerbSpec::of::<TerrainSetTool>(
+        TOOL_WORLD_TERRAIN_SET,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<TerrainStatsTool>(
+        TOOL_WORLD_TERRAIN_STATS,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
     pack.add(VerbSpec::of::<ScatterTool>(
         TOOL_WORLD_SCATTER,
         PACK,
@@ -1057,6 +1067,266 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     Ok(pack)
 }
+
+/// Verb: cook a declared height grid into this session's terrain mesh.
+pub const TOOL_WORLD_TERRAIN_SET: &str = "world.terrain.set";
+/// Verb: report this session's cooked terrain mesh stats.
+pub const TOOL_WORLD_TERRAIN_STATS: &str = "world.terrain.stats";
+/// The name the render lane draws a cooked height grid under; it equals
+/// `engine_render::terrain::TERRAIN_DRAW_NAME`, which this crate does not link.
+pub const TERRAIN_DRAW_NAME: &str = "terrain";
+/// The mesh identity the render lane's draw list carries for a cooked grid
+/// (`"TERRAIN1"`); it equals `engine_render::terrain::TERRAIN_MESH_ID`.
+pub const TERRAIN_MESH_ID: u64 = 0x5445_5252_4149_4e31;
+
+/// Highest millimetre height a grid may declare; the cook's own cap.
+pub const MAX_TERRAIN_HEIGHT_MM: i32 = 1_000_000;
+/// Widest sample spacing a grid may declare, in millimetres.
+pub const MAX_TERRAIN_SPACING_MM: u32 = 1_000_000;
+/// Rows or columns a grid may declare; the cook's own cap.
+pub const MAX_TERRAIN_SIDE: u32 = 1024;
+
+/// A declared height grid: integer millimetre heights, row-major.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct TerrainSetArgs {
+    /// Rows along Z, 2..=1024.
+    pub rows: u32,
+    /// Columns along X, 2..=1024.
+    pub cols: u32,
+    /// Distance between neighbouring samples in whole millimetres, 1..=1000000.
+    pub spacing_mm: u32,
+    /// Heights in millimetres, row-major, exactly `rows * cols` entries.
+    pub heights_mm: Vec<i32>,
+}
+
+/// What `world.terrain.set` answers: the session revision and the cooked mesh.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct TerrainSetOutput {
+    /// How many terrain sets this session has made; 1 on the first.
+    pub revision: u64,
+    /// Vertices the cook made, `rows * cols`.
+    pub vertices: u32,
+    /// Triangles the cook made, `(rows - 1) * (cols - 1) * 2`.
+    pub triangles: u32,
+}
+
+/// `world.terrain.stats` takes no arguments: it reads this session's terrain.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct TerrainStatsArgs {}
+
+/// What `world.terrain.stats` answers: the cooked mesh in the render lane's terms.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct TerrainStatsOutput {
+    /// Session revision of the stored terrain.
+    pub revision: u64,
+    /// Rows along Z.
+    pub rows: u32,
+    /// Columns along X.
+    pub cols: u32,
+    /// Sample spacing in millimetres.
+    pub spacing_mm: u32,
+    /// Vertices in the mesh.
+    pub vertices: u32,
+    /// Triangles in the mesh.
+    pub triangles: u32,
+    /// Bounding sphere in meters, `[x, y, z, radius]`.
+    pub bounds: [f32; 4],
+    /// Draw name the render lane lists the terrain under.
+    pub draw_name: String,
+    /// Mesh identity the render lane's draw list carries.
+    pub draw_mesh: u64,
+}
+
+/// One cooked session terrain: the row `world.terrain.stats` reports.
+#[derive(Debug, Clone)]
+struct SessionTerrain {
+    rows: u32,
+    cols: u32,
+    spacing_mm: u32,
+    vertices: u32,
+    triangles: u32,
+    bounds: [f32; 4],
+}
+
+/// The per-session terrain table: the set count (the revision) plus its mesh.
+static TERRAINS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<u64, (u64, SessionTerrain)>>> =
+    std::sync::OnceLock::new();
+
+/// The table, or the poisoned-lock refusal naming the restart.
+fn terrains() -> Result<
+    std::sync::MutexGuard<'static, std::collections::BTreeMap<u64, (u64, SessionTerrain)>>,
+    McpToolError,
+> {
+    TERRAINS.get_or_init(std::sync::Mutex::default).lock().map_err(|_| {
+        McpToolError::new(
+            "lock_poisoned",
+            "terrain table is poisoned; restart the door",
+        )
+    })
+}
+
+/// The bounding sphere of a cooked grid, in meters: center of the integer
+/// millimetre box, then the farthest vertex from it.
+fn cooked_bounds(positions_mm: &[[i32; 3]]) -> [f32; 4] {
+    let mut min = [i64::MAX; 3];
+    let mut max = [i64::MIN; 3];
+    for point in positions_mm {
+        for (axis, value) in point.iter().enumerate() {
+            let value = i64::from(*value);
+            min[axis] = min[axis].min(value);
+            max[axis] = max[axis].max(value);
+        }
+    }
+    if positions_mm.is_empty() {
+        return [0.0; 4];
+    }
+    let center_mm = [
+        (min[0] + max[0]) / 2,
+        (min[1] + max[1]) / 2,
+        (min[2] + max[2]) / 2,
+    ];
+    let mut radius_sq = 0i64;
+    for point in positions_mm {
+        let offsets = [
+            i64::from(point[0]) - center_mm[0],
+            i64::from(point[1]) - center_mm[1],
+            i64::from(point[2]) - center_mm[2],
+        ];
+        let distance_sq = offsets[0] * offsets[0]
+            + offsets[1] * offsets[1]
+            + offsets[2] * offsets[2];
+        radius_sq = radius_sq.max(distance_sq);
+    }
+    let radius_mm = u64::try_from(radius_sq)
+        .unwrap_or(u64::MAX)
+        .isqrt()
+        .min(1_800_000_000);
+    let radius_mm = i32::try_from(radius_mm).unwrap_or(i32::MAX);
+    [
+        meters_of_mm(center_mm[0]),
+        meters_of_mm(center_mm[1]),
+        meters_of_mm(center_mm[2]),
+        meters_of_mm(i64::from(radius_mm)),
+    ]
+}
+
+/// One integer millimetre count as meters; a count past the `i32` range clamps,
+/// because a grid cap keeps every coordinate far below it.
+fn meters_of_mm(mm: i64) -> f32 {
+    let whole = i32::try_from(mm).unwrap_or(if mm < 0 { i32::MIN } else { i32::MAX });
+    engine_core::checked::f32_from_f64(f64::from(whole) / 1000.0)
+}
+
+/// `world.terrain.set`: cook the declared grid and keep it for this session.
+fn terrain_set_verb(
+    server: &McpServer,
+    args: &TerrainSetArgs,
+) -> Result<TerrainSetOutput, McpToolError> {
+    if args.rows > MAX_TERRAIN_SIDE || args.cols > MAX_TERRAIN_SIDE {
+        return Err(McpToolError::new(
+            "bad_height_grid",
+            format!(
+                "{} x {} is past the {MAX_TERRAIN_SIDE} rows and columns a grid may declare; \
+                 recovery: split the grid",
+                args.rows, args.cols
+            ),
+        ));
+    }
+    let grid = engine_assets::collider_cook::HeightGrid {
+        rows: args.rows,
+        cols: args.cols,
+        spacing_mm: args.spacing_mm,
+        heights_mm: args.heights_mm.clone(),
+    };
+    let cooked = engine_assets::collider_cook::cook_height_grid(&grid).map_err(|why| {
+        McpToolError::new(
+            "bad_height_grid",
+            format!(
+                "{why}; recovery: declare rows, columns and exactly rows * cols heights, each \
+                 within +-{MAX_TERRAIN_HEIGHT_MM} mm and spaced 1..={MAX_TERRAIN_SPACING_MM} mm"
+            ),
+        )
+    })?;
+    let vertices = u32::try_from(cooked.mesh.positions_mm.len()).unwrap_or(u32::MAX);
+    let triangles = u32::try_from(cooked.mesh.indices.len() / 3).unwrap_or(u32::MAX);
+    let row = SessionTerrain {
+        rows: args.rows,
+        cols: args.cols,
+        spacing_mm: args.spacing_mm,
+        vertices,
+        triangles,
+        bounds: cooked_bounds(&cooked.mesh.positions_mm),
+    };
+    server.dispatch(TOOL_WORLD_TERRAIN_SET, |state| {
+        let mut table = terrains()?;
+        let entry = table.entry(state.session()).or_insert((0, row.clone()));
+        entry.0 += 1;
+        entry.1 = row;
+        Ok(TerrainSetOutput {
+            revision: entry.0,
+            vertices,
+            triangles,
+        })
+    })
+}
+
+/// `world.terrain.stats`: report this session's terrain in the render lane's terms.
+fn terrain_stats_verb(
+    server: &McpServer,
+    _args: &TerrainStatsArgs,
+) -> Result<TerrainStatsOutput, McpToolError> {
+    server.dispatch(TOOL_WORLD_TERRAIN_STATS, |state| {
+        let table = terrains()?;
+        let Some((revision, row)) = table.get(&state.session()) else {
+            return Err(McpToolError::new(
+                "no_terrain",
+                "no terrain is set for this session; recovery: call world.terrain.set with a \
+                 height grid first",
+            ));
+        };
+        Ok(TerrainStatsOutput {
+            revision: *revision,
+            rows: row.rows,
+            cols: row.cols,
+            spacing_mm: row.spacing_mm,
+            vertices: row.vertices,
+            triangles: row.triangles,
+            bounds: row.bounds,
+            draw_name: TERRAIN_DRAW_NAME.to_owned(),
+            draw_mesh: TERRAIN_MESH_ID,
+        })
+    })
+}
+
+crate::e2_tool!(
+    /// `world.terrain.set`: cook a declared height grid for this session.
+    TerrainSetTool,
+    name = TOOL_WORLD_TERRAIN_SET,
+    description = "Cook a declared height grid into this session's terrain mesh and answer the session revision, vertices and triangles. `heights_mm` is row-major integer millimetres, exactly rows * cols entries; rows and cols are 2..=1024 and `spacing_mm` is 1..=1000000. The mesh is deterministic: the same grid always cooks the same bytes.",
+    readonly = false,
+    args = TerrainSetArgs,
+    output = TerrainSetOutput,
+    invoke = terrain_set_verb
+);
+
+crate::e2_tool!(
+    /// `world.terrain.stats`: report this session's cooked terrain.
+    TerrainStatsTool,
+    name = TOOL_WORLD_TERRAIN_STATS,
+    description = "Report this session's cooked terrain grid, vertex and triangle counts, bounding sphere in meters, and the draw name and mesh identity the render lane draws it under. Refuses before a world.terrain.set. Read-only.",
+    readonly = true,
+    args = TerrainStatsArgs,
+    output = TerrainStatsOutput,
+    invoke = terrain_stats_verb
+);
 
 #[cfg(test)]
 mod tests {
@@ -1473,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_registers_its_five_verbs() {
+    fn pack_registers_its_seven_verbs() {
         let pack = pack().expect("registers");
         assert_eq!(pack.name(), PACK);
         assert_eq!(
@@ -1482,6 +1752,8 @@ mod tests {
                 TOOL_WORLD_TERRAIN_BAKE,
                 TOOL_WORLD_TERRAIN_SAMPLE,
                 TOOL_WORLD_TERRAIN_PAINT,
+                TOOL_WORLD_TERRAIN_SET,
+                TOOL_WORLD_TERRAIN_STATS,
                 TOOL_WORLD_SCATTER,
                 TOOL_WORLD_WFC
             ]
@@ -1510,5 +1782,96 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    /// A 64 x 64 grid whose heights walk 0..=499 mm: the row the accept names.
+    fn sixty_four_grid() -> TerrainSetArgs {
+        let rows = 64u32;
+        let cols = 64u32;
+        let heights_mm: Vec<i32> = (0..rows.saturating_mul(cols))
+            .map(|index| i32::try_from(index % 500).unwrap_or(0))
+            .collect();
+        TerrainSetArgs {
+            rows,
+            cols,
+            spacing_mm: 250,
+            heights_mm,
+        }
+    }
+
+    #[test]
+    fn terrain_set_cooks_a_sixty_four_grid_and_stats_reports_its_mesh() {
+        let server = McpServer::new(241, Capability::unrestricted(241));
+        let set = TerrainSetTool::invoke(&server, sixty_four_grid()).expect("the grid cooks");
+        assert_eq!(set.revision, 1, "the first set of this session");
+        assert_eq!(set.vertices, 64 * 64);
+        assert_eq!(set.triangles, 2 * 63 * 63, "two triangles per quad");
+        let stats = TerrainStatsTool::invoke(&server, TerrainStatsArgs::default())
+            .expect("stats read back");
+        assert_eq!(stats.revision, 1);
+        assert_eq!((stats.rows, stats.cols, stats.spacing_mm), (64, 64, 250));
+        assert_eq!(stats.triangles, 2 * 63 * 63);
+        assert_eq!(stats.vertices, 64 * 64);
+        // The render lane's terms: the name and mesh identity its draw list uses.
+        assert_eq!(stats.draw_name, TERRAIN_DRAW_NAME);
+        assert_eq!(stats.draw_mesh, TERRAIN_MESH_ID);
+        // 63 * 250 mm across, half a meter up: the sphere reaches the far corner.
+        let [x, y, z, radius] = stats.bounds;
+        assert!((7.0..=8.0).contains(&x), "center x {x}");
+        assert!((0.0..=0.5).contains(&y), "center y {y}");
+        assert!((7.0..=8.0).contains(&z), "center z {z}");
+        assert!(radius >= 8.0, "the sphere reaches the far corner: {radius}");
+        // A second set is the next revision, same mesh.
+        let again = TerrainSetTool::invoke(&server, sixty_four_grid()).expect("sets again");
+        assert_eq!(again.revision, 2);
+        assert_eq!(again.triangles, 2 * 63 * 63);
+    }
+
+    #[test]
+    fn terrain_stats_refuses_before_a_set_and_a_bad_grid_is_named() {
+        let server = McpServer::new(242, Capability::unrestricted(242));
+        let refused = TerrainStatsTool::invoke(&server, TerrainStatsArgs::default())
+            .expect_err("nothing is set yet");
+        assert_eq!(refused.code, "no_terrain");
+        assert!(refused.message.contains("world.terrain.set"));
+        let short = TerrainSetTool::invoke(
+            &server,
+            TerrainSetArgs {
+                rows: 3,
+                cols: 3,
+                spacing_mm: 500,
+                heights_mm: vec![0; 8],
+            },
+        )
+        .expect_err("eight heights for nine samples");
+        assert_eq!(short.code, "bad_height_grid");
+        assert!(short.message.contains("rows * cols"), "{}", short.message);
+        let thin = TerrainSetTool::invoke(
+            &server,
+            TerrainSetArgs {
+                rows: 1,
+                cols: 3,
+                spacing_mm: 500,
+                heights_mm: vec![0; 3],
+            },
+        )
+        .expect_err("one row has no quad");
+        assert_eq!(thin.code, "bad_height_grid");
+        let wide = TerrainSetTool::invoke(
+            &server,
+            TerrainSetArgs {
+                rows: MAX_TERRAIN_SIDE + 1,
+                cols: 2,
+                spacing_mm: 500,
+                heights_mm: vec![0; 2],
+            },
+        )
+        .expect_err("past the side cap");
+        assert_eq!(wide.code, "bad_height_grid");
+        assert!(wide.message.contains("1024"), "{}", wide.message);
+        // A refused set leaves the session exactly as it was.
+        let still = TerrainStatsTool::invoke(&server, TerrainStatsArgs::default())
+            .expect_err("no terrain yet");
+        assert_eq!(still.code, "no_terrain");
     }
 }

@@ -22,11 +22,11 @@ Wiring check (re-checked 2026-10-21): the rows live in `depth.rs` and `DepthBrai
 
 Combat is v2 (`content/design/combat.rows`, `crates/combat/src/tables.rs`):
 
-- Tell: `attack_startup_ticks=15` (250 ms at 60 Hz). Recovery 8. V1 startup 4 is replay-only.
+- Tell: `attack_startup_ticks=30` (500 ms at 60 Hz). Recovery 6. V1 startup 4 is replay-only.
 - Parry window 7 (below startup, so a held block ages out). Parry stagger 12.
 - Dodge duration 10, i-frames 6. Dodge cost 20, attack cost 25, regen 2 per tick.
 - Damage 120 permille. Chip 1/5. Hit react 6, hitstop 4, knockdown 30.
-- Every attack reads Windup (15) then Active (1) then Recovery (8) from `StrikePhase`.
+- Every attack reads Windup (30) then Active (1) then Recovery (6) from `StrikePhase`.
 
 Bodies and space:
 
@@ -48,13 +48,13 @@ Two numbers below are house numbers, not measured facts:
 - Archetype: center holder. Pins the middle and trades blows. Block bias +75, attack +25 (`depth.rs`).
 - Speed: top 5.0 m/s, same as the player. Advance bias -25. It does not chase. It holds.
 - Moves: Attack, Block, Dodge, Advance, Retreat (plus Reposition when far). Same `Intent` set as the player.
-- Tell in ticks: 15. Windup 15, Active 1, Recovery 8. Read from `StrikePhase`.
+- Tell in ticks: 30. Windup 30, Active 1, Recovery 6. Read from `StrikePhase`.
 - Counter: parry. A fresh block press inside the 7-tick window negates the hit and staggers the holder 12 ticks. Dodge (6 i-frames) also works, but parry is the intended answer.
 - Reason for HP: 950 permille (95 display), the `tier_1` row (`content/design/enemies.rows:23`). Just under the player. HP tests answers, not grind. Stats stay in the narrow 900-1200 band (`content/design/enemies.rows:6`). Edge comes from hit rate, not from HP.
 - Silhouette note: square stance, shield forward, feet planted. Reads as a wall. Spectacle serves information, never hides the tell.
 - Question it asks the player:
   - "Can you avoid my damage?" Answer: parry. Fresh block inside 7 ticks.
-  - "Can you hit me?" Answer: attack in the punish window. Its Recovery is 8 ticks. Strike then, as `melee.rs` rewards with +250 attack bias on a recovering target.
+  - "Can you hit me?" Answer: attack in the punish window. Its Recovery is 6 ticks. Strike then, as `melee.rs` rewards with +250 attack bias on a recovering target.
 - Mobility check: reach 1.5 m. From the 3 m wait ring it closes in about 36 ticks at 5 m/s. Player dodge covers 0.83 m per 10 ticks. The holder is not faster than the player, but it does not need to be. It holds the center and forces the player to come. It is a threat because it matches escape speed and cuts the ring, not because it outruns. An enemy slower than the player's escape is never a threat. This one is not slower.
 
 ## Card 2 — Flanker duelist (`Role::Flanker`)
@@ -63,13 +63,13 @@ Two numbers below are house numbers, not measured facts:
 - Archetype: circler. Goes for side arcs. Advance bias +75, dodge bias +50 (`depth.rs`).
 - Speed: top 5.0 m/s, same as the player. It uses speed sideways, not head-on. It wraps and then closes.
 - Moves: Attack, Block, Dodge, Advance, Retreat (plus Reposition when far). Same `Intent` set as the player. It prefers Dodge and Advance.
-- Tell in ticks: 15. Windup 15, Active 1, Recovery 8. Same clock as Holder. Its arc reads as a sidestep before the swing.
+- Tell in ticks: 30. Windup 30, Active 1, Recovery 6. Same clock as Holder. Its arc reads as a sidestep before the swing.
 - Counter: dodge. Sidestep the arc. The 6 i-frame ticks cover the 1 Active tick with margin. Block is the backup answer. Parry still works but the window is harder on a moving foe.
 - Reason for HP: 1000 permille (100 display), the `tier_2` row (`content/design/enemies.rows:24`). Same as the player, same reason as Holder. Skill first. Veterans in `matchups.csv` sit at 110 HP only to set the odd cycle, still inside the narrow band.
 - Silhouette note: bladed stance, body sideways, always moving. Reads as a knife circling. Distinct from the Holder wall at a glance.
 - Question it asks the player:
   - "Can you avoid my damage?" Answer: dodge. Move with the arc, not into it.
-  - "Can you hit me?" Answer: cut it off, then attack. Advance to close the 3 m ring, then strike when it commits. When it recovers (8 ticks), punish as with Holder.
+  - "Can you hit me?" Answer: cut it off, then attack. Advance to close the 3 m ring, then strike when it commits. When it recovers (6 ticks), punish as with Holder.
 - Mobility check: reach 1.5 m. It closes the 3 m ring in about 36 ticks at 5 m/s, same math as Holder. Player dodge is 0.83 m per 10 ticks. The flanker matches escape speed and adds lateral angle, so it stays a threat. A straight-line runner slower than 5 m/s would never catch a dodging player. This one does not run straight.
 
 ## Why no other cards
@@ -87,7 +87,7 @@ hits one doc comment only (`depth.rs:449`), so the ladder is the tier *number*
 and the name is this card's word for it. The `tier_4` file row landed:
 `parse_tiers` seats four rows (`crates/ai/src/depth.rs:571`),
 `content/design/enemies.rows` carries tier_1..tier_4, and
-`crates/game/tests/it/design_enemy.rs` seats four rows, checks the 15-tick tell
+`crates/game/tests/it/design_enemy.rs` seats four rows, checks the 30-tick tell
 against the v2 table and runs the 60% bar over its stat model. What is still
 PROPOSED is the rung that *holds*: the row file carries HP, poise, tell and
 counter only, while `TierRow::role()`, `reaction_ticks()` and
@@ -112,7 +112,7 @@ Tier rows scale HP inside the narrow band only: `hp_permille` 950/1000/1050/1100
 
 Tier composition (PROPOSED, and it adds no kind): T1 and T3 hold the Holder card, T2 the Flanker card, T4 a Holder body with Flanker feet. `Role` still has its two kinds, so no card below was invented. The rung is derived, not authored: `TierRow::role()` maps tier 2 to `Role::Flanker` and every other tier to `Role::Holder`, and `reaction_ticks()`/`aggression_permille()` climb 4/2/1/1 and 400/500/700/700 (`crates/ai/src/depth.rs:287,295,304`). The row file still carries no role column, so a designer cannot retune a rung without a Rust edit — which is what the packet changes.
 
-Boss: owner answered with `EB-2026-10-13-S2` [BOSS-primus-t4] (both asks CLOSED 2026-10-12/13): build the T4 primus boss as these cards propose it. The answer is recorded by the earlier runs of this seat (`target/queue/archive/builder-design-enemy-r10.md`, `r13.md`); today's `node C:/empire/center/empire.mjs inbox engine2040 list` does not list it, so no second ask was filed. Code and file landed: `PRIMUS_TIER` in `crates/ai/src/depth.rs:453` (1100 HP inside the narrow band, 15-tick tell, parry answer, phase 2 at or below 500 HP) and the tier_4 row in `content/design/enemies.rows:26`. No new boss stats beyond that answer; what the boss still needs is the skill rung and a sweep that counts its phase-2 answer, not the stat model alone.
+Boss: owner answered with `EB-2026-10-13-S2` [BOSS-primus-t4] (both asks CLOSED 2026-10-12/13): build the T4 primus boss as these cards propose it. The answer is recorded by the earlier runs of this seat (`target/queue/archive/builder-design-enemy-r10.md`, `r13.md`); today's `node C:/empire/center/empire.mjs inbox engine2040 list` does not list it, so no second ask was filed. Code and file landed: `PRIMUS_TIER` in `crates/ai/src/tell.rs` (1100 HP inside the narrow band, 30-tick tell, parry answer, phase 2 at or below 500 HP) and the tier_4 row in `content/design/enemies.rows:26`. No new boss stats beyond that answer; what the boss still needs is the skill rung and a sweep that counts its phase-2 answer, not the stat model alone.
 
 ## Curve and bar numbers (measured, not proposed)
 
@@ -129,7 +129,7 @@ The 60% tier bar and the 2-4 tick noise are house numbers (stated at the top). T
 
 ## What the pilot checks
 
-- Every swing shows its 15-tick Windup. No instant hit.
+- Every swing shows its 30-tick Windup. No instant hit.
 - Holder parry works in the 7-tick window and staggers 12.
 - Flanker arc is dodged with the 6 i-frame ticks.
 - Both cards feel fair: Holder at 950 HP (`content/design/enemies.rows:23`), Flanker at 1000 HP (`:24`). Wins come from answers, not from HP.

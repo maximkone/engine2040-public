@@ -9,6 +9,7 @@ pub mod gestures;
 pub mod layers;
 pub mod look;
 pub mod map;
+pub mod touch;
 
 pub use bindings::{
     apply_deadzone, Binding, Bindings, BoundAction, InputConfig, PhysicalButton, ACTION_COUNT,
@@ -21,6 +22,11 @@ pub use gestures::{
     TAP_MIN_HELD_TICKS,
 };
 pub use map::{hash_bits, Action, Chord, Frame, Input, InputMap, Key, RepeatLast};
+pub use touch::{
+    TouchEvent, TouchFrame, TouchLane, TouchLayout, TouchPoint, TouchZone, MAX_FINGERS, PAD_ATTACK,
+    PAD_BLOCK, PAD_DODGE, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_UP, SCREEN_PERMILLE,
+    STICK_DEADZONE_PERMILLE, TOUCH_BUTTONS, TOUCH_BUTTON_COUNT,
+};
 
 /// Neutral alias for [`FighterTape`]: one bout's input tape. Cross-genre
 /// consumers (proof, playtest, editor) use this name so genre-neutral code

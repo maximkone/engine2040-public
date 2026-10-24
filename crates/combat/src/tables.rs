@@ -124,16 +124,19 @@ pub const HEAVY_HITSTOP_TICKS_V2: u32 = 6;
 /// answer reads. V1 keeps its single row.
 pub const PARRY_HITSTOP_TICKS_V2: u32 = 8;
 
-/// Readable-timing row: [`TABLES_V1`] with a slower light-attack startup
-/// (15 ticks, inside 12-18) and a wider parry window (7 ticks, inside 6-8).
-/// Every other row matches V1, and 7 < 15 satisfies the replacement rule,
-/// so [`validate_tables`] accepts version 2. Single owner of the 15/7
+/// Readable-timing row: [`TABLES_V1`] with a readable light-attack startup
+/// (30 ticks = 500 ms, the measured readability floor) and a wider parry
+/// window (7 ticks, inside 6-8). The recovery goes shorter (8 to 6) so the
+/// longer tell does not only make every exchange slower. Every other row
+/// matches V1, and 7 < 30 satisfies the replacement rule, so
+/// [`validate_tables`] accepts version 2. Single owner of the 30/7/6
 /// literals; [`TABLES_V2`] reuses this row.
 ///
 /// [`TABLES_V1`]: crate::fight::TABLES_V1
 pub const fn v2_rows() -> Tables {
     Tables {
-        attack_startup_ticks: 15,
+        attack_startup_ticks: crate::design::MIN_STARTUP_TICKS,
+        attack_recovery_ticks: 6,
         parry_window_ticks: 7,
         ..TABLES_V1
     }

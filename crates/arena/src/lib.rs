@@ -3191,22 +3191,22 @@ mod tests {
     }
 
     #[test]
-    fn table_version_v2_steps_startup_15() {
+    fn table_version_v2_steps_startup_30() {
         let base = short_config();
         let config = ArenaConfig {
             table_version: TABLES_VERSION_V2,
             ..base
         };
         assert_eq!(config.validate(), Ok(()));
-        assert!((12..=18).contains(&TABLES_V2.attack_startup_ticks));
-        assert_eq!(TABLES_V2.attack_startup_ticks, 15);
+        assert!(TABLES_V2.attack_startup_ticks >= 30);
+        assert_eq!(TABLES_V2.attack_startup_ticks, 30);
         assert!((6..=8).contains(&TABLES_V2.parry_window_ticks));
         assert_eq!(TABLES_V2.parry_window_ticks, 7);
         let tape = close_attack_tape(&config);
-        assert_eq!(v2_hit_ticks(&config, &tape), vec![15]);
+        assert_eq!(v2_hit_ticks(&config, &tape), vec![30]);
         assert_eq!(
             v2_hit_ticks(&config, &tape),
-            vec![15],
+            vec![30],
             "same config plus tape twice gives identical hit ticks"
         );
     }
@@ -3306,7 +3306,7 @@ mod tests {
         let mut sim = Sim::build(&config, &tape, false, false).expect("valid sim");
         sim.step(&tape).expect("valid step");
         assert_eq!(sim.cues(), [AttackStarted { attacker: 0 }].as_slice());
-        // The swing is still in flight (v2 startup is 15 ticks) but the cue
+        // The swing is still in flight (v2 startup is 30 ticks) but the cue
         // belongs to the press tick only, so the next tick reads empty.
         sim.step(&tape).expect("valid step");
         assert!(sim.cues().is_empty(), "cues never linger a tick");

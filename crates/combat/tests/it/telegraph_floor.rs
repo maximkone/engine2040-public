@@ -155,17 +155,19 @@ fn telegraph_strict_fails_below_floor() {
 #[test]
 fn strict_rule_flags_sub_floor_moves_without_the_env_switch() {
     // The env switch is process-wide, so the rule itself is proved on plain
-    // rows: the shipped tables fail it today, a row at the floor passes, and
-    // one tick under the floor fails. Failing here is what `TELEGRAPH_STRICT=1`
-    // turns into a red run.
-    for (label, rows) in &shipped_rules_tables() {
-        assert_eq!(
-            strict_violations(rows),
-            vec![0, 1],
-            "rules {label}: both shipped moves sit under the floor"
-        );
-        assert_eq!(strict_violations(rows), strict_violations(rows), "x2");
-    }
+    // rows: v1 (the proof scene) fails it, v2 (the window's rows) clears the
+    // floor, a row at the floor passes, and one tick under it fails.
+    // Failing v1 is what `TELEGRAPH_STRICT=1` turns into a red run.
+    let shipped = shipped_rules_tables();
+    assert_eq!(
+        strict_violations(&shipped[0].1),
+        vec![0, 1],
+        "rules v1: both shipped moves sit under the floor"
+    );
+    assert!(
+        strict_violations(&shipped[1].1).is_empty(),
+        "rules v2: the readable 30-tick tell clears the floor for every move"
+    );
     let row = |id: u8, startup: u32, active: u32| {
         (id, startup, active, signal_attack_ms(startup, active))
     };
@@ -179,7 +181,7 @@ fn strict_rule_flags_sub_floor_moves_without_the_env_switch() {
 
 #[test]
 fn telegraph_report_covers_both_shipped_rules_versions() {
-    // The window plays the v2 rows (`TABLES_V2`, startup 15) while the proof
+    // The window plays the v2 rows (`TABLES_V2`, startup 30) while the proof
     // scene keeps v1 (startup 4), so a floor verdict read off v1 alone says
     // nothing about the rules a player meets. Report both, pinned.
     let v1 = rules_signal_table(&TABLES_V1);
@@ -190,10 +192,10 @@ fn telegraph_report_covers_both_shipped_rules_versions() {
     assert_eq!(v1, rules_signal_table(&TABLES_V1));
     assert_eq!(v2, rules_signal_table(&TABLES_V2));
     assert_eq!(v1, vec![(0, 4, 2, 100), (1, 4, 3, 116)]);
-    assert_eq!(v2, vec![(0, 15, 2, 283), (1, 15, 3, 300)]);
-    // v2 widens the tell for every move and still clears no floor: this is
-    // why `TELEGRAPH_STRICT=1` is red on the shipped rows today.
-    assert_eq!(TABLES_V2.attack_startup_ticks, 15);
+    assert_eq!(v2, vec![(0, 30, 2, 533), (1, 30, 3, 550)]);
+    // v2 clears the full 340 ms telegraph floor for every move, so
+    // `TELEGRAPH_STRICT=1` is green on the shipped rows.
+    assert_eq!(TABLES_V2.attack_startup_ticks, 30);
     assert_eq!(TABLES_V1.attack_startup_ticks, 4);
     for (moved, baseline) in v2.iter().zip(v1.iter()) {
         assert_eq!(moved.0, baseline.0, "same move id in both versions");
@@ -205,8 +207,8 @@ fn telegraph_report_covers_both_shipped_rules_versions() {
             baseline.3
         );
         assert!(
-            moved.3 < FLOOR_MS,
-            "move {} at {} ms must sit below the {FLOOR_MS} ms floor while the tell stays short",
+            moved.3 >= FLOOR_MS,
+            "move {} at {} ms must clear the {FLOOR_MS} ms floor under the readable v2 tell",
             moved.0,
             moved.3
         );

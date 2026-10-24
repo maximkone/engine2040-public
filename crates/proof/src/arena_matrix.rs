@@ -98,11 +98,14 @@ impl Fixture {
     }
 
     /// The scripted inputs of one tick, slot order. Slot 0 swings every 30
-    /// ticks, guards for a window and dodges once per 120. Slot 1 re-presses
-    /// block every 8 ticks, so a blow that reaches it from the front lands
-    /// inside a fresh parry window, and swings once per 48. Facing turns
-    /// slowly. The seed was picked by scanning seeds for a tape in which
-    /// every kind of outcome below happens.
+    /// ticks, guards from phase 60 and dodges once per 120. Slot 1 holds block
+    /// for 15 of every 16 ticks and swings once per 48. The long hold is what
+    /// keeps a held-block soak on the tape: the 30-tick tell pushed the
+    /// arrivals past the 7-tick parry window of the old 8-tick press, so the
+    /// arrivals now land on a guard that is already up (a parry) or one that
+    /// has been up a while (a plain block). Facing turns slowly. The seed was
+    /// picked by scanning seeds for a tape in which every kind of outcome
+    /// below happens.
     fn inputs(&self, tick: u32) -> Vec<BodyInput> {
         let mut out = Vec::with_capacity(usize::from(HUMANS));
         for slot in 0..HUMANS {
@@ -112,7 +115,7 @@ impl Fixture {
                 if phase.is_multiple_of(30) {
                     bits |= ATTACK;
                 }
-                if (84..96).contains(&phase) {
+                if (60..96).contains(&phase) {
                     bits |= BLOCK;
                 }
                 if phase == 108 {
@@ -121,7 +124,7 @@ impl Fixture {
                 if self.flip_tick == Some(tick) {
                     bits ^= ATTACK;
                 }
-            } else if tick % 8 != 7 {
+            } else if tick % 16 < 15 {
                 bits |= BLOCK;
             } else if tick % 48 == 47 {
                 bits |= ATTACK;
@@ -298,8 +301,30 @@ mod tests {
         // BG6 moved it on 2026-10-24: the rules-v2 plan reads the
         // match world's obstacles, so a foe behind cover never enters
         // the view (receipt docs/receipts/2026-10-24-bg6-cover).
+        // OPT59 moved it on 2026-10-24: the readable tell raises the light
+        // startup 15 -> 30 ticks, so every swing lands 15 ticks later (receipt
+        // docs/receipts/2026-10-24-opt59-readable-tell).
         let match_run = run(&Fixture::STANDARD).expect("standard match");
-        assert_eq!(match_run.digest, 0x3886_d0f7_8453_149c);
+        // The bout outcome beside the digest: a retune that stalls the fight
+        // shows up here as hits=0 or knockdowns=0, not only as a moved hash.
+        let tally = &match_run.tally;
+        println!(
+            "arena digest={:016x} ticks={} hits={} blocks={} parries={} dodges={} knockdowns={} breaks={}",
+            match_run.digest,
+            match_run.hashes.len(),
+            tally.hits,
+            tally.blocks,
+            tally.parries,
+            tally.dodges,
+            tally.knockdowns,
+            tally.breaks,
+        );
+        assert_eq!(match_run.digest, 0x2b30_084d_1530_cc78);
+        assert!(tally.hits > 0, "the 1200-tick bout must still land blows");
+        assert!(
+            tally.knockdowns > 0,
+            "the 1200-tick bout must still resolve to a knockdown"
+        );
     }
 
     /// The spine step plays the same match and must fold the same arena
@@ -308,7 +333,7 @@ mod tests {
     #[test]
     fn spine_arena_digest_is_pinned() {
         let first = spine_digest(&Fixture::STANDARD).expect("spine match");
-        assert_eq!(first, 0x3886_d0f7_8453_149c);
+        assert_eq!(first, 0x2b30_084d_1530_cc78);
         let second = spine_digest(&Fixture::STANDARD).expect("spine match");
         assert_eq!(second, first);
     }

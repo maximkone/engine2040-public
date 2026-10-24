@@ -40,7 +40,7 @@ struct EnemyRow {
     line: usize,
     /// Health in permille, narrow `900..=1200` band (skill first).
     hp_permille: u32,
-    /// Readable startup in ticks, 15 or more.
+    /// Readable startup in ticks, 30 or more (500 ms at 60 Hz).
     tell_ticks: u32,
     /// Poise hold in permille, `0..=1000` (higher holds longer).
     stagger_permille: u32,
@@ -204,8 +204,8 @@ fn every_row_has_readable_tell_and_allowed_counter() {
             row.hp_permille
         );
         assert!(
-            row.tell_ticks >= 15,
-            "line {}: tell_ticks {} must be 15 or more (readable startup)",
+            row.tell_ticks >= 30,
+            "line {}: tell_ticks {} must be 30 or more (readable startup)",
             row.line,
             row.tell_ticks
         );
@@ -234,8 +234,8 @@ fn every_row_has_readable_tell_and_allowed_counter() {
 )]
 fn tell_tracks_v2_startup() {
     assert!(
-        TABLES_V2.attack_startup_ticks >= 15,
-        "v2 startup {} must be 15 ticks or more",
+        TABLES_V2.attack_startup_ticks >= 30,
+        "v2 startup {} must be 30 ticks or more",
         TABLES_V2.attack_startup_ticks
     );
     let (_, rows) = parse_table(ENEMIES_SRC);

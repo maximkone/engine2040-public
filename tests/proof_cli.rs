@@ -54,7 +54,10 @@ fn success(output: Output) -> String {
 #[test]
 fn default_and_max_seed_have_real_machine_readable_receipts() {
     let default = success(run(&["--format", "json", "--verify"]));
-    assert!(default.contains("\"final_hash\":\"d57b5c8ae3096614\""));
+    assert!(
+        default.contains("\"final_hash\":\"d57b5c8ae3096614\""),
+        "golden hash moved, the receipt names the new one: {default}"
+    );
     assert!(default.contains("\"golden_checked\":true"));
     assert!(default.contains("\"verified\":true"));
     let maximum = success(run(&[

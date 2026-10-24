@@ -140,9 +140,9 @@ impl Obstacle {
 /// One obstacle as cover geometry for the fight plan: the same box the
 /// collision uses, kept in the floor plane's meters.
 ///
-/// Consumer: the rules-v2 plan ([`crate::engage::Plan::build`]) asks
+/// Consumer: the rules-v2 plan (`crate::engage::Plan::build`) asks
 /// [`MatchWorld::cover_boxes`] whether an obstacle stands between two
-/// fighters, so a foe behind cover never enters a [`FoeView`]. Units:
+/// fighters, so a foe behind cover never enters a [`FoeView`](engine_ai::FoeView). Units:
 /// meters, like the obstacle it copies; the sight test reads whole
 /// millimetres and converts them once per end. Determinism: the geometry
 /// is built once from the world's canonical obstacles, so the same world

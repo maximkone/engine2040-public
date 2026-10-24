@@ -198,6 +198,17 @@ not establish model reproducibility. Job completion order cannot decide outcomes
   (json `--verify` final_hash plus the text receipt), run 39509470629. A real
   retirement would move the arena digest (then `arena=2fbd56040fd091a7`), never
   `GOLDEN_600`, which runs only the `engine-proof` 2D fixture.
+- OPT59 (2026-10-24): the readable tell. The shipped rules-v2 light startup
+  goes 15 -> 30 ticks (250 ms -> 500 ms, the measured readability floor; see
+  `docs/receipts/2026-10-24-opt59-readable-tell.md`), and recovery 8 -> 6 so the
+  fight does not only get slower. `GOLDEN_600` did not move: `d57b5c8ae3096614`
+  before and after, because the fixture is the `engine-proof` 2D scene and calls
+  no combat table (run 40062028191). The arena matrix digest did move,
+  `605f6503a39082f4` -> `2b30084d1530cc78` (1200 ticks, rules v2, kit walls),
+  the same value on the live and the spine path; both pins in
+  `crates/proof/src/arena_matrix.rs` moved together. The bout still resolves:
+  60 hits / 6 knockdowns before, 52 / 4 after, 11 crate breaks both times (the tape guard script moved with the tell so it still shows a held-block soak).
+  Receipt: `docs/receipts/2026-10-24-opt59-readable-tell.md`.
 - BG6 (2026-10-24): cover in the rules-v2 melee plan. `MatchWorld` keeps
   its obstacles as cover geometry and the plan drops every foe whose sight
   line crosses one, so a fighter behind the kit's `crate_a` never enters a

@@ -17,7 +17,7 @@ fn shipped_design_set_is_wired_and_valid() {
     assert_eq!(SHIPPED.light_ticks, 3);
     assert_eq!(SHIPPED.heavy_ticks, 6);
     assert_eq!(SHIPPED.parry_ticks, 8);
-    assert_eq!(SHIPPED.startup_ticks, 15);
+    assert_eq!(SHIPPED.startup_ticks, 30);
     assert_eq!(SHIPPED.parry_window_ticks, 7);
 }
 
@@ -33,8 +33,8 @@ fn shipped_hitstop_answers_parry_heavy_light() {
 #[test]
 fn shipped_feint_chain_and_latency_match_the_tell() {
     assert_eq!(latency_ms(SHIPPED.buffer_ticks), 33);
-    assert!(feint_allowed(&SHIPPED, 12));
-    assert!(!feint_allowed(&SHIPPED, 13));
-    assert!(chain_allowed(&SHIPPED, 18));
-    assert!(!chain_allowed(&SHIPPED, 17));
+    assert!(feint_allowed(&SHIPPED, 27));
+    assert!(!feint_allowed(&SHIPPED, 28));
+    assert!(chain_allowed(&SHIPPED, 33));
+    assert!(!chain_allowed(&SHIPPED, 32));
 }

@@ -58,7 +58,7 @@ pub struct AttackClipSpec {
 
 /// The three shipped 1H attack clips, baked synthetically on the CT7 rig.
 ///
-/// The strike ticks sit on the readable rules-v2 startup (15 ticks); the
+/// The strike ticks sit on the readable rules-v2 startup (30 ticks); the
 /// `attack_1h_*` names match `content/manifest.json`.
 pub const HERO_ATTACK_SET: [AttackClipSpec; 3] = [
     AttackClipSpec {

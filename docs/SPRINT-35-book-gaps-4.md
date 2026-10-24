@@ -73,10 +73,11 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   is present; the tournament band stays 400-600 permille; v1 golden unchanged.
   F2P: the blocked fighter is seen today. P2P: the existing engage tests and
   the v1 golden unchanged. needs: a rules v2 receipt.
-- [ ] BG7 input: no touch lane — `crates/input` and `crates/ui` handle keyboard,
-  pad and agent bits; nothing maps a touch point. Add a touch source (tap,
-  drag, two-finger) that drives the same action bits as the pad, windows-native
-  first. Diff: regular. Tier A. Size M. Owns `crates/input/src/touch.rs`,
+- [x] BG7 input: no touch lane — Landed 8747a981b.
+  `crates/input` and `crates/ui` handle keyboard, pad and agent bits; nothing
+  maps a touch point. Add a touch source (tap, drag, two-finger) that drives
+  the same action bits as the pad, windows-native first. Diff: regular. Tier A.
+  Size M. Owns `crates/input/src/touch.rs`,
   `crates/input/src/lib.rs`, one tape test. Accept: a tap/swipe maps to the
   same action bits as the pad mapping and hashes the same in a tape; two
   replays are equal. F2P: a touch point is dropped. P2P: the keyboard, pad and

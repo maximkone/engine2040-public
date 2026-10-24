@@ -16,6 +16,7 @@ use crate::gladiator::{sanitize_dist_mm, Brain, Intent, Percept};
 use crate::melee::add_bias;
 use crate::personality::Personality;
 use crate::rows::{strip_comment, Field, FieldError, Fields};
+pub use crate::tell::{MIN_TELL_TICKS, PRIMUS_TIER, SHIPPED_TIERS};
 use crate::tier::TierPlay;
 use engine_input::{Buttons, FighterId, FighterInput, MAX_PARTICIPANTS};
 
@@ -271,7 +272,7 @@ pub struct TierRow {
     pub tier: u8,
     /// Health in permille, narrow `900..=1200` so skill decides.
     pub hp_permille: u16,
-    /// Readable startup in ticks, `15..=60`.
+    /// Readable startup in ticks, `30..=60` ([`MIN_TELL_TICKS`]).
     pub tell_ticks: u32,
     /// Poise hold in permille, `0..=1000`.
     pub stagger_permille: u16,
@@ -404,7 +405,7 @@ impl TierRow {
             });
         }
         let tell_i = i32::try_from(tell).map_err(|_| TierError::BadInt { line: line_no })?;
-        if !(15..=60).contains(&tell_i) {
+        if !(MIN_TELL_TICKS..=60).contains(&tell) {
             return Err(TierError::OutOfFence {
                 line: line_no,
                 field: "tell_ticks",
@@ -434,25 +435,6 @@ impl TierRow {
         })
     }
 }
-
-/// Shipped duel tiers matching the designer rows file.
-#[rustfmt::skip]
-pub const SHIPPED_TIERS: [TierRow; 3] = [
-    TierRow { tier: 1, hp_permille: 950, tell_ticks: 15, stagger_permille: 400, counter: 1 },
-    TierRow { tier: 2, hp_permille: 1_000, tell_ticks: 15, stagger_permille: 500, counter: 2 },
-    TierRow { tier: 3, hp_permille: 1_050, tell_ticks: 15, stagger_permille: 600, counter: 1 },
-];
-
-/// Final-foe primus row: skill, not stats. Health sits inside the narrow
-/// `900..=1200` band, the tell matches the ladder's readable 15 ticks,
-/// and the phase-1 answer is parry (`1`), the same school as the T3
-/// elite. Notice is faster (reaction 1) and nerve is bolder (700, 750 in
-/// phase 2). The designer file carries this row as `tier_4`; a file
-/// without one still parses, defaulting the fourth slot to this const.
-#[rustfmt::skip]
-pub const PRIMUS_TIER: TierRow = TierRow {
-    tier: 4, hp_permille: 1100, tell_ticks: 15, stagger_permille: 700, counter: 1,
-};
 
 /// Primus phase from remaining health in permille: phase 2 at or below
 /// 500, else phase 1. One integer compare; integer only, never panics.
@@ -2520,7 +2502,8 @@ mod tests {
         assert!(nerves[0] < nerves[1] && nerves[1] < nerves[2], "{nerves:?}");
         assert_eq!(
             (rows[0].tell_ticks, rows[1].tell_ticks, rows[2].tell_ticks),
-            (15, 15, 15)
+            (MIN_TELL_TICKS, MIN_TELL_TICKS, MIN_TELL_TICKS),
+            "every shipped tier clears the readable tell floor"
         );
         assert_eq!(
             (rows[0].counter, rows[1].counter, rows[2].counter),
@@ -2727,9 +2710,9 @@ mod tests {
     }
     #[test]
     fn tier_rows_refuse_bad_lines_with_the_line() {
-        let good_1 = "tier_1 hp_permille=950 tell_ticks=15 stagger_permille=400 counter=1";
-        let good_2 = "tier_2 hp_permille=1000 tell_ticks=15 stagger_permille=500 counter=2";
-        let good_3 = "tier_3 hp_permille=1050 tell_ticks=15 stagger_permille=600 counter=1";
+        let good_1 = "tier_1 hp_permille=950 tell_ticks=30 stagger_permille=400 counter=1";
+        let good_2 = "tier_2 hp_permille=1000 tell_ticks=30 stagger_permille=500 counter=2";
+        let good_3 = "tier_3 hp_permille=1050 tell_ticks=30 stagger_permille=600 counter=1";
         let file = ["table enemies version 1", good_1, good_2, good_3].join("\n");
         let good = parse_tiers(&file).expect("good file");
         assert_eq!(good[..3], SHIPPED_TIERS);
@@ -2750,7 +2733,7 @@ mod tests {
             parse_tiers(&missing),
             Err(TierError::MissingKey { line: 4 })
         );
-        let float = file.replace("tell_ticks=15", "tell_ticks=15.0");
+        let float = file.replace("tell_ticks=30", "tell_ticks=30.0");
         assert_eq!(parse_tiers(&float), Err(TierError::Float { line: 2 }));
         let thin = file.replace("hp_permille=950", "hp_permille=800");
         assert_eq!(
@@ -2765,13 +2748,13 @@ mod tests {
         assert_eq!(parse_tiers(&dup), Err(TierError::Duplicate { line: 5 }));
         let tier_5 = [
             file.as_str(),
-            "tier_5 hp_permille=1100 tell_ticks=15 stagger_permille=700 counter=1",
+            "tier_5 hp_permille=1100 tell_ticks=30 stagger_permille=700 counter=1",
         ]
         .join("\n");
         assert_eq!(parse_tiers(&tier_5), Err(TierError::RowId { line: 5 }));
         assert_eq!(
             TierRow::from_row(
-                "tier_9 hp_permille=950 tell_ticks=15 stagger_permille=400 counter=1",
+                "tier_9 hp_permille=950 tell_ticks=30 stagger_permille=400 counter=1",
                 7
             ),
             Err(TierError::RowId { line: 7 })
@@ -2794,7 +2777,7 @@ mod tests {
             TierRow {
                 tier: 4,
                 hp_permille: 1100,
-                tell_ticks: 15,
+                tell_ticks: 30,
                 stagger_permille: 700,
                 counter: 1,
             }
@@ -2827,17 +2810,17 @@ mod tests {
             750
         );
         let row = TierRow::from_row(
-            "tier_4 hp_permille=1100 tell_ticks=15 stagger_permille=700 counter=1",
+            "tier_4 hp_permille=1100 tell_ticks=30 stagger_permille=700 counter=1",
             5,
         )
         .expect("tier_4 parses");
         assert_eq!(row, PRIMUS_TIER);
         let file = [
             "table enemies version 1",
-            "tier_1 hp_permille=950 tell_ticks=15 stagger_permille=400 counter=1",
-            "tier_2 hp_permille=1000 tell_ticks=15 stagger_permille=500 counter=2",
-            "tier_3 hp_permille=1050 tell_ticks=15 stagger_permille=600 counter=1",
-            "tier_4 hp_permille=1100 tell_ticks=15 stagger_permille=700 counter=1",
+            "tier_1 hp_permille=950 tell_ticks=30 stagger_permille=400 counter=1",
+            "tier_2 hp_permille=1000 tell_ticks=30 stagger_permille=500 counter=2",
+            "tier_3 hp_permille=1050 tell_ticks=30 stagger_permille=600 counter=1",
+            "tier_4 hp_permille=1100 tell_ticks=30 stagger_permille=700 counter=1",
         ]
         .join("\n");
         let four = parse_tiers(&file).expect("four-row file parses");

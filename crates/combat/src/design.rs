@@ -55,14 +55,23 @@ pub struct BattlePatterns {
     pub parry_window_ticks: u32,
 }
 
-/// Shipped timing: light 3, heavy 6, parry 8; tell 15, recovery 8,
+/// The shortest readable tell in ticks: 30 ticks is 500 ms at 60 Hz, the
+/// heuristic floor of the one measured readability study (theseus 900621,
+/// n=30: median read 800 ms, IQR 525-900, floor 500 ms). No legal row ships
+/// a wind-up shorter than this.
+pub const MIN_STARTUP_TICKS: u32 = 30;
+
+/// Shipped timing: light 3, heavy 6, parry 8; tell 30, recovery 6,
 /// grace 2, buffer 2; hold 6, stagger 12, down 30, window 7.
+///
+/// The tell is the readability floor. Recovery goes shorter (8 to 6) so the
+/// follow-up stays a chained press instead of the fight only getting slower.
 pub const SHIPPED: BattlePatterns = BattlePatterns {
     light_ticks: 3,
     heavy_ticks: 6,
     parry_ticks: 8,
-    startup_ticks: 15,
-    recovery_ticks: 8,
+    startup_ticks: MIN_STARTUP_TICKS,
+    recovery_ticks: 6,
     grace_ticks: 2,
     buffer_ticks: 2,
     victim_hold_ticks: 6,
@@ -85,7 +94,7 @@ pub const fn validate(p: &BattlePatterns) -> Result<(), DesignError> {
     if p.light_ticks >= p.heavy_ticks || p.heavy_ticks > p.parry_ticks {
         return Err(DesignError::BadHitStop);
     }
-    if p.startup_ticks < 12 || p.startup_ticks > 60 || p.recovery_ticks > 120 {
+    if p.startup_ticks < MIN_STARTUP_TICKS || p.startup_ticks > 60 || p.recovery_ticks > 120 {
         return Err(DesignError::BadCancel);
     }
     if p.grace_ticks > 12 || p.buffer_ticks > MAX_BUFFER_TICKS || p.grace_ticks >= p.startup_ticks {
@@ -202,12 +211,40 @@ mod tests {
         assert_eq!(hitstop_for_strike(&SHIPPED, true, false), 6);
         assert_eq!(hitstop_for_strike(&SHIPPED, false, true), 8);
         assert_eq!(latency_ms(SHIPPED.buffer_ticks), 33);
-        assert!(feint_allowed(&SHIPPED, 12));
-        assert!(!feint_allowed(&SHIPPED, 13));
-        assert!(chain_allowed(&SHIPPED, 18));
-        assert!(!chain_allowed(&SHIPPED, 17));
+        assert!(feint_allowed(&SHIPPED, 27));
+        assert!(!feint_allowed(&SHIPPED, 28));
+        assert!(chain_allowed(&SHIPPED, 33));
+        assert!(!chain_allowed(&SHIPPED, 32));
+        assert!(!chain_allowed(&SHIPPED, 37));
         assert!(parry_open(&SHIPPED, 7));
         assert!(!parry_open(&SHIPPED, 8));
+    }
+
+    /// The readability law: every shipped attack's wind-up clears the floor,
+    /// and its whole window (grace, parry, chain) still lands inside that
+    /// wind-up rather than after impact.
+    #[test]
+    fn every_attack_opens_a_readable_window() {
+        for (name, startup) in [
+            ("design::SHIPPED", SHIPPED.startup_ticks),
+            ("TABLES_V2", crate::TABLES_V2.attack_startup_ticks),
+        ] {
+            assert!(
+                startup >= MIN_STARTUP_TICKS,
+                "{name} tell {startup} ticks is under the {MIN_STARTUP_TICKS}-tick floor"
+            );
+        }
+        assert_eq!(SHIPPED.startup_ticks * 1000 / 60, 500, "30 ticks is 500 ms");
+        assert!(SHIPPED.grace_ticks < SHIPPED.startup_ticks);
+        assert!(SHIPPED.parry_window_ticks < SHIPPED.startup_ticks);
+        assert!(!chain_allowed(&SHIPPED, SHIPPED.startup_ticks));
+        assert!(chain_allowed(
+            &SHIPPED,
+            SHIPPED.startup_ticks + SHIPPED.recovery_ticks
+        ));
+        let mut short = SHIPPED;
+        short.startup_ticks = MIN_STARTUP_TICKS - 1;
+        assert_eq!(validate(&short), Err(DesignError::BadCancel));
     }
 
     /// The intake window is forgiveness, not latency: a design row that

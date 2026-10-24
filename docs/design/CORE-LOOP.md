@@ -11,7 +11,7 @@ two fighters 8 m apart with full hp, stamina and poise > close distance, attack,
 
 Session loop beside it: round (600 ticks, best of 5, first to 3) > ladder rung > glory rank > next opponent tier.
 Round rule (`docs/plan/rome-spec.json`): 600 ticks at 60 Hz; higher total hp wins on timeout; an exact tie replays the round.
-Arena numbers: half extent 10 m; spawns -4 m and +4 m; march 1.7 m/s; sword 120 permille damage, 15-tick startup, 8-tick recovery, blade reach 1500 mm; hp 100 display = 1000 permille inside.
+Arena numbers: half extent 10 m; spawns -4 m and +4 m; march 1.7 m/s; sword 120 permille damage, 30-tick startup, 6-tick recovery, blade reach 1500 mm; hp 100 display = 1000 permille inside.
 Sword numbers come from `content/design/combat.rows:9` (the v2 row) and `content/design/weapons.rows:24` (gladius); the reach is `crates/arena/src/match_wire.rs:33`. `content/arena/rome-spec.json` keeps the forge parity numbers (25 damage, 0.5 s cooldown, 200 cm range) and stays as it is: its drift test pins them.
 
 ## First minute in order

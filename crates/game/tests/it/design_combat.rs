@@ -69,8 +69,8 @@ fn has(events: &[FightEvent], kind: &str) -> bool {
 )]
 fn v2_startup_is_readable() {
     assert!(
-        TABLES_V2.attack_startup_ticks >= 15,
-        "v2 startup {} must be 15 ticks or more (0.25 s tell)",
+        TABLES_V2.attack_startup_ticks >= 30,
+        "v2 startup {} must be 30 ticks or more (0.5 s tell)",
         TABLES_V2.attack_startup_ticks
     );
 }
@@ -341,11 +341,12 @@ fn parry_window_stays_below_the_fastest_tell() {
 ///   a swing is a promise the defender can always keep (Sellers ch9-10: a
 ///   gate needs a cost).
 ///
-/// The sweep's numbers are pasted in `docs/adr/0010-parry-window.md`: with
-/// startup 15 and the pugio's 12-tick tell, candidates 12 and 13 fall to the
-/// tell gate, 8 to 11 pass it at 600-800 permille of the tell covered and all
-/// fail the half gate, and the shipped 7 covers 533 permille (8 of 15 ticks)
-/// and sits on it. This test holds that verdict.
+/// The sweep's numbers are pasted in `docs/adr/0010-parry-window.md`: with the
+/// readable 30-tick startup and the pugio's 12-tick tell, candidates 12 and 13
+/// fall to the tell gate, 8 to 11 pass it, the half gate (a window no wider
+/// than half the tell) no longer binds because 13 * 2 = 26 <= 30, and the
+/// shipped 7 covers 266 permille (8 of 30 ticks) inside both gates. This test
+/// holds that verdict.
 #[test]
 fn parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on() {
     let (_, rows) = weapons_parse_table(WEAPONS_SRC);
@@ -353,8 +354,8 @@ fn parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on() {
     let fastest = fastest_row.speed_ticks;
     let startup = TABLES_V2.attack_startup_ticks;
     assert_eq!(
-        startup, 15,
-        "the ADR 0010 sweep holds startup at the v2 row (15 ticks)"
+        startup, 30,
+        "the ADR 0010 sweep holds startup at the readable v2 row (30 ticks)"
     );
     let mut fell_to_tell = 0u32;
     let mut fell_to_half = 0u32;
@@ -382,8 +383,8 @@ fn parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on() {
     }
     assert_eq!(
         (fell_to_tell, fell_to_half),
-        (2, 6),
-        "candidates 12 and 13 swallow the {}'s {fastest}-tick tell and every candidate 8 to 13 answers more than half the {startup}-tick tell",
+        (2, 0),
+        "candidates 12 and 13 swallow the {}'s {fastest}-tick tell; no candidate 8 to 13 answers more than half the {startup}-tick tell",
         fastest_row.id
     );
     // The widest window both gates allow, and the row that ships.
@@ -391,9 +392,10 @@ fn parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on() {
         .filter(|window| window * 2 <= startup && *window < fastest)
         .max()
         .expect("some window fits both gates");
-    assert_eq!(
-        widest, TABLES_V2.parry_window_ticks,
-        "the shipped parry {} must be the widest window both gates allow",
+    assert_eq!(widest, 11, "the tell gate stops the window at 11 ticks");
+    assert!(
+        TABLES_V2.parry_window_ticks <= widest,
+        "the shipped parry {} must sit inside the widest window both gates allow ({widest})",
         TABLES_V2.parry_window_ticks
     );
     // The number the sweep decided on: covered press ticks of the tell, in
@@ -401,7 +403,7 @@ fn parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on() {
     let (earliest, covered) = parry_span(&TABLES_V2);
     assert_eq!(
         (earliest, covered, covered * 1000 / startup),
-        (8, 8, 533),
+        (8, 8, 266),
         "the shipped parry {} covers {covered} of {startup} tell ticks",
         TABLES_V2.parry_window_ticks
     );
