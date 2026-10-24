@@ -187,7 +187,7 @@ pub enum SkinImportError {
         /// Joint index in skeleton order.
         joint: usize,
     },
-    /// A cooked root table failed [`validate_root`]; delta index carried.
+    /// A cooked root table failed [`validate_root`](engine_anim::contract::validate_root); delta index carried.
     BadRoot {
         /// Delta index.
         index: usize,
@@ -1210,7 +1210,7 @@ pub(crate) fn cook_tick_count(duration: f32) -> Result<u32, SkinImportError> {
 
 /// Cook per-tick root motion from a clip: the root joint's local XZ journey
 /// plus yaw per 60 Hz tick, extracted through the anim helper so the result
-/// always satisfies [`validate_root`].
+/// always satisfies [`validate_root`](engine_anim::contract::validate_root).
 pub fn cook_root_table(
     clip: &ImportedClip,
     skeleton: &Skeleton,

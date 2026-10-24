@@ -24,16 +24,18 @@
 use engine_combat::fight::{FightState, Tables};
 use engine_core::fixed::Fixed;
 use engine_core::hash::Fnv64;
-use engine_input::fighter::{THROW_SPEAR, THROW_SPEAR_WORLD};
+use engine_input::fighter::{THROW_NOOSE, THROW_SPEAR, THROW_SPEAR_WORLD};
 use engine_input::FighterInput;
 use engine_physics::query::{swept_cast, CastCapsule, SweptHit};
 
 use crate::collide::collide_states;
-use crate::match_wire::{metres, pos_mm};
+use crate::match_wire::{facing_vector, metres, pos_mm, sweep_for_attacker};
 use crate::world::MatchWorld;
 use crate::{
     canon_zero, facing_q16, wall_limit, ArenaRules, FighterState, FIGHTER_RADIUS_M, MAX_SLOTS,
 };
+
+mod noose;
 
 /// Muzzle speed along the facing, mm per tick (36 m/s).
 const SPEAR_SPEED: i32 = 600;
@@ -64,7 +66,7 @@ const THROW_COOLDOWN: u16 = 90;
 /// Cooldown restarted when a tether ends.
 const TETHER_COOLDOWN: u16 = 60;
 /// Damage at the impact on an enemy, permille.
-const HIT_DAMAGE: u16 = 30;
+const HIT_DAMAGE: u16 = 5;
 /// Distance at which the two bodies latch together, mm.
 const REST: i64 = 1600;
 /// Thrower acceleration toward the enemy before the latch, mm per tick squared.
@@ -103,6 +105,9 @@ const SLAM_DAMAGE: i64 = 60;
 const MAX_TETHER_DAMAGE: i64 = 200;
 /// Slowest body that counts as slammed when its move comes up short.
 const MIN_SLAM_SPEED: i64 = 60;
+/// Steps a rope-snag march takes, [`MARCH_STEP`] each: 6.4 m, the longest
+/// rope a wall anchor leaves.
+const WRAP_STEPS: i64 = 64;
 /// Yank snap speed, mm per tick (24 m/s), row SG9: a thrower who holds back
 /// as the spear sticks reels the enemy in. The victim moves at this speed
 /// from the first pulled tick; there is no ramp, which is the snap.
@@ -124,6 +129,11 @@ const YANK_STUN: u32 = 20;
 const YANK_ARRIVE_DAMAGE: i64 = 20;
 /// Fold byte of a yank tether (a carry folds nothing extra).
 const YANK_TAG: u8 = 0xA7;
+/// Ticks from the impact tick during which a swinger's blade is still
+/// moving through its arc and can cut a rope (row SG13).
+const CUT_LIVE_TICKS: u32 = 4;
+/// Half the rope's thickness for the cut test, mm (the blade adds its own).
+const ROPE_HALF_MM: i64 = 60;
 /// Event vec capacity reserved once.
 const EVENT_CAP: usize = 4 * MAX_SLOTS;
 /// Fold tag byte.
@@ -155,6 +165,12 @@ pub enum EndWhy {
     Parry,
     /// Either side went out of the fight.
     Down,
+    /// A swing's blade crossed the rope (row SG13): the victim's escape, or a
+    /// third fighter's. The spear drops.
+    Cut,
+    /// A shield push landed on a snared man (row SG11): the noose comes off
+    /// and he goes down.
+    Toppled,
 }
 
 /// One thing the spear did this tick, for presentation to react to.
@@ -232,6 +248,9 @@ pub struct Flight {
     /// The throw was aimed at the world (`THROW_SPEAR_WORLD`): fighters are
     /// not targets, so the spear flies past them and sticks in geometry.
     pub world: bool,
+    /// The flight is a noose (row SG11, `THROW_NOOSE`): a loop on a cord that
+    /// snares the man it catches instead of hooking him. It never anchors.
+    pub noose: bool,
 }
 
 /// A tether between a thrower and an enemy or a world anchor.
@@ -258,6 +277,9 @@ pub struct Tether {
     /// True when the hook reels the victim to a planted thrower (row SG9: the
     /// thrower held back as the spear stuck); false is the carry.
     pub yank: bool,
+    /// True when the cord is a noose that snared the victim (row SG11): no
+    /// carry, no pull on the thrower; the cord only drags a man who pulls away.
+    pub noose: bool,
     /// Thrower speed after the last tick, mm per tick (the victim's on a
     /// yank, where the thrower stands).
     pub speed: u16,
@@ -286,6 +308,10 @@ pub struct SpearSlot {
     pub held: bool,
     /// Body momentum, `[x, z]` mm per tick.
     pub drift_mm: [i32; 2],
+    /// Point the rope turns on while it is snagged on a corner, mm; all zero
+    /// when the rope runs straight to its anchor. Presentation reads it to
+    /// bend the drawn rope; it never feeds back into the step.
+    pub wrap_mm: [i32; 3],
 }
 
 /// Everything the spear step touches in the sim, borrowed for one tick.
@@ -316,8 +342,19 @@ pub struct SpearState {
     fighters: usize,
     events: Vec<SpearEvent>,
     hits: Vec<SweptHit>,
-    /// Per-tick scratch: `(blocked, speed before the stop)` per slot.
-    shocks: [(bool, i64); MAX_SLOTS],
+    /// Per-tick scratch: `(blocked, speed before the stop, pinned)` per slot;
+    /// pinned is a blocked body that barely moved (it did not slide).
+    shocks: [(bool, i64, bool); MAX_SLOTS],
+    /// `THROW_SPEAR` throws a spear (on unless the state was built noose-only).
+    spear_on: bool,
+    /// `THROW_NOOSE` throws a noose (row SG11); off folds and runs nothing.
+    noose_on: bool,
+    /// Whether `THROW_NOOSE` was down last tick, per slot (the press edge).
+    noose_held: [bool; MAX_SLOTS],
+    /// A shield push landed on this snared man and waits for the freeze to end.
+    pushed: [bool; MAX_SLOTS],
+    /// `(thrower, victim)` of every man a push toppled in the last step.
+    toppled: Vec<(u8, u8)>,
 }
 
 impl SpearState {
@@ -328,7 +365,12 @@ impl SpearState {
             fighters,
             events: Vec::with_capacity(EVENT_CAP),
             hits: Vec::with_capacity(MAX_SLOTS),
-            shocks: [(false, 0); MAX_SLOTS],
+            shocks: [(false, 0, false); MAX_SLOTS],
+            spear_on: true,
+            noose_on: false,
+            noose_held: [false; MAX_SLOTS],
+            pushed: [false; MAX_SLOTS],
+            toppled: Vec::with_capacity(MAX_SLOTS),
         }
     }
 
@@ -352,6 +394,9 @@ impl SpearState {
             for lane in slot.drift_mm {
                 digest.write_i32(lane);
             }
+            for lane in slot.wrap_mm {
+                digest.write_i32(lane);
+            }
             match slot.phase {
                 Phase::Idle => digest.write_u8(0),
                 Phase::Flight(f) => {
@@ -361,6 +406,9 @@ impl SpearState {
                     }
                     digest.write_u16(f.age);
                     digest.write_bool(f.world);
+                    if f.noose {
+                        digest.write_u8(noose::TAG);
+                    }
                 }
                 Phase::Tether(t) => {
                     digest.write_u8(2);
@@ -373,8 +421,15 @@ impl SpearState {
                     if t.yank {
                         digest.write_u8(YANK_TAG);
                     }
+                    if t.noose {
+                        digest.write_u8(noose::TAG);
+                        digest.write_i32(t.rope_mm);
+                    }
                 }
             }
+        }
+        if self.noose_on {
+            self.fold_noose(&mut digest);
         }
         digest.finish()
     }
@@ -382,6 +437,8 @@ impl SpearState {
     /// One tick: presses and flights, tether physics, body motion, endings.
     pub(crate) fn step(&mut self, env: &mut Env<'_>) {
         self.events.clear();
+        self.toppled.clear();
+        self.topple_pushed(env);
         for slot in 0..self.fighters {
             self.act(slot, env);
         }
@@ -411,9 +468,13 @@ impl SpearState {
     /// The press edge, then the slot's flight or tether for the tick.
     fn act(&mut self, slot: usize, env: &mut Env<'_>) {
         let input = env.inputs[slot];
-        let pressed = input.buttons.0 & THROW_SPEAR != 0;
+        let pressed = self.spear_on && input.buttons.0 & THROW_SPEAR != 0;
         let edge = pressed && !self.slots[slot].held;
         self.slots[slot].held = pressed;
+        // Row SG11: the noose has its own button and its own press edge.
+        let cord = self.noose_on && input.buttons.0 & THROW_NOOSE != 0;
+        let cord_edge = cord && !self.noose_held[slot];
+        self.noose_held[slot] = cord;
         let cooldown = self.slots[slot].cooldown.saturating_sub(1);
         self.slots[slot].cooldown = cooldown;
         match self.slots[slot].phase {
@@ -423,13 +484,19 @@ impl SpearState {
                 // so a swing chains into the next anchor without dead time.
                 let airborne = env.rise.get(slot).is_some_and(|&rise| rise != 0)
                     || pos_mm(env.states[slot].pos)[1] > 0;
-                if edge && (cooldown == 0 || airborne) && env.fight.fighters[slot].can_act() {
+                let ready = (cooldown == 0 || airborne) && env.fight.fighters[slot].can_act();
+                if edge && ready {
                     self.throw(slot, input, env);
+                    self.fly(slot, env);
+                } else if cord_edge && ready {
+                    self.throw_noose(slot, input, env);
                     self.fly(slot, env);
                 }
             }
             Phase::Flight(_) => self.fly(slot, env),
-            Phase::Tether(_) if edge => self.end(slot, EndWhy::Released, 0, env),
+            Phase::Tether(t) if (edge && !t.noose) || (cord_edge && t.noose) => {
+                self.end(slot, EndWhy::Released, 0, env);
+            }
             Phase::Tether(_) => self.pull(slot, env),
         }
     }
@@ -441,6 +508,7 @@ impl SpearState {
         let body = pos_mm(env.states[slot].pos);
         let (pos_mm, vel_mm) = throw_start(body, dir, SPEAR_AHEAD, SPEAR_HEIGHT, SPEAR_SPEED);
         self.slots[slot].cooldown = THROW_COOLDOWN;
+        self.slots[slot].wrap_mm = [0; 3];
         self.slots[slot].phase = Phase::Flight(Flight {
             pos_mm,
             vel_mm,
@@ -448,6 +516,7 @@ impl SpearState {
             origin_mm: [body[0], body[2]],
             dir,
             world: input.buttons.0 & THROW_SPEAR_WORLD != 0,
+            noose: false,
         });
         self.events.push(SpearEvent::Thrown {
             thrower: slot_id(slot),
@@ -474,16 +543,25 @@ impl SpearState {
         // anchors the geometry behind, which is how a duel reaches a wall.
         let struck = if f.world {
             None
+        } else if f.noose {
+            self.cast_loop(slot, env, from, to)
         } else {
             self.cast(slot, env, from, to)
         };
         if let Some((victim, at)) = struck {
-            self.strike(slot, victim, at, f, env);
+            if f.noose {
+                self.catch(slot, victim, at, f, env);
+            } else {
+                self.strike(slot, victim, at, f, env);
+            }
+        } else if geometry && f.noose {
+            // A loop is not a hook: it slaps the wall and falls.
+            self.miss(slot, MissWhy::Range);
         } else if geometry {
             self.anchor(slot, to, f);
         } else if to[1] <= 0 {
             self.miss(slot, MissWhy::Floor);
-        } else if f.age >= MAX_FLIGHT_TICKS {
+        } else if f.age >= noose::max_ticks(f.noose) {
             self.miss(slot, MissWhy::Range);
         } else {
             f.pos_mm = to;
@@ -537,26 +615,7 @@ impl SpearState {
     /// The spear met fighter `victim`: a guard turns it away, anything else
     /// sticks and tethers.
     fn strike(&mut self, slot: usize, victim: usize, at: [i32; 3], f: Flight, env: &mut Env<'_>) {
-        let combat = env.fight.fighters[victim];
-        let thrower = pos_mm(env.states[slot].pos);
-        let body = pos_mm(env.states[victim].pos);
-        let (sin, cos) = facing_q16(env.inputs[victim].facing);
-        let to_thrower = (
-            i64::from(thrower[0]) - i64::from(body[0]),
-            i64::from(thrower[2]) - i64::from(body[2]),
-        );
-        let facing_thrower = i64::from(sin) * to_thrower.0 + i64::from(cos) * to_thrower.1 > 0;
-        if combat.is_blocking && facing_thrower {
-            let parried = combat.parry_open_with(env.tables);
-            if parried {
-                stagger(env, slot);
-            }
-            self.slots[slot].phase = Phase::Idle;
-            self.events.push(SpearEvent::Deflected {
-                thrower: slot_id(slot),
-                victim: slot_id(victim),
-                parried,
-            });
+        if self.guard_turns(slot, victim, env) {
             return;
         }
         hurt(env, victim, i64::from(HIT_DAMAGE));
@@ -581,7 +640,8 @@ impl SpearState {
             dir: f.dir,
             age: 0,
             latched: false,
-            yank: false,
+            yank,
+            noose: false,
             speed: 0,
         });
         self.events.push(SpearEvent::Hit {
@@ -589,6 +649,35 @@ impl SpearState {
             victim: Some(slot_id(victim)),
             at_mm: at,
         });
+    }
+
+    /// True when `victim` holds a guard facing the thrower: the throw is turned
+    /// away (a parry also staggers the thrower), the flight ends and
+    /// [`SpearEvent::Deflected`] is emitted. The spear and the noose share it.
+    fn guard_turns(&mut self, slot: usize, victim: usize, env: &mut Env<'_>) -> bool {
+        let combat = env.fight.fighters[victim];
+        let thrower = pos_mm(env.states[slot].pos);
+        let body = pos_mm(env.states[victim].pos);
+        let (sin, cos) = facing_q16(env.inputs[victim].facing);
+        let to_thrower = (
+            i64::from(thrower[0]) - i64::from(body[0]),
+            i64::from(thrower[2]) - i64::from(body[2]),
+        );
+        let facing_thrower = i64::from(sin) * to_thrower.0 + i64::from(cos) * to_thrower.1 > 0;
+        if !(combat.is_blocking && facing_thrower) {
+            return false;
+        }
+        let parried = combat.parry_open_with(env.tables);
+        if parried {
+            stagger(env, slot);
+        }
+        self.slots[slot].phase = Phase::Idle;
+        self.events.push(SpearEvent::Deflected {
+            thrower: slot_id(slot),
+            victim: slot_id(victim),
+            parried,
+        });
+        true
     }
 
     /// The spear met geometry at `at`: the thrower zips to it.
@@ -606,7 +695,8 @@ impl SpearState {
             dir: f.dir,
             age: 0,
             latched: false,
-            yank,
+            yank: false,
+            noose: false,
             speed: 0,
         });
         self.events.push(SpearEvent::Hit {
@@ -616,21 +706,21 @@ impl SpearState {
         });
     }
 
-    /// Tether cut checks, then the velocity update of both bodies.
-    fn pull(&mut self, slot: usize, env: &mut Env<'_>) {
-        let Phase::Tether(mut t) = self.slots[slot].phase else {
-            return;
-        };
-        let victim = t.victim.map(usize::from);
-        let combat = victim.map(|v| env.fight.fighters[v]);
+    /// Why `slot`'s tether ends this tick, if it does: a fighter down, the
+    /// timeout, a blade through the rope, then the victim's guard.
+    fn tether_ends(&self, slot: usize, t: &Tether, env: &mut Env<'_>) -> Option<EndWhy> {
+        let combat = t.victim.map(|v| env.fight.fighters[usize::from(v)]);
         let down =
             env.fight.fighters[slot].hp_permille == 0 || combat.is_some_and(|c| c.hp_permille == 0);
-        let why = if down {
+        if down {
             Some(EndWhy::Down)
-        } else if t.age >= TETHER_MAX {
+        } else if t.age >= noose::tether_max(t.noose) {
             Some(EndWhy::Timeout)
-        } else if t.yank {
-            // A yanked victim is stunned: no guard is up to cut the rope.
+        } else if rope_cut(self.fighters, slot, t, env) {
+            Some(EndWhy::Cut)
+        } else if t.yank || t.noose {
+            // A yanked victim is stunned: no guard is up to cut the rope. A
+            // snared man may guard all he likes; the cord stays on him.
             None
         } else if combat.is_some_and(|c| c.parry_open_with(env.tables)) {
             stagger(env, slot);
@@ -639,9 +729,21 @@ impl SpearState {
             Some(EndWhy::Guard)
         } else {
             None
+        }
+    }
+
+    /// Tether cut checks, then the velocity update of both bodies.
+    fn pull(&mut self, slot: usize, env: &mut Env<'_>) {
+        let Phase::Tether(mut t) = self.slots[slot].phase else {
+            return;
         };
-        if let Some(why) = why {
+        let victim = t.victim.map(usize::from);
+        if let Some(why) = self.tether_ends(slot, &t, env) {
             self.end(slot, why, 0, env);
+            return;
+        }
+        if t.noose {
+            self.snare(slot, t, env);
             return;
         }
         let me = xz(env.states[slot].pos);
@@ -696,7 +798,9 @@ impl SpearState {
             cap(&mut mine, WALL_MAX_SPEED);
         } else {
             // Row SG4: with the height channel armed the wall anchor is a
-            // rope, not a winch (see `swing`).
+            // rope, not a winch (see `swing`). A rope that crosses a corner
+            // snags on it first, so the arc turns round the corner.
+            self.wrap(slot, &mut t, env);
             self.swing(slot, &mut t, &mut mine, env);
         }
         self.slots[slot].drift_mm = mine;
@@ -736,7 +840,12 @@ impl SpearState {
             let body = pos_mm(env.states[slot].pos);
             let short = sq(goal[0] - body[0]) + sq(goal[1] - body[2]);
             let blocked = speed >= MIN_SLAM_SPEED && short * 4 > speed * speed;
-            self.shocks[slot] = (blocked, speed);
+            // Pinned: the body barely moved at all (under a quarter of its
+            // speed), not merely slid along what it met.
+            let start = [goal[0] - drift[0], goal[1] - drift[1]];
+            let went = sq(body[0] - start[0]) + sq(body[2] - start[1]);
+            let pinned = blocked && went * 16 < speed * speed;
+            self.shocks[slot] = (blocked, speed, pinned);
             if blocked {
                 self.slots[slot].drift_mm = [0, 0];
             }
@@ -750,7 +859,7 @@ impl SpearState {
     /// taut rope has no radial speed.
     fn swing(&mut self, slot: usize, t: &mut Tether, mine: &mut [i32; 2], env: &mut Env<'_>) {
         let body = pos_mm(env.states[slot].pos);
-        let anchor = [t.anchor_mm[0], t.anchor_y_mm, t.anchor_mm[1]];
+        let anchor = self.pivot(slot, t);
         let off = [
             body[0].wrapping_sub(anchor[0]),
             body[1].wrapping_sub(anchor[1]),
@@ -791,7 +900,7 @@ impl SpearState {
     /// the arc reaches the floor, which ends the tether.
     fn project(&mut self, slot: usize, t: &Tether, env: &mut Env<'_>) -> bool {
         let body = pos_mm(env.states[slot].pos);
-        let anchor = [t.anchor_mm[0], t.anchor_y_mm, t.anchor_mm[1]];
+        let anchor = self.pivot(slot, t);
         let off = [
             body[0].wrapping_sub(anchor[0]),
             body[1].wrapping_sub(anchor[1]),
@@ -813,12 +922,44 @@ impl SpearState {
         floor
     }
 
+    /// The point the rope turns on: the wrap pivot while the rope is snagged
+    /// on a corner, else its anchor.
+    fn pivot(&self, slot: usize, t: &Tether) -> [i32; 3] {
+        let wrap = self.slots[slot].wrap_mm;
+        if wrap == [0, 0, 0] {
+            [t.anchor_mm[0], t.anchor_y_mm, t.anchor_mm[1]]
+        } else {
+            wrap
+        }
+    }
+
+    /// Snag the rope on the first corner between its pivot and the body: the
+    /// rope then bends there and the arc turns around the corner instead of
+    /// cutting through the wall. The pivot moves onto the corner and the rope
+    /// takes the length it has left, so the wrap bends the swing without a
+    /// jump; it never unwraps, and the tether is short anyway.
+    fn wrap(&mut self, slot: usize, t: &mut Tether, env: &mut Env<'_>) {
+        let body = pos_mm(env.states[slot].pos);
+        let from = self.pivot(slot, t);
+        let (clear, blocked) = snag_point(env.world, env.rules, env.half_extent_m, from, body);
+        if !blocked {
+            return;
+        }
+        let left = isqrt(sq(body[0] - clear[0]) + sq(body[1] - clear[1]) + sq(body[2] - clear[2]));
+        self.slots[slot].wrap_mm = clear;
+        t.rope_mm = i32::try_from(left).unwrap_or(i32::MAX).max(MIN_ROPE_MM);
+    }
+
     /// Arrival and wall endings after the bodies moved.
     fn settle(&mut self, slot: usize, env: &mut Env<'_>) {
         let Phase::Tether(t) = self.slots[slot].phase else {
             return;
         };
-        let (thrower_blocked, _) = self.shocks[slot];
+        if t.noose {
+            // A snare ends in `pull` (timeout, cut, release) or on a push.
+            return;
+        }
+        let (thrower_blocked, _, _) = self.shocks[slot];
         let Some(v) = t.victim.map(usize::from) else {
             if t.rope_mm > 0 {
                 // A swing rides the rope until the arc meets the floor; the
@@ -833,9 +974,16 @@ impl SpearState {
             }
             return;
         };
-        let (victim_blocked, victim_speed) = self.shocks[v];
+        let (victim_blocked, victim_speed, victim_pinned) = self.shocks[v];
         let you = xz(env.states[v].pos);
-        if victim_blocked {
+        // A yanked body that slides along a wall or round a corner keeps
+        // coming; only one pinned against it is slammed.
+        let slammed = if t.yank {
+            victim_pinned
+        } else {
+            victim_blocked
+        };
+        if slammed {
             let damage = (SLAM_DAMAGE + victim_speed / 6).min(MAX_TETHER_DAMAGE);
             self.end(slot, EndWhy::Wall, damage, env);
         } else if t.yank {
@@ -861,8 +1009,9 @@ impl SpearState {
         };
         if let Some(v) = t.victim {
             hurt(env, usize::from(v), damage);
-            if t.yank {
-                // A yank stops dead in front of the blade, no slide past it.
+            if t.yank || t.noose {
+                // A yank stops dead in front of the blade, no slide past it;
+                // a freed man has no cord left to be dragged by.
                 self.slots[usize::from(v)].drift_mm = [0, 0];
             }
         }
@@ -956,6 +1105,81 @@ pub(crate) fn hurt_fighter(fight: &mut FightState, victim: usize, damage: u16) {
     *hp = hp.saturating_sub(damage);
 }
 
+/// True when a blade in its swing crosses the rope of the tether `t` thrown by
+/// `thrower` (row SG13). The rope runs from the thrower to the victim, or to
+/// the world anchor; the blade is the arena's mapped sweep (`sweep_for_attacker`)
+/// of every other fighter whose strike has just landed: the impact tick and
+/// the few after it, while the steel is still moving through the arc. A
+/// fighter stunned or down has no swing (the fight cancels it). Planar,
+/// integer, slot order does not matter (the answer is a plain any).
+fn rope_cut(fighters: usize, thrower: usize, t: &Tether, env: &Env<'_>) -> bool {
+    let from = xz(env.states[thrower].pos);
+    let to = match t.victim {
+        Some(v) => xz(env.states[usize::from(v)].pos),
+        None => t.anchor_mm,
+    };
+    (0..fighters).filter(|&s| s != thrower).any(|s| {
+        let f = env.fight.fighters[s];
+        let impact = engine_combat::heft::startup(f.heft, env.tables);
+        let live = f.is_attacking
+            && f.hp_permille > 0
+            && f.react == 0
+            && f.attack_age >= impact
+            && f.attack_age < impact + CUT_LIVE_TICKS;
+        if !live {
+            return false;
+        }
+        let input = env.inputs[s];
+        let facing = facing_vector(input.mx, input.mz, input.facing);
+        let blade = sweep_for_attacker(slot_id(s), pos_mm(env.states[s].pos), facing);
+        let reach = i64::from(blade.blade_half_mm) + ROPE_HALF_MM;
+        segment_gap_sq(
+            [blade.p0_mm[0], blade.p0_mm[2]],
+            [blade.p1_mm[0], blade.p1_mm[2]],
+            from,
+            to,
+        ) <= reach * reach
+    })
+}
+
+/// Squared planar distance between the segments `a..b` and `c..d`, mm squared:
+/// zero when they cross, else the nearest endpoint-to-segment gap.
+fn segment_gap_sq(a: [i32; 2], b: [i32; 2], c: [i32; 2], d: [i32; 2]) -> i64 {
+    let side = |o: [i32; 2], p: [i32; 2], q: [i32; 2]| {
+        (i64::from(p[0]) - i64::from(o[0])) * (i64::from(q[1]) - i64::from(o[1]))
+            - (i64::from(p[1]) - i64::from(o[1])) * (i64::from(q[0]) - i64::from(o[0]))
+    };
+    let (d1, d2, d3, d4) = (side(c, d, a), side(c, d, b), side(a, b, c), side(a, b, d));
+    if d1.signum() * d2.signum() < 0 && d3.signum() * d4.signum() < 0 {
+        return 0;
+    }
+    point_gap_sq(a, c, d)
+        .min(point_gap_sq(b, c, d))
+        .min(point_gap_sq(c, a, b))
+        .min(point_gap_sq(d, a, b))
+}
+
+/// Squared distance from the point `p` to the segment `a..b`, mm squared.
+fn point_gap_sq(p: [i32; 2], a: [i32; 2], b: [i32; 2]) -> i64 {
+    let ab = [0, 1].map(|lane| i64::from(b[lane]) - i64::from(a[lane]));
+    let ap = [0, 1].map(|lane| i64::from(p[lane]) - i64::from(a[lane]));
+    let len_sq = ab[0] * ab[0] + ab[1] * ab[1];
+    let along = if len_sq == 0 {
+        0
+    } else {
+        (ap[0] * ab[0] + ap[1] * ab[1]).clamp(0, len_sq)
+    };
+    let foot = [0, 1].map(|lane| {
+        if len_sq == 0 {
+            0
+        } else {
+            ab[lane] * along / len_sq
+        }
+    });
+    let gap = [ap[0] - foot[0], ap[1] - foot[1]];
+    gap[0] * gap[0] + gap[1] * gap[1]
+}
+
 /// Planar millimetre position of a pose.
 fn xz(pos: [f32; 3]) -> [i32; 2] {
     let mm = pos_mm(pos);
@@ -1038,6 +1262,31 @@ pub(crate) fn march_segment(
         }
     }
     (full, false)
+}
+
+/// The last clear point on the line `from..to` before geometry, mm, and true
+/// when geometry blocks it. The rope march looks the whole rope long, unlike
+/// the weapon march, because a long rope snags far from the hand.
+fn snag_point(
+    world: &MatchWorld,
+    rules: &ArenaRules,
+    half_extent_m: f32,
+    from: [i32; 3],
+    to: [i32; 3],
+) -> ([i32; 3], bool) {
+    let span = [0, 1, 2].map(|lane| to[lane] - from[lane]);
+    let len = isqrt(sq(span[0]) + sq(span[1]) + sq(span[2]));
+    let steps = (len / i64::from(MARCH_STEP)).clamp(1, WRAP_STEPS);
+    let mut clear = from;
+    for k in 1..=steps {
+        let point = [0, 1, 2]
+            .map(|lane| from[lane] + i32::try_from(i64::from(span[lane]) * k / steps).unwrap_or(0));
+        if in_geometry(world, rules, half_extent_m, point) {
+            return (clear, true);
+        }
+        clear = point;
+    }
+    (to, false)
 }
 
 /// True when a weapon tip at `p` is in the arena wall, a pillar or an obstacle.
@@ -1378,6 +1627,42 @@ mod tests {
     }
 
     #[test]
+    fn a_swing_snags_the_rope_on_a_corner_and_turns_round_it() {
+        // A pillar stands between the wall anchor and the arc. The rope must
+        // bend on the corner instead of cutting through it, so the swing turns
+        // round the pillar.
+        let world = MatchWorld::try_new(vec![Obstacle::aligned([3.0, 3.0], [0.5, 0.5])]).expect("world");
+        let mut sim = sim_swing(world);
+        place(&mut sim, [0.0, 8.0], [-8.0, 8.0]);
+        tick(&mut sim, [(THROW, 0), (0, 0)]);
+        idle(&mut sim, 12, [(0, 0), (0, 0)]);
+        assert!(matches!(slot(&sim, 0).phase, Phase::Tether(_)), "tethered");
+        assert_eq!(
+            slot(&sim, 0).wrap_mm,
+            [0; 3],
+            "a clear line to the anchor does not wrap"
+        );
+        // The body swings across the pillar: the line from the anchor (0, 12)
+        // to (4, 0) runs through (3, 3), the pillar's centre.
+        sim.states[0].pos = [4.0, 1.6, 0.0];
+        tick(&mut sim, [(0, 0), (0, 0)]);
+        let wrap = slot(&sim, 0).wrap_mm;
+        assert_ne!(wrap, [0; 3], "the rope snagged the pillar");
+        assert!(
+            wrap[2] > 0 && wrap[2] < 6_000,
+            "the corner sits between the anchor and the body: {wrap:?}"
+        );
+        let Phase::Tether(t) = slot(&sim, 0).phase else {
+            panic!("the snag keeps the tether");
+        };
+        assert!(
+            t.rope_mm < 5_000,
+            "the rope took the length left round the corner: {}",
+            t.rope_mm
+        );
+    }
+
+    #[test]
     fn spear_miss_leaves_no_tether() {
         let mut sim = sim_in(MatchWorld::empty());
         place(&mut sim, [-2.0, 0.0], [-8.0, 8.0]);
@@ -1498,6 +1783,25 @@ mod tests {
     }
 
     #[test]
+    fn a_yank_slides_round_a_corner_instead_of_dying_on_it() {
+        // The window case: the spear line clears a box by 150 mm, the victim's
+        // 400 mm body does not. The yank slides it past the corner and lands.
+        let world = MatchWorld::try_new(vec![Obstacle::aligned([1.075, 0.5], [0.925, 0.5])])
+            .expect("world");
+        let mut sim = sim_in(world);
+        place(&mut sim, [0.0, -4.0], [0.0, 4.0]);
+        let (seen, hit) = yank_from(&mut sim, 0);
+        assert!(hit.is_some(), "the spear passes the box and sticks");
+        let end = seen.iter().find_map(|e| match *e {
+            SpearEvent::TetherEnd { why, .. } => Some(why),
+            _ => None,
+        });
+        assert_eq!(end, Some(EndWhy::Arrived), "slid round, not slammed");
+        let z = sim.states[1].pos[2];
+        assert!(z < -2.0, "the victim came past the box to the thrower: {z}");
+    }
+
+    #[test]
     fn no_back_hold_keeps_the_carry() {
         let mut sim = sim_in(MatchWorld::empty());
         place(&mut sim, [0.0, -4.0], [0.0, 2.0]);
@@ -1508,6 +1812,192 @@ mod tests {
         };
         assert!(!t.yank);
         assert_eq!(sim.fight.fighters[1].react, 0, "a carry stuns nobody");
+    }
+
+    /// Three fighters, spear armed (row SG13: a third fighter's blade).
+    fn sim3() -> Sim {
+        let cfg = ArenaConfig {
+            fighters: 3,
+            ..config()
+        };
+        let mut sim = Sim::build_world(
+            &cfg,
+            &FighterTape::default(),
+            false,
+            false,
+            MatchWorld::empty(),
+        )
+        .expect("sim builds");
+        assert!(sim.set_spear());
+        sim
+    }
+
+    /// One tick with scripted `(buttons, facing, mx, mz)` for every fighter.
+    fn tick_all(sim: &mut Sim, script: &[(u8, i16, i8, i8)]) {
+        let at = sim.tick;
+        let tape = FighterTape(
+            script
+                .iter()
+                .enumerate()
+                .map(|(slot, &(buttons, facing, mx, mz))| FighterInput {
+                    tick: at,
+                    fighter: FighterId(slot_id(slot)),
+                    mx,
+                    mz,
+                    facing,
+                    buttons: Buttons(buttons),
+                })
+                .collect(),
+        );
+        sim.cursor = 0;
+        sim.step(&tape).expect("step");
+    }
+
+    /// Put `slot` on the impact tick of a swing, as if it had pressed attack
+    /// a full startup ago: the blade is in its arc on the next step.
+    fn swing_now(sim: &mut Sim, slot: usize) {
+        let f = &mut sim.fight.fighters[slot];
+        f.is_attacking = true;
+        f.attack_age = engine_combat::heft::startup(f.heft, &engine_combat::fight::TABLES_V2);
+    }
+
+    /// The first tether ending among `seen`.
+    fn first_end(seen: &[SpearEvent]) -> Option<EndWhy> {
+        seen.iter().find_map(|e| match *e {
+            SpearEvent::TetherEnd { why, .. } => Some(why),
+            _ => None,
+        })
+    }
+
+    /// Carry run: thrower at z -4 hooks a victim at z -1, then the victim
+    /// faces `face` and, when `swing`, swings at once. Returns the events
+    /// from the throw on.
+    fn carry_with_swing(face: i16, swing: bool) -> (Sim, Vec<SpearEvent>) {
+        let mut sim = sim_in(MatchWorld::empty());
+        place(&mut sim, [0.0, -4.0], [0.0, -1.0]);
+        tick(&mut sim, [(THROW, 0), (0, face)]);
+        let mut seen = events(&sim);
+        while !seen.iter().any(|e| matches!(e, SpearEvent::Hit { .. })) {
+            tick(&mut sim, [(0, 0), (0, face)]);
+            seen.extend(events(&sim));
+            assert!(sim.tick < 40, "the hook sticks");
+        }
+        if swing {
+            swing_now(&mut sim, 1);
+        }
+        for _ in 0..80 {
+            tick(&mut sim, [(0, 0), (0, face)]);
+            seen.extend(events(&sim));
+        }
+        (sim, seen)
+    }
+
+    #[test]
+    fn a_victims_swing_across_the_rope_cuts_a_carry() {
+        // The victim turns on the thrower and cuts: the rope ends with Cut, no
+        // arrival damage, the spear is dropped and the throw cooldown runs.
+        let (sim, seen) = carry_with_swing(18_000, true);
+        assert_eq!(first_end(&seen), Some(EndWhy::Cut), "{seen:?}");
+        let damage = seen.iter().find_map(|e| match *e {
+            SpearEvent::TetherEnd {
+                damage_permille, ..
+            } => Some(damage_permille),
+            _ => None,
+        });
+        assert_eq!(damage, Some(0), "a cut deals nothing");
+        assert!(matches!(slot(&sim, 0).phase, Phase::Idle), "the spear drops");
+        // The same run without the swing is carried to the goal, not cut.
+        let (_, control) = carry_with_swing(18_000, false);
+        assert_eq!(first_end(&control), Some(EndWhy::Arrived), "{control:?}");
+    }
+
+    #[test]
+    fn a_swing_that_misses_the_rope_does_not_cut_it() {
+        // The victim swings away from the thrower: the blade lies ahead of the
+        // body, the rope behind it.
+        let (_, seen) = carry_with_swing(0, true);
+        assert_eq!(first_end(&seen), Some(EndWhy::Arrived), "{seen:?}");
+    }
+
+    /// Yank run with a bystander at x `side` (z 0.5) facing `bystander_face`,
+    /// swinging when `swing`. Returns how the tether ended.
+    fn yank_with_bystander(side: f32, bystander_face: i16, swing: bool) -> Option<EndWhy> {
+        let mut sim = sim3();
+        place(&mut sim, [0.0, -4.0], [0.0, 4.0]);
+        sim.states[2].pos = [side, 0.0, 0.5];
+        let back = (0, 0, 0, -100);
+        let still = (0, bystander_face, 0, 0);
+        tick_all(&mut sim, &[(THROW, 0, 0, -100), (0, 0, 0, 0), still]);
+        let mut seen = events(&sim);
+        let mut armed = false;
+        for _ in 0..90 {
+            let hooked = seen.iter().any(|e| matches!(e, SpearEvent::Hit { .. }));
+            if hooked && swing && !armed {
+                swing_now(&mut sim, 2);
+                armed = true;
+            }
+            let me = if hooked { (0, 0, 0, 0) } else { back };
+            tick_all(&mut sim, &[me, (0, 0, 0, 0), still]);
+            seen.extend(events(&sim));
+        }
+        assert!(
+            seen.iter()
+                .any(|e| matches!(e, SpearEvent::Hit { victim: Some(1), .. })),
+            "the hook sticks"
+        );
+        first_end(&seen)
+    }
+
+    #[test]
+    fn a_third_fighter_cuts_a_yank() {
+        // Beside the line, facing it: the blade reaches the rope. The yank
+        // stuns its victim, so only a bystander can cut it.
+        assert_eq!(yank_with_bystander(1.5, -9_000, true), Some(EndWhy::Cut));
+        assert_eq!(
+            yank_with_bystander(1.5, -9_000, false),
+            Some(EndWhy::Arrived),
+            "no swing, no cut"
+        );
+        assert_eq!(
+            yank_with_bystander(3.0, -9_000, true),
+            Some(EndWhy::Arrived),
+            "the blade falls short of the rope"
+        );
+        assert_eq!(
+            yank_with_bystander(1.5, 9_000, true),
+            Some(EndWhy::Arrived),
+            "the blade points away from the rope"
+        );
+    }
+
+    #[test]
+    fn the_throwers_own_swing_does_not_cut_its_rope() {
+        let mut sim = sim_in(MatchWorld::empty());
+        place(&mut sim, [0.0, -4.0], [0.0, -1.0]);
+        tick(&mut sim, [(THROW, 0), (0, 18_000)]);
+        let mut seen = events(&sim);
+        while !seen.iter().any(|e| matches!(e, SpearEvent::Hit { .. })) {
+            tick(&mut sim, [(0, 0), (0, 0)]);
+            seen.extend(events(&sim));
+        }
+        swing_now(&mut sim, 0);
+        for _ in 0..80 {
+            tick(&mut sim, [(0, 0), (0, 0)]);
+            seen.extend(events(&sim));
+        }
+        assert_ne!(first_end(&seen), Some(EndWhy::Cut), "{seen:?}");
+    }
+
+    #[test]
+    fn rope_geometry_crossing_touching_and_missing() {
+        // Crossing X, a near parallel inside the blade + rope tolerance, a
+        // parallel outside it, and a zero-length rope.
+        let gap = |a, b, c, d| segment_gap_sq(a, b, c, d);
+        assert_eq!(gap([-100, 0], [100, 0], [0, -100], [0, 100]), 0);
+        assert_eq!(gap([0, 0], [1000, 0], [0, 50], [1000, 50]), 2500);
+        assert_eq!(gap([0, 0], [1000, 0], [0, 500], [1000, 500]), 250_000);
+        assert_eq!(gap([0, 0], [1000, 0], [500, 300], [500, 300]), 90_000);
+        assert_eq!(gap([0, 0], [1000, 0], [1500, 0], [2500, 0]), 250_000);
     }
 
     #[test]

@@ -68,6 +68,10 @@ const MIN_BODY_HALF_M: f32 = 0.02;
 /// Largest piece the physical layer takes, half-extent in meters. A bigger chunk is a prop to
 /// split first.
 const MAX_BODY_HALF_M: f32 = 5.0;
+/// Span a sag offset is a share of, millimetres: the authority's
+/// `BondedCollection::sag_offset_mm(chunk, SAG_SPAN_MM)` says how far a chunk has leaned, and the
+/// picture draws it that far along `+x`. Presentation only, never part of the sim.
+pub const SAG_SPAN_MM: u32 = 400;
 
 /// Why a prop or a call was refused.
 #[derive(Clone, Debug, PartialEq)]
@@ -353,6 +357,9 @@ pub struct BreakLook {
     /// Dust of the last observed tick, until [`BreakLook::take_dust`] takes it.
     dust: Option<BreakDust>,
     last_tick: Option<u32>,
+    /// How far each chunk has leaned, millimetres along `+x`, in chunk order; empty until
+    /// [`BreakLook::set_sag`] sets a row.
+    sag_mm: Vec<u32>,
 }
 
 impl BreakLook {
@@ -387,6 +394,7 @@ impl BreakLook {
             cue: None,
             dust: None,
             last_tick: None,
+            sag_mm: Vec::new(),
             prop,
         })
     }
@@ -466,8 +474,36 @@ impl BreakLook {
         Ok(())
     }
 
+    /// Sets how far each chunk has leaned, millimetres along `+x`, one row per chunk in chunk
+    /// order: the DX18 sag of a bonded column, so a wall's mesh leans before it falls. The caller
+    /// maps the authority's span once per accepted tick
+    /// (`BondedCollection::sag_offset_mm(chunk, SAG_SPAN_MM)`). Rows past the prop's chunk count
+    /// are ignored and rows it does not carry read zero, so a shorter row leaves the rest standing
+    /// straight; a row past 65 m of lean reads as 65.5 m. Presentation only: no body, no sim state
+    /// and no hash reads it, and a chunk that flies is placed by its body, not by this row.
+    pub fn set_sag(&mut self, offsets_mm: &[u32]) {
+        let count = offsets_mm.len().min(self.prop.chunks.len());
+        self.sag_mm.clear();
+        self.sag_mm.extend_from_slice(&offsets_mm[..count]);
+    }
+
+    /// How far chunk `chunk` has leaned, millimetres along `+x`: zero for a chunk past the prop
+    /// and for every chunk while no sag row was set.
+    #[must_use]
+    pub fn sag_offset_mm(&self, chunk: usize) -> u32 {
+        self.sag_mm.get(chunk).copied().unwrap_or(0)
+    }
+
+    /// [`BreakLook::sag_offset_mm`] in meters along `+x`, for the drawn standing box.
+    fn sag_m(&self, chunk: usize) -> f32 {
+        // A chunk leaning past 65 m is off any arena: clamp rather than cast a wider row.
+        f32::from(u16::try_from(self.sag_offset_mm(chunk)).unwrap_or(u16::MAX)) / 1000.0
+    }
+
     /// What to draw now. `alpha` in `[0, 1]` blends the last two sim ticks (a non-finite one is
-    /// refused). Before the first event the frame is empty: the intact mesh draws itself.
+    /// refused). Before the first event the frame is empty: the intact mesh draws itself. A
+    /// standing chunk leans by its sag row ([`BreakLook::set_sag`]) along `+x`; a flying chunk is
+    /// drawn where its body is.
     pub fn frame(&self, alpha: f32) -> Result<Frame, LookError> {
         if !self.broke {
             return Ok(Frame::default());
@@ -480,7 +516,7 @@ impl BreakLook {
                 draws.push(PieceDraw {
                     mesh: self.prop.pieces[chunk].standing.key,
                     at: Transform {
-                        pos: [c.x, c.y, c.z],
+                        pos: [c.x + self.sag_m(chunk), c.y, c.z],
                         ..Transform::IDENTITY
                     },
                 });
@@ -962,6 +998,113 @@ mod tests {
         assert!(frame.draws.iter().all(|d| d.mesh != intact));
         look.observe(BREAK_TICK + 1, &[]).expect("next tick");
         assert_eq!(look.frame(1.0).expect("frame").hidden, vec![intact]);
+    }
+
+    /// Where chunk `chunk`'s standing box is drawn in `frame`, meters.
+    fn standing_at(look: &BreakLook, frame: &Frame, chunk: usize) -> [f32; 3] {
+        let key = look.meshes()[chunk].standing.key;
+        frame
+            .draws
+            .iter()
+            .find(|d| d.mesh == key)
+            .expect("the chunk is drawn standing")
+            .at
+            .pos
+    }
+
+    /// F2P: a standing chunk leans by its sag offset, so a column's mesh leans before it falls.
+    #[test]
+    fn a_standing_chunk_leans_by_its_sag_offset() {
+        let wall = wall_break(6.0);
+        let mut look = wall_look(Tier::Comfort, &wall);
+        let mut early = vec![0u32; 8];
+        early[0] = 300;
+        look.set_sag(&early);
+        assert_eq!(
+            look.frame(1.0).expect("frame"),
+            Frame::default(),
+            "a lean before the break draws nothing: the intact mesh leans, not these boxes"
+        );
+        play(&mut look, &wall, BREAK_TICK);
+        let standing = (0..look.prop.chunks.len())
+            .find(|&i| look.pieces[i] == Piece::Standing)
+            .expect("the wall keeps a standing chunk");
+        let rest = look.frame(1.0).expect("frame");
+        let before = standing_at(&look, &rest, standing);
+        let mut row = vec![0u32; look.prop.chunks.len()];
+        row[standing] = 300;
+        look.set_sag(&row);
+        let leaned = look.frame(1.0).expect("frame");
+        let after = standing_at(&look, &leaned, standing);
+        assert!(
+            (after[0] - before[0] - 0.30).abs() < 1e-6,
+            "300 mm of a 400 mm span leans 0.30 m: {before:?} -> {after:?}"
+        );
+        assert_eq!(
+            (after[1], after[2]),
+            (before[1], before[2]),
+            "the lean is along x only"
+        );
+        assert_eq!(look.sag_offset_mm(standing), 300, "the row reads back");
+    }
+
+    /// A zero sag row draws every chunk exactly where it stood, so a prop with no sag keeps the
+    /// picture it had before this module learned to lean.
+    #[test]
+    fn zero_sag_leaves_every_drawn_chunk_where_it_stood() {
+        let wall = wall_break(6.0);
+        let mut look = wall_look(Tier::Comfort, &wall);
+        play(&mut look, &wall, BREAK_TICK);
+        let before = look.frame(0.5).expect("frame");
+        assert_eq!(look.sag_offset_mm(0), 0, "no row set reads zero");
+        look.set_sag(&vec![0u32; look.prop.chunks.len()]);
+        assert_eq!(
+            look.frame(0.5).expect("frame"),
+            before,
+            "a zero row moves nothing"
+        );
+    }
+
+    /// A short sag row leaves the chunks past it standing straight, and rows past the prop are
+    /// ignored: the caller may hand a row sized to the chunks that still exist.
+    #[test]
+    fn a_short_sag_row_leaves_the_rest_still() {
+        let wall = wall_break(6.0);
+        let mut look = wall_look(Tier::Comfort, &wall);
+        play(&mut look, &wall, BREAK_TICK);
+        let count = look.prop.chunks.len();
+        let standing: Vec<usize> = (0..count)
+            .filter(|&i| look.pieces[i] == Piece::Standing)
+            .collect();
+        let first = standing[0];
+        let last = *standing.last().expect("a standing chunk");
+        let rest = look.frame(1.0).expect("frame");
+        let mut row = vec![0u32; first + 1];
+        row[first] = 250;
+        look.set_sag(&row);
+        let leaned = look.frame(1.0).expect("frame");
+        let moved = standing_at(&look, &leaned, first);
+        assert!(
+            (moved[0] - standing_at(&look, &rest, first)[0] - 0.25).abs() < 1e-6,
+            "the first chunk leans by its own row"
+        );
+        if last != first {
+            assert_eq!(
+                standing_at(&look, &leaned, last),
+                standing_at(&look, &rest, last),
+                "a chunk past the row's end stands straight"
+            );
+        }
+        assert_eq!(look.sag_offset_mm(count), 0, "the row ends at the prop");
+        let mut long = vec![0u32; count + 5];
+        long[count + 3] = 900;
+        look.set_sag(&long);
+        assert_eq!(
+            look.sag_offset_mm(count + 3),
+            0,
+            "rows past the prop are cut"
+        );
+        assert_eq!(look.sag_offset_mm(0), 0, "the cut row keeps its own zeros");
     }
 
     /// Debris never passes the tier's body table: 200 freed chunks on the weakest tier leave 96

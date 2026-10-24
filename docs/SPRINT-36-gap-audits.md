@@ -170,7 +170,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   (127 live, 13 without a test mate, each explained). Landed `352feb286` + `2e96a0ca4`.
   The untracked `tools/.qw4-check.mjs` near-copy (78 KB, idle 11 h) was moved out of the
   tree to the session temp on 2026-10-24 (bytes kept, not deleted).
-- [ ] TG4 ci: a coverage floor - `tools/wiring-cov.mjs` needs `cargo llvm-cov` and is a
+- [x] TG4 ci: a coverage floor - `tools/wiring-cov.mjs` needs `cargo llvm-cov` and is a
   manual NOOP; zero `llvm-cov` hits in `.github`. Tier B. Size M. Owns
   `.github/workflows/`, `tools/wiring-cov.mjs`. F2P: a workflow step runs `llvm-cov` and
   fails under the floor (new job). P2P: the mirror suite stays green. Accept: one number
@@ -213,7 +213,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   when the hooks are unset (new test). P2P: `doctor` stays healthy. Accept: a fresh clone's
   first `doctor` names the one command, and `--strict` fails until it runs.
   Landed `8f83a9167` (`doctor --strict`, 5/5 tests; `CONTRIBUTING.md` names the fix).
-- [ ] TG10 ci: rustdoc warnings fail the docs job - warnings are counted, not gated.
+- [ ] TG10 ci: rustdoc warnings fail the docs job - warnings are counted, not gated. Progress 2026-10-24: engine-assets rustdoc 37 -> 0 (19 -> 0 with import,registry) and gated in pages.yml (076cb28). Left: the remaining crates and a real pages run.
   Tier C. Size S. Owns `.github/workflows/`. F2P: a workflow step with `-D warnings`
   fails on today's warnings. P2P: the docs build stays green. Accept: warnings zero.
   Measured 2026-10-24: 781 warnings (render 149, anim 131, game 112, net 108, physics 86,
@@ -230,6 +230,10 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   rapier`, so seven crates are gated (pages run 40075622434, step 12 green). Left, 533:
   render 154, anim 132, game 119, endpoint 82, assets 46. The pages job is still red at
   step 14, `door-reference.md is stale`, which clears when the anim pack work lands.
+  Progress 4 (`1592a9c6b`, `90037c504`): render 154 -> 0 (75 files, links only), so eight
+  crates are gated; the door reference was regenerated (`948dc6826`), which clears step 14.
+  Left, 379: anim 132, game 119, endpoint 82 (97 with its new modules), assets 46. Only
+  these crates are held by other seats; the rest of the gate is green. Progress 2026-10-24: assets 37 -> 0 rustdoc warnings default build, 19 -> 0 import,registry (076cb28c2).
 - [x] TG11 ci: the wasm matrix leg survives the thread tests - `islands::tests::par_*`
   spawn threads, which traps `unreachable` on wasm32-wasip1 (run 40056555531, exit 134
   after 160 tests), so the compare job prints `PHYSICS RESULT FAIL` even though all 20
@@ -324,18 +328,19 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
 
 ## Order
 
-Done on 2026-10-24: WG1 WG3 WG4 WG6 WG7 WG8 WG9 WG10 WG11 WG12 WG13 WG14 WG15, TG1 TG2 TG3
-TG5 TG6 TG7 TG8 TG9 TG11, LG1 LG2 LG3 LG4 LG5 LG6 LG7 LG8 LG9 LG10. Four rows stay open.
+Done on 2026-10-24: WG1 WG3 WG4 WG6 WG7 WG8 WG9 WG10 WG11 WG12 WG13 WG14 WG15, TG1 TG2
+TG3 TG5 TG6 TG7 TG8 TG9 TG11, LG1 LG2 LG3 LG4 LG5 LG6 LG7 LG8 LG9 LG10. One row stays
+open: TG10 (379 rustdoc warnings: anim 132, game 119, endpoint 82, assets 46 - all four
+crates are held by other seats right now).
 
-- WG2: the plugin registry (`linkme` slice, `modules = [...]` in the manifest) - the last
-  workspace row, no pack collision.
-- WG5: only the physics accept is left - nothing consumes `HeightfieldRecord` yet
-  (`crates/physfx` is busy with another seat's soft-body work).
-- WG14 landed `04a6d1d70` (the other seat wrote the row; ticked here).
-  (another seat); it lands with them.
-- TG4: the endpoint coverage leg needs a green endpoint suite; `api.load` currently
-  refuses at 78,957 chars against the 75,000 hard budget (the pack seat's in-flight work).
-- TG10: seven crates gated; render 154, anim 132, game 119, endpoint 82,
-  assets 46 remain (only endpoint is free of another seat's edits).
+Closed last:
+- WG2: `b39d5810b` makes every pack publish its own row through a `linkme` slice with an
+  explicit order slot; `7406fbb60` adds the `modules` key as manifest data resolved at
+  project load, so the headless crate gains no `engine-endpoint` edge.
+- WG5: `a8bbe9eb6` gives physics the heightfield collider, so the ball rests at the
+  cooked height.
+- WG14: `04a6d1d70` cooks the 128 px thumbnail at import.
+- TG4: `ab899e118` sets the endpoint floor at 90.3 under a measured 91.3.
+- TG11: `650862688` runs jobs inline on wasm, so all 9 matrix jobs are green.
 
 Do not reopen parked rows; the full tables are in the three research files.

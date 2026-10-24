@@ -12,7 +12,7 @@
   Two gates decide a candidate:
 
   1. Tell gate: the parry may not answer the whole tell of the fastest weapon in `content/design/weapons.rows`
-     (the pugio, 12 ticks), or the attacker's feint has no meaning (Bycer ch8: a tell and a commit).
+     (the pugio, 24 ticks since OPT59 doubled the weapon rows to match the 30-tick tell), or the attacker's feint has no meaning (Bycer ch8: a tell and a commit).
   2. Half gate: the row may answer at most half of its own tell
      (`parry_window_ticks * 2 <= attack_startup_ticks`), or pressing late in a swing is a promise the
      defender can always keep (Sellers ch9-10: a gate needs a cost).
@@ -26,15 +26,17 @@
   | 9 | 10 | 333 | pass | pass |
   | 10 | 11 | 366 | pass | pass |
   | 11 | 12 | 400 | pass | pass |
-  | 12 | 13 | 433 | fail (13 > 12) | pass |
-  | 13 | 14 | 466 | fail (14 > 12) | pass |
+  | 12 | 13 | 433 | pass (13 <= 24) | pass |
+  | 13 | 14 | 466 | pass (14 <= 24) | pass |
 
-  With a 30-tick tell the half gate never binds: even the widest candidate answers under half of it
-  (14 * 2 = 28 <= 30). The tell gate sets the bound, at 11 ticks, because 12 and 13 swallow the pugio's
-  whole 12-tick tell. The shipped 7 stays: it answers 8 of 30 tell ticks (266 permille) and sits four
-  ticks inside the widest window both gates allow, so a reader has 22 ticks where a parry is already late.
-  Widening it is not part of the readability change. A later row that wants 11 needs this table rerun and
-  a balance-log line.
+  With a 30-tick tell and a 24-tick fastest weapon no candidate in the sweep falls to a gate: even the
+  widest candidate answers under half of the tell (14 * 2 = 28 <= 30) and under the pugio's whole tell
+  (14 <= 24). Beyond the sweep the half gate binds first, at a window of 15 (the tell gate would stop at
+  23), so 15 is the widest window both gates allow. (Before the weapon rows were rescaled the pugio's
+  12-tick tell stopped the window at 11 and failed candidates 12 and 13.) The shipped 7 stays: it answers
+  8 of 30 tell ticks (266 permille) and sits eight ticks inside the widest window both gates allow, so a
+  reader has 22 ticks where a parry is already late. Widening it is not part of the readability change. A
+  later row that wants 11 or more needs this table rerun and a balance-log line.
 - Consequences: One number moves at a time. The sweep is now a check, so a wider window, a shorter startup
   or a faster weapon in `weapons.rows` moves the verdict with it. A chosen value other than 7 needs this
   table rerun and the reason rewritten here, plus a systems-designer line in `docs/design/balance-log.md`.
