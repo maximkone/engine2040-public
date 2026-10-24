@@ -52,7 +52,13 @@ pub struct Caps {
 
 impl Tier {
     /// Every tier, weakest first.
-    pub const ALL: [Tier; 5] = [Tier::Potato, Tier::Mobile, Tier::Web, Tier::Comfort, Tier::High];
+    pub const ALL: [Tier; 5] = [
+        Tier::Potato,
+        Tier::Mobile,
+        Tier::Web,
+        Tier::Comfort,
+        Tier::High,
+    ];
 
     /// The cap table: every per-tier number lives in this one place. The values are the first
     /// cut; the physics ladder row (RZ8) tunes them from measured frame cost.
