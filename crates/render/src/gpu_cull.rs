@@ -6,10 +6,14 @@
 //! [`draw::indirect_args_5`](crate::draw::indirect_args_5) over the same
 //! packed `[x, y, z, radius]` spheres, so the device pass cannot drift from
 //! the CPU oracle `draw.rs` already pins for `shaders/cull.wgsl`.
-//! UNLOCKS: GS18b (slice 2, "draws go indirect") owns the `draw.rs` hook that
-//! reads these 5-u32 args through `draw_indexed_indirect`; until it lands no
-//! draw path calls this runner, and the row's own text says so ("No draw path
-//! uses it yet"). The device entry is a proof path: it maps buffers and waits,
+//! SW2 (slice 2, "draws go indirect"): the args a cull writes are consumed
+//! through [`ArgsBlocks`], the two-block form ([`ArgsBlocks::main`] for the
+//! forward pass, [`ArgsBlocks::shadow`] for the sun pass: one cull, two
+//! consumers) plus [`draw_instances`], the only draw decision a pass makes
+//! from a block: `None` draws nothing, so a culled mesh never reaches the
+//! vertex stage. [`detail_cull_flags_into`] is the same rule with the
+//! sub-pixel drop on top, fed by `quality::detail_cull_permille`.
+//! The device entry is a proof path: it maps buffers and waits,
 //! so the frame loop must never call it (render-pipeline rule 2).
 //! Units: meters for sphere centers and radii, u32 words for the args.
 //! Determinism: the cull rule is `+ - *` in fixed plane order and the flags
@@ -148,6 +152,123 @@ pub fn check_inputs(spheres: &[[f32; 4]], planes: &[[f32; 4]; 6]) -> Result<(), 
         }
     }
     Ok(())
+}
+
+/// The two indirect blocks one cull feeds: the forward pass reads
+/// [`ArgsBlocks::main`], the sun depth pass reads [`ArgsBlocks::shadow`], so a
+/// block a pass consumed never starves the other consumer (donor
+/// `_ArgsBuffer` / `_ShadowArgsBuffer`). Both carry the same words for the
+/// same survivor count: the depth pass draws the same instanced geometry as
+/// the forward pass, only without a color target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArgsBlocks {
+    /// Block the forward (main) pass draws from.
+    pub main: [u32; INDIRECT_WORDS],
+    /// Block the sun depth pass draws from.
+    pub shadow: [u32; INDIRECT_WORDS],
+}
+
+impl ArgsBlocks {
+    /// Both blocks for one cull: `index_count` indices and one instance per
+    /// survivor. A zero survivor count leaves both blocks at instance 0, so
+    /// [`draw_instances`] answers `None` for either consumer.
+    #[must_use]
+    pub const fn for_count(index_count: u32, visible: u32) -> Self {
+        let block = [index_count, visible, 0, 0, 0];
+        Self {
+            main: block,
+            shadow: block,
+        }
+    }
+}
+
+/// The draw decision a pass makes from one block: `Some(instances)` when the
+/// cull kept something, `None` when it kept nothing. The block is the only
+/// input, so the CPU order and the device args cannot disagree: a skipped
+/// draw is one whose block says 0, never a second rule.
+#[must_use]
+pub const fn draw_instances(args: &[u32; INDIRECT_WORDS]) -> Option<u32> {
+    if args[1] == 0 {
+        None
+    } else {
+        Some(args[1])
+    }
+}
+
+/// The one view a detail cull needs: eye and forward in world space, the
+/// vertical half-tangent of the field of view (dimensionless) and the screen
+/// height in pixels. Units: meters for the position, pixels for the height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DetailView {
+    /// Camera position, meters.
+    pub eye: [f32; 3],
+    /// Unit camera forward, the direction a sphere's depth is measured on.
+    pub forward: [f32; 3],
+    /// `tan(fov_y / 2)`, dimensionless.
+    pub tan_half_y: f32,
+    /// Screen height in pixels (the permille is a fraction of this).
+    pub screen_h_px: f32,
+}
+
+impl DetailView {
+    /// A view the rule can answer for: a finite eye and forward, a positive
+    /// finite half-tangent and a positive finite screen height. A frame that
+    /// fails this keeps every frustum-visible draw (no detail drop).
+    #[must_use]
+    pub fn is_usable(&self) -> bool {
+        self.eye.iter().all(|word| word.is_finite())
+            && self.forward.iter().all(|word| word.is_finite())
+            && self.tan_half_y.is_finite()
+            && self.tan_half_y > 0.0
+            && self.screen_h_px.is_finite()
+            && self.screen_h_px > 0.0
+    }
+
+    /// Projected diameter of one sphere in pixels: `2 * r / (depth * tan)`
+    /// half-heights, scaled to the screen. Depth is clamped at a millimeter so
+    /// a sphere on the eye plane divides by the clamp, not by zero.
+    fn diameter_px(&self, center: [f32; 3], radius: f32) -> f32 {
+        let rel = [
+            center[0] - self.eye[0],
+            center[1] - self.eye[1],
+            center[2] - self.eye[2],
+        ];
+        let depth = rel[0] * self.forward[0] + rel[1] * self.forward[1] + rel[2] * self.forward[2];
+        let depth = if depth > 1e-3 { depth } else { 1e-3 };
+        radius * self.screen_h_px / (depth * self.tan_half_y)
+    }
+}
+
+/// Frustum flags with the detail drop on top: a sphere whose projected
+/// diameter is under `permille` thousandths of the screen height is set to 0,
+/// so sub-pixel geometry never reaches the vertex stage (donor
+/// `IsVisibleAfterDetailCulling`). `permille` 0 is the plain frustum rule, and
+/// an unusable view degrades to it: never a drop nobody asked for. Writes at
+/// most `flags.len()` entries, returns the count written.
+pub fn detail_cull_flags_into(
+    spheres: &[[f32; 4]],
+    planes: &[[f32; 4]; 6],
+    view: &DetailView,
+    permille: u16,
+    flags: &mut [u8],
+) -> usize {
+    let written = cull_cpu_flags_into(spheres, planes, flags);
+    if permille == 0 || !view.is_usable() {
+        return written;
+    }
+    let threshold = f32::from(permille) / 1000.0 * view.screen_h_px;
+    let mut index = 0;
+    while index < written {
+        if flags[index] == 1 {
+            let sphere = spheres[index];
+            let diameter = view.diameter_px([sphere[0], sphere[1], sphere[2]], sphere[3]);
+            if diameter < threshold {
+                flags[index] = 0;
+            }
+        }
+        index += 1;
+    }
+    written
 }
 
 /// `words` as little-endian `f32` bytes; the shader's storage layout is
@@ -618,6 +739,161 @@ mod tests {
             "GS18 gpu cull: {cpu_count} of {} visible, args {:?}",
             spheres.len(),
             first.args
+        );
+    }
+
+    /// A depth view down `-z` from the origin: 720-pixel screen and a
+    /// half-tangent of 1, so the visible height is twice the depth and one
+    /// meter at ten meters is 36 pixels.
+    fn detail_view() -> DetailView {
+        DetailView {
+            eye: [0.0, 0.0, 0.0],
+            forward: [0.0, 0.0, -1.0],
+            tan_half_y: 1.0,
+            screen_h_px: 720.0,
+        }
+    }
+
+    /// Seven ordinary meshes inside the box plus one the frustum rejects: the
+    /// accept's "count>0 for 7 of 8 meshes with 1 culled".
+    fn seven_of_eight() -> Vec<[f32; 4]> {
+        let mut spheres = vec![[0.0, 0.0, -10.0, 0.5]; 7];
+        spheres.push([0.0, 0.0, 5.0, 0.5]);
+        spheres
+    }
+
+    #[test]
+    fn indirect_draw_reads_the_gpu_cull_args() {
+        // The only draw decision a pass makes: the block's instance count.
+        let planes = box_planes();
+        let spheres = seven_of_eight();
+        let mut flags = vec![0u8; spheres.len()];
+        let written = cull_cpu_flags_into(&spheres, &planes, &mut flags);
+        assert_eq!(written, 8, "the oracle covered every mesh");
+        let count = visible_count(&flags);
+        assert_eq!(count, 7, "seven of eight meshes survive, one culled");
+        let blocks = ArgsBlocks::for_count(36, count);
+        assert_eq!(blocks.main, [36, 7, 0, 0, 0], "36 indices, 7 instances");
+        assert_eq!(
+            blocks.shadow, blocks.main,
+            "one cull, two consumers: the sun pass's block carries the same words"
+        );
+        assert_eq!(draw_instances(&blocks.main), Some(7), "the main pass draws");
+        assert_eq!(
+            draw_instances(&blocks.shadow),
+            Some(7),
+            "the sun pass draws too"
+        );
+        let none = ArgsBlocks::for_count(36, 0);
+        assert_eq!(
+            draw_instances(&none.main),
+            None,
+            "an empty cull draws nothing"
+        );
+        assert_eq!(
+            draw_instances(&none.shadow),
+            None,
+            "and neither does the sun"
+        );
+        assert_eq!(none.main[0], 36, "the index count stays a real draw");
+    }
+
+    #[test]
+    fn detail_cull_drops_a_sub_pixel_mesh() {
+        // One meter at ten meters is 36 pixels tall here, so a two-centimeter
+        // mesh at nineteen meters is under one pixel: below the drop line.
+        let planes = box_planes();
+        let mut spheres = seven_of_eight();
+        spheres[7] = [0.0, 0.0, -19.0, 0.02];
+        let view = detail_view();
+        let mut frustum = vec![0u8; spheres.len()];
+        let written = cull_cpu_flags_into(&spheres, &planes, &mut frustum);
+        assert_eq!(written, spheres.len());
+        assert_eq!(
+            visible_count(&frustum),
+            8,
+            "the frustum alone keeps every sphere, the tiny one included"
+        );
+        let mut flags = vec![0u8; spheres.len()];
+        let permille = crate::quality::detail_cull_permille(crate::quality::Quality::Potato);
+        assert_eq!(
+            permille, 8,
+            "the potato tier drops under 8/1000 of the screen"
+        );
+        let written = detail_cull_flags_into(&spheres, &planes, &view, permille, &mut flags);
+        assert_eq!(written, spheres.len(), "the drop still reports every slot");
+        let kept = visible_count(&flags);
+        assert_eq!(kept, 7, "the sub-pixel mesh never reaches the vertex stage");
+        assert_eq!(
+            flags[7], 0,
+            "the tiny far mesh is the one dropped, byte for byte"
+        );
+        assert!(
+            flags[..7].iter().all(|flag| *flag == 1),
+            "the seven visible meshes stay"
+        );
+        // Off, and an unusable view, are the plain frustum rule: no drop.
+        let mut off = vec![0u8; spheres.len()];
+        detail_cull_flags_into(&spheres, &planes, &view, 0, &mut off);
+        assert_eq!(visible_count(&off), 8, "permille 0 disables the drop");
+        let broken = DetailView {
+            screen_h_px: f32::NAN,
+            ..view
+        };
+        let mut degraded = vec![0u8; spheres.len()];
+        detail_cull_flags_into(&spheres, &planes, &broken, permille, &mut degraded);
+        assert_eq!(
+            visible_count(&degraded),
+            8,
+            "a bad view degrades to frustum"
+        );
+        // Determinism: the same input bytes give the same flags twice.
+        let mut again = vec![0u8; spheres.len()];
+        detail_cull_flags_into(&spheres, &planes, &view, permille, &mut again);
+        assert_eq!(again, flags, "same spheres, same view, same flags");
+        // The knob never asks for more drops as the tier rises.
+        let mut previous = u16::MAX;
+        for tier in crate::quality::Quality::ALL {
+            let current = crate::quality::detail_cull_permille(tier);
+            assert!(
+                current <= previous,
+                "{} drops more than the tier below it",
+                tier.name()
+            );
+            assert!(current > 0, "{} must drop something", tier.name());
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn indirect_gpu_args_read_seven_of_eight() {
+        // The device half of the same frame: the cull's own args block, read
+        // back, is the block both passes draw from.
+        let Some((device, queue)) = device_or_skip("indirect_gpu_args_read_seven_of_eight") else {
+            return;
+        };
+        let spheres = seven_of_eight();
+        let planes = box_planes();
+        let culler = GpuCuller::new(&device);
+        let proof = culler
+            .cull(&device, &queue, &spheres, &planes)
+            .expect("the device cull runs");
+        assert_eq!(
+            proof.count, 7,
+            "seven of eight meshes survive on the device"
+        );
+        let blocks = ArgsBlocks::for_count(proof.args[0], proof.count);
+        assert_eq!(
+            blocks.main, proof.args,
+            "the read-back block is the frame's"
+        );
+        assert_eq!(blocks.shadow, proof.args, "and the sun pass reads the same");
+        assert_eq!(draw_instances(&proof.args), Some(7), "the pass draws 7");
+        eprintln!(
+            "SW2 indirect: {} of {} meshes, args {:?}",
+            proof.count,
+            spheres.len(),
+            proof.args
         );
     }
 }
