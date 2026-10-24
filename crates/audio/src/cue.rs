@@ -72,6 +72,8 @@ pub mod names {
     pub const FOOTSTEP_WATER: &str = "footstep_water";
     /// Looping crowd bed.
     pub const CROWD: &str = "crowd";
+    /// Crowd one-shot: a cheer, a roar of approval or a yahoo.
+    pub const CROWD_CHEER: &str = "crowd_cheer";
     /// Stinger: a kill lands (low hit and a minor chord stab).
     pub const STINGER_KILL: &str = "stinger_kill";
     /// Stinger: the crowd roars (swelling noise).
@@ -84,6 +86,8 @@ pub mod names {
     pub const IMPACT_ARMOR: &str = "impact_armor";
     /// Two blades bind on the same tick: a hard steel clash.
     pub const CLASH: &str = "clash";
+    /// Looping Rome ambience: the Colosseum field recording under the fight.
+    pub const AMBIENCE_ROME: &str = "ambience_rome";
     /// A counter blow off a parry: a fast cutting strike.
     pub const RIPOSTE: &str = "riposte";
     /// A blow severs a joint: the blade tears through.
@@ -649,11 +653,15 @@ const fn synthesized(name: &'static str, synth: Synth, priority: u8, gain: f32) 
 }
 
 /// Every cue the arena plays, mapped onto the CC0 clips in `content/audio`.
-/// `swing`, `crowd`, the two stingers, the BX11 material/tissue takes
-/// (`impact_bone`, `impact_armor`, `stump`, `structure_groan`) and the four
-/// SN12 kind cues (`clash`, `riposte`, `sever`, `gore`) have no recording yet:
-/// they are synthesized.
-pub const ARENA_CUES: [CueSpec; 23] = [
+/// `swing`, the two stingers, the BX11 tissue takes (`impact_bone`, `stump`,
+/// `structure_groan`) and three SN12 kind cues (`riposte`, `sever`, `gore`)
+/// have no recording yet: they are synthesized. Since 2026-10-24 the parry
+/// and clash rows play the CC0 StarNinjas takes, the block and armour rows
+/// the Kenney wood and plate thuds, and the crowd bed plus `crowd_cheer` the
+/// CC0 Freesound crowd recordings (OGG Vorbis, decoded by `decode_vorbis`).
+/// `ambience_rome` loops the two CC0 Rome Colosseum field recordings as the
+/// environment bed (Group::Ambient, 2026-10-24).
+pub const ARENA_CUES: [CueSpec; 25] = [
     impact(
         names::HIT,
         &[
@@ -667,9 +675,10 @@ pub const ARENA_CUES: [CueSpec; 23] = [
     impact(
         names::BLOCK,
         &[
-            "impacts/wood-small.wav",
-            "impacts/wood-medium.wav",
-            "impacts/wood-large.wav",
+            "impacts/kenney/impactWood_medium_000.ogg",
+            "impacts/kenney/impactWood_heavy_000.ogg",
+            "impacts/kenney/impactPlate_medium_000.ogg",
+            "impacts/kenney/impactPlate_heavy_000.ogg",
         ],
         160,
         0.9,
@@ -677,9 +686,10 @@ pub const ARENA_CUES: [CueSpec; 23] = [
     impact(
         names::PARRY,
         &[
-            "impacts/metal-small.wav",
-            "impacts/metal-medium.wav",
-            "impacts/metal-large.wav",
+            "impacts/star-ninjas/sword_clash.1.ogg",
+            "impacts/star-ninjas/sword_clash.2.ogg",
+            "impacts/star-ninjas/sword_clash.3.ogg",
+            "impacts/star-ninjas/sword_clash.4.ogg",
         ],
         170,
         0.9,
@@ -706,10 +716,28 @@ pub const ARENA_CUES: [CueSpec; 23] = [
         0.9,
     ),
     synthesized(names::IMPACT_BONE, Synth::Bone, 175, 1.0),
-    synthesized(names::IMPACT_ARMOR, Synth::Armor, 165, 0.9),
+    impact(
+        names::IMPACT_ARMOR,
+        &[
+            "impacts/kenney/impactPlate_heavy_001.ogg",
+            "impacts/kenney/impactPlate_medium_001.ogg",
+        ],
+        165,
+        0.9,
+    ),
     synthesized(names::STUMP, Synth::Stump, 185, 0.9),
     synthesized(names::STRUCTURE_GROAN, Synth::Groan, 110, 0.8),
-    synthesized(names::CLASH, Synth::Clash, 172, 0.9),
+    impact(
+        names::CLASH,
+        &[
+            "impacts/star-ninjas/sword_clash.5.ogg",
+            "impacts/star-ninjas/sword_clash.6.ogg",
+            "impacts/star-ninjas/sword_clash.7.ogg",
+            "impacts/star-ninjas/sword_clash.8.ogg",
+        ],
+        172,
+        0.9,
+    ),
     synthesized(names::RIPOSTE, Synth::Riposte, 168, 0.9),
     synthesized(names::SEVER, Synth::Sever, 178, 1.0),
     synthesized(names::GORE, Synth::Gore, 150, 0.8),
@@ -784,7 +812,10 @@ pub const ARENA_CUES: [CueSpec; 23] = [
     ),
     CueSpec {
         name: names::CROWD,
-        files: &[],
+        files: &[
+            "crowd/fs_crowd_small_264377.ogg",
+            "crowd/fs_crowd_exciting_365132.ogg",
+        ],
         synth: Synth::Crowd,
         spatial: Spatial::Flat,
         group: Group::Crowd,
@@ -796,8 +827,41 @@ pub const ARENA_CUES: [CueSpec; 23] = [
         gain: 0.6,
         ducks_music: false,
     },
+    CueSpec {
+        name: names::CROWD_CHEER,
+        files: &[
+            "crowd/fs_crowd_cheer_397434.ogg",
+            "crowd/fs_crowd_yahoo_511788.ogg",
+        ],
+        synth: Synth::Roar,
+        spatial: Spatial::Flat,
+        group: Group::Crowd,
+        looped: false,
+        // One-shot over the bed: below it, above the combat cues.
+        priority: 210,
+        bus: Bus::Sfx,
+        gain: 0.8,
+        ducks_music: false,
+    },
     stinger(names::STINGER_KILL, Synth::Kill),
     stinger(names::STINGER_ROAR, Synth::Roar),
+    CueSpec {
+        name: names::AMBIENCE_ROME,
+        files: &[
+            "ambience/fs_rome_labicana_341684.ogg",
+            "ambience/fs_rome_fori_341687.ogg",
+        ],
+        synth: Synth::Crowd,
+        spatial: Spatial::Flat,
+        group: Group::Ambient,
+        looped: true,
+        // An environment bed under the crowd bed; it loses to both the crowd
+        // and every one-shot, so a fight never drops the room.
+        priority: 150,
+        bus: Bus::Sfx,
+        gain: 0.45,
+        ducks_music: false,
+    },
 ];
 
 /// What a bank build found: how many files loaded, which listed files were
