@@ -485,7 +485,14 @@ fn lock_graphs() -> Result<
 
 /// A graph refusal names the path, the typed kind and one recovery step.
 fn bad_graph(error: engine_material::graph::GraphError) -> McpToolError {
-    McpToolError::new("bad_graph", error.to_string()).with_data(json!({ "path": error.path }))
+    McpToolError::new(
+        "bad_graph",
+        format!(
+            "{error}; next: fix the path the message names, or api.describe \
+             material.graph.set for the graph shape"
+        ),
+    )
+    .with_data(json!({ "path": error.path }))
 }
 
 fn parse_graph(text: &str) -> Result<engine_material::graph::Graph, McpToolError> {
@@ -1472,10 +1479,14 @@ mod tests {
     #[test]
     fn graph_set_folds_the_brick_graph_and_a_second_set_is_a_no_op() {
         let server = server();
+        // The graph table is process global and every test server names the
+        // same session, so this test folds its own noise seed: a graph another
+        // test already stored would read as a no-op here.
+        let graph = BRICK.replace("\"seed\": 1", "\"seed\": 7");
         let first = MaterialGraphSetTool::invoke(
             &server,
             MaterialGraphSetArgs {
-                graph: BRICK.to_owned(),
+                graph: graph.clone(),
             },
         )
         .expect("graph sets");
@@ -1492,7 +1503,7 @@ mod tests {
         let second = MaterialGraphSetTool::invoke(
             &server,
             MaterialGraphSetArgs {
-                graph: BRICK.to_owned(),
+                graph: graph.clone(),
             },
         )
         .expect("graph sets twice");

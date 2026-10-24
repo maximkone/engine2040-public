@@ -27,6 +27,23 @@
 //! module stays the GPU-free half: parse and sample, no device, no IO.
 //!
 //! [`ChainConfig`]: super::ChainConfig
+//!
+//! GPU seam: [`Lut3d::rgba16f_table`] is the upload form (four f16 channels
+//! per texel, blue fastest) and [`Lut3d::sample_texel`] is the CPU statement
+//! of the fetch. The ready-to-paste WGSL, to land in the shader owner's file,
+//! samples the same table with a linear-filtering 3D sampler after grading:
+//!
+//! ```wgsl
+//! @group(2) @binding(0) var lut_tex: texture_3d<f32>;
+//! @group(2) @binding(1) var lut_sampler: sampler;
+//!
+//! fn lut_fetch(display: vec3<f32>) -> vec3<f32> {
+//!     // Domain 0..=1 and linear filtering: the sampler reproduces
+//!     // `Lut3d::apply` at the texel centers and trilinearly between them.
+//!     let coords = clamp(display, vec3<f32>(0.0), vec3<f32>(1.0));
+//!     return textureSampleLevel(lut_tex, lut_sampler, coords, 0.0).rgb;
+//! }
+//! ```
 
 use std::fmt;
 
@@ -186,26 +203,44 @@ impl Lut3d {
     /// Map one color through the table: normalize into the domain, clamp at
     /// the edges, trilinear interpolate. An identity table returns the input
     /// within `1e-4`; a non-finite channel lands on the low domain edge, so
-    /// the returned triple is always finite.
+    /// the returned triple is always finite. Equals [`Self::sample_texel`] at
+    /// the same grid position (the GPU and CPU reference share one shape).
     pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
         let mut cell = [(0usize, 0.0f32); 3];
         for (channel, slot) in cell.iter_mut().enumerate() {
             *slot = self.axis(channel, rgb[channel]);
         }
-        let last = self.last();
         let (r0, fr) = cell[0];
         let (g0, fg) = cell[1];
         let (b0, fb) = cell[2];
-        let r1 = (r0 + 1).min(last);
-        let g1 = (g0 + 1).min(last);
-        let b1 = (b0 + 1).min(last);
-        let low_b = blend(self.texel(r0, g0, b0), self.texel(r0, g0, b1), fb);
-        let high_b = blend(self.texel(r1, g0, b0), self.texel(r1, g0, b1), fb);
-        let low_r = blend(self.texel(r0, g1, b0), self.texel(r0, g1, b1), fb);
-        let high_r = blend(self.texel(r1, g1, b0), self.texel(r1, g1, b1), fb);
-        let low = blend(low_b, low_r, fg);
-        let high = blend(high_b, high_r, fg);
-        blend(low, high, fr)
+        self.interpolate(r0, fr, g0, fg, b0, fb)
+    }
+
+    /// Trilinear reference at a grid position in texel units: `px` along red,
+    /// `py` along green, `pz` along blue, each in `0..=size-1` and clamped at
+    /// the edges. This is the CPU statement of what a linear-filtered 3D
+    /// texture sample returns, so the GPU fetch can be compared against it.
+    pub fn sample_texel(&self, px: f32, py: f32, pz: f32) -> [f32; 3] {
+        let (r0, fr) = self.grid_cell(px);
+        let (g0, fg) = self.grid_cell(py);
+        let (b0, fb) = self.grid_cell(pz);
+        self.interpolate(r0, fr, g0, fg, b0, fb)
+    }
+
+    /// [`Self::rgba16f_table`] in raw bytes: four little-endian f16 channels
+    /// per texel (R, G, B from the table, A = 1.0), in `.cube` order, so the
+    /// bytes upload straight into an `Rgba16Float` 3D texture of
+    /// `size x size x size` with blue on the fastest axis.
+    pub fn rgba16f_table(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.table.len().saturating_mul(8));
+        for texel in &self.table {
+            for channel in texel {
+                bytes.extend_from_slice(&f16_bits(*channel).to_le_bytes());
+            }
+            // Alpha marks a filled texel; a linear fetch ignores it today.
+            bytes.extend_from_slice(&f16_bits(1.0).to_le_bytes());
+        }
+        bytes
     }
 
     /// Apply the table to a caller slice in place: every pixel inside `px` is
@@ -259,6 +294,35 @@ impl Lut3d {
         let n = usize::from(self.size);
         self.table[(r * n + g) * n + b]
     }
+
+    /// The eight-tap trilinear blend around one cell, shared by [`Self::apply`]
+    /// and [`Self::sample_texel`] so the CPU paths cannot drift apart.
+    fn interpolate(&self, r0: usize, fr: f32, g0: usize, fg: f32, b0: usize, fb: f32) -> [f32; 3] {
+        let last = self.last();
+        let r1 = (r0 + 1).min(last);
+        let g1 = (g0 + 1).min(last);
+        let b1 = (b0 + 1).min(last);
+        let low_b = blend(self.texel(r0, g0, b0), self.texel(r0, g0, b1), fb);
+        let high_b = blend(self.texel(r1, g0, b0), self.texel(r1, g0, b1), fb);
+        let low_r = blend(self.texel(r0, g1, b0), self.texel(r0, g1, b1), fb);
+        let high_r = blend(self.texel(r1, g1, b0), self.texel(r1, g1, b1), fb);
+        let low = blend(low_b, low_r, fg);
+        let high = blend(high_b, high_r, fg);
+        blend(low, high, fr)
+    }
+
+    /// Cell below a grid coordinate in texel units plus the in-cell share,
+    /// with the edges clamped (a coordinate outside the grid reads the edge).
+    fn grid_cell(&self, position: f32) -> (usize, f32) {
+        let last = self.last();
+        let clamped = if position.is_finite() {
+            position.clamp(0.0, index_f32(last))
+        } else {
+            0.0
+        };
+        let cell = cell_index(clamped, last).min(last - 1);
+        (cell, (clamped - index_f32(cell)).clamp(0.0, 1.0))
+    }
 }
 
 /// Read a `.cube` text into a [`Lut3d`]. No file IO: the caller reads the
@@ -292,6 +356,43 @@ fn blend(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 /// `u16`, so `From` covers the whole index range.
 fn index_f32(index: usize) -> f32 {
     f32::from(u16::try_from(index).unwrap_or(u16::MAX))
+}
+
+/// f16 bits of one table value: normals round to nearest even, magnitudes
+/// under the smallest normal half (`2^-14`) flush to signed zero, and
+/// overflow or a non-finite value becomes signed infinity. The CPU oracle
+/// stays f32; this is the upload form the 3D texture takes.
+fn f16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = half_u16((bits >> 16) & 0x8000);
+    let abs = bits & 0x7fff_ffff;
+    if !value.is_finite() || abs >= 0x477f_f000 {
+        return sign | 0x7c00;
+    }
+    let exp = abs >> 23;
+    if exp < 113 {
+        return sign;
+    }
+    let keep = abs & 0x007f_ffff;
+    let mut half_exp = exp - 112;
+    let mut mantissa = keep >> 13;
+    let dropped = keep & 0x1fff;
+    if dropped > 0x1000 || (dropped == 0x1000 && mantissa & 1 == 1) {
+        mantissa += 1;
+        if mantissa == 0x0400 {
+            mantissa = 0;
+            half_exp += 1;
+        }
+    }
+    if half_exp >= 0x1f {
+        return sign | 0x7c00;
+    }
+    sign | half_u16(half_exp << 10) | half_u16(mantissa)
+}
+
+/// One narrow field of [`f16_bits`] as `u16` (the value always fits).
+fn half_u16(value: u32) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 /// Grid cell holding `scaled` in `0..=last`: halving search over the index
@@ -852,5 +953,81 @@ DOMAIN_MAX 1 1 1
         let mut empty: [[f32; 3]; 0] = [];
         lut.apply_in_place(&mut empty);
         assert!(empty.is_empty(), "an empty slice stays empty");
+    }
+
+    /// One f16 bit pattern back to f32, for reading the upload bytes.
+    fn half_to_f32(bits: u16) -> f32 {
+        let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+        let exp = (bits >> 10) & 0x1f;
+        let mantissa = f32::from(bits & 0x03ff);
+        if exp == 0 {
+            return sign * mantissa * 2f32.powi(-24);
+        }
+        if exp == 0x1f {
+            return sign * f32::INFINITY;
+        }
+        sign * (1.0 + mantissa / 1024.0) * 2f32.powi(i32::from(exp) - 15)
+    }
+
+    /// The upload form is eight bytes per texel (four f16 channels), in
+    /// blue-fastest order with alpha at 1.0, and the RGB halves read back as
+    /// the table within f16 precision.
+    #[test]
+    fn lut_rgba16f_table_is_eight_bytes_per_texel() {
+        let lut = parse_cube(&cube(3, warm)).expect("warm cube parses");
+        let bytes = lut.rgba16f_table();
+        assert_eq!(bytes.len(), 27 * 8, "four f16 channels for 27 texels");
+        let half = |at: usize| -> f32 {
+            let low = bytes[at];
+            let high = bytes[at + 1];
+            half_to_f32(u16::from(high) << 8 | u16::from(low))
+        };
+        for (texel, table) in lut.table().iter().enumerate() {
+            let base = texel * 8;
+            for channel in 0..3 {
+                let read = half(base + channel * 2);
+                assert!(
+                    (read - table[channel]).abs() <= 2e-3,
+                    "texel {texel} channel {channel}: f16 {read} vs table {}",
+                    table[channel]
+                );
+            }
+            assert_eq!(half(base + 6), 1.0, "alpha marks a filled texel");
+        }
+        let identity = parse_cube(IDENTITY_2).expect("identity parses");
+        assert_eq!(
+            identity.rgba16f_table().len(),
+            8 * 8,
+            "a 2x2x2 table uploads 8 texels of 8 bytes"
+        );
+    }
+
+    /// The trilinear reference agrees with `apply` at the grid corners and at
+    /// interior points: one shape, two entry points.
+    #[test]
+    fn lut_sample_texel_matches_apply() {
+        let lut = parse_cube(&cube(3, warm)).expect("warm cube parses");
+        let probes = [
+            ([0.0, 0.0, 0.0], (0.0, 0.0, 0.0)),
+            ([1.0, 1.0, 1.0], (2.0, 2.0, 2.0)),
+            ([1.0, 0.0, 0.5], (2.0, 0.0, 1.0)),
+            ([0.3, 0.6, 0.45], (0.6, 1.2, 0.9)),
+            ([0.8, 0.2, 0.9], (1.6, 0.4, 1.8)),
+            ([0.05, 0.95, 0.5], (0.1, 1.9, 1.0)),
+        ];
+        for (rgb, grid) in probes {
+            let by_color = lut.apply(rgb);
+            let by_texel = lut.sample_texel(grid.0, grid.1, grid.2);
+            assert!(
+                close(by_color, by_texel, 1e-3),
+                "apply {rgb:?} = {by_color:?} but sample_texel {grid:?} = {by_texel:?}"
+            );
+        }
+        // The edges clamp on both entries alike.
+        assert!(close(
+            lut.sample_texel(-5.0, 5.0, 9.0),
+            lut.apply([0.0, 1.0, 1.0]),
+            1e-3
+        ));
     }
 }

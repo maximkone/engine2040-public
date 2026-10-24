@@ -157,9 +157,8 @@ impl PlayAction {
     }
 }
 
-/// Match job request: start, poll or cancel plus the start composition.
-/// Units are ticks, meters of half-extent and poll counts. Errors are typed
-/// `bad_ticks`, `bad_extent` and job errors. Budget is 3600 ticks a match.
+/// Match job request: `action` start, poll or cancel, plus the start composition.
+/// Errors are typed `bad_ticks`, `bad_extent` and job errors.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -179,8 +178,6 @@ pub struct PlayRunArgs {
 }
 
 /// One match checkpoint: tick id plus the state hash there.
-/// Units are ticks in, hashes out. No errors: checkpoints replay the eager
-/// result. Budget rides on the 3600-tick match cap.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -189,9 +186,8 @@ pub struct CheckpointDto {
     pub hash: u64,
 }
 
-/// Match job answer: status, progress, logs and checkpoints plus the manifest.
-/// Units are ticks, meters of half-extent and log chars. No errors once
-/// started; terminal handles replay. Budget is 16 log lines of 200 chars.
+/// Match job answer: status, progress, logs, checkpoints and the play manifest.
+/// Terminal handles replay; logs are capped at 16 lines of 200 chars.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]

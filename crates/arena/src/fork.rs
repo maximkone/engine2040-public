@@ -706,7 +706,7 @@ impl ForkJob {
                 rules: super::ArenaRules::V1,
                 balance: Vec::new(),
                 stagger: Vec::new(),
-                knockback: Vec::new(),
+                knockback: [crate::Knockback::new(); MAX_SLOTS],
                 depth,
                 limbs: LimbPool::new(MAX_LIMBS).ok()?,
                 spear: None,

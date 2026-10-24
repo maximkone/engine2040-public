@@ -932,8 +932,9 @@ pub struct Sim {
     /// Per-slot knockback (FEEL2): the velocity a landed blow handed the
     /// body, in millimetres per tick. The collision pass moves the body by
     /// it and ground friction brings it to exact rest; a match that never
-    /// arms a weapon never fills it.
-    knockback: Vec<Knockback>,
+    /// arms a weapon never fills it. Inline fixed array, like `wishes` and
+    /// `buttons`: per-slot state the build reserves no heap for.
+    knockback: [Knockback; MAX_SLOTS],
     /// Combat-depth poise meters stepped beside the fight step: every hit
     /// moves poise through [`DepthSet::observe`] and trips one stagger
     /// through [`PoiseMeter::staggered`]. Presentation only, never hashed,
@@ -1137,7 +1138,7 @@ impl Sim {
                 .map(|_| BalanceState::new(BalanceParams::default()))
                 .collect(),
             stagger: (0..fighters).map(|_| StaggerMemory::new()).collect(),
-            knockback: (0..fighters).map(|_| Knockback::new()).collect(),
+            knockback: [Knockback::new(); MAX_SLOTS],
             depth,
             limbs: LimbPool::new(limb_cap).ok()?,
             spear: None,
@@ -2029,7 +2030,7 @@ impl Sim {
             rules: ArenaRules::V1,
             balance: Vec::new(),
             stagger: Vec::new(),
-            knockback: Vec::new(),
+            knockback: [Knockback::new(); MAX_SLOTS],
             depth,
             limbs: LimbPool::new(MAX_LIMBS).ok()?,
             spear: None,

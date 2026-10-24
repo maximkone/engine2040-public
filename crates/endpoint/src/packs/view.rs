@@ -423,7 +423,9 @@ impl CompareRegion {
 /// with no area or one outside the frame. `diff` is written under the project
 /// root, never read, and need not exist; a write failure is `write_failed`.
 /// Without `region` the whole frame scores, exactly as before the field
-/// existed.
+/// existed. `ignore` drops the listed rects from every metric, leaves the
+/// donor SSIMULACRA2 `None` (it scores whole pictures) and fills
+/// `score_x10000` with `1 - diff/total` over the kept pixels.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -458,6 +460,9 @@ pub struct ViewCompareOutput {
     pub hist_emd_x10000: u32,
     pub ssimulacra2_x10000: Option<u32>,
     pub diff_png: Option<String>,
+    /// `1 - diff/total` over the scored pixels, hundredths of a point: 10000
+    /// when the pair differs only where `ignore` says to look away. `None`
+    /// when the request named no `ignore`, exactly as before the field existed.
     pub score_x10000: Option<u32>,
     pub region: String,
     pub rect: Option<[u32; 4]>,
@@ -644,7 +649,16 @@ fn run_view_compare(
     let (region, scoring) = resolve_region(args.region, &left)?;
     let mut out = compare_frames_in(&left, &right, region, scoring)?;
     if let Some(ignore) = &args.ignore {
-        out.score_x10000 = Some(art::compare_ignoring(&left, &right, args.region, ignore)?);
+        // The ignored pixels leave every metric, not only the diff score; the
+        // SSIMULACRA2 donor scores whole pictures, so it stays None here.
+        let (compared, score) = art::compare_with_ignore(&left, &right, args.region, ignore)?;
+        out.ssim_x10000 = compared.ssim_x10000;
+        out.flip_x10000 = compared.flip_x10000;
+        out.mean_de_x100 = compared.mean_de_x100;
+        out.hist_tv_x10000 = compared.hist_tv_x10000;
+        out.hist_emd_x10000 = compared.hist_emd_x10000;
+        out.ssimulacra2_x10000 = None;
+        out.score_x10000 = Some(score);
     }
     if let Some(diff) = &args.diff {
         write_diff_png(root, diff, &left, &right)?;
@@ -2411,6 +2425,10 @@ mod tests {
         assert!(described.docs.contains("audit"));
 
         let server = server();
+        // The full default surface plus view is over the hard tool budget, so
+        // the documented flow unloads the default packs first; the view pack
+        // then fits the door's budget whole.
+        crate::packs::hide_default_packs(&server);
         ApiLoadTool::invoke(
             &server,
             ApiLoadArgs {

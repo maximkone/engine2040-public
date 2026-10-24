@@ -567,21 +567,27 @@ fn score_x10000(left: &Frame, right: &Frame, mask: &[bool]) -> u32 {
     u32::try_from((total - diff.min(total)) * 10_000 / total).unwrap_or(0)
 }
 
-/// Score one pair of same-size frames, ignoring the given rectangles and
-/// scoring inside `region` when one is named.
-pub(super) fn compare_ignoring(
+/// Score one pair of same-size frames over the pixels the region keeps and
+/// the ignore list leaves: the masked metric block and `1 - diff/total`.
+pub(super) fn compare_with_ignore(
     left: &Frame,
     right: &Frame,
     region: Option<CompareRegion>,
     ignore: &[CompareRegion],
-) -> Result<u32, McpToolError> {
+) -> Result<(metric::Comparison, u32), McpToolError> {
     let mask = ignore_mask(
         left.width(),
         left.height(),
         region.and_then(CompareRegion::rect),
         ignore,
     )?;
-    Ok(score_x10000(left, right, &mask))
+    let compared = metric::compare(left, right, Region::Mask(&mask)).map_err(|error| {
+        McpToolError::new(
+            "bad_image",
+            format!("ignored-region compare refused the pair: {error}"),
+        )
+    })?;
+    Ok((compared, score_x10000(left, right, &mask)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,6 +1049,8 @@ mod tests {
         };
         let out = super::super::run_view_compare(&dir, &with_ignore).expect("compare");
         assert_eq!(out.score_x10000, Some(10_000), "{out:?}");
+        assert_eq!(out.ssim_x10000, metric::SSIM_ONE);
+        assert_eq!(out.ssimulacra2_x10000, None);
         let plain = ViewCompareArgs {
             ignore: None,
             ..with_ignore
@@ -1070,19 +1078,31 @@ mod tests {
             h: 16,
         }];
         assert_eq!(
-            compare_ignoring(&same, &changed, None, &ignore).expect("scored"),
+            compare_with_ignore(&same, &changed, None, &ignore)
+                .map(|(_, score)| score)
+                .expect("scored"),
             10_000
         );
-        assert!(compare_ignoring(&same, &changed, None, &[]).expect("all") < 10_000);
+        // The scored metrics ignore the rect: SSIM reads identical and deltaE
+        // zero. FLIP pools over neighbourhoods, so it is not asserted here.
+        let (compared, _) = compare_with_ignore(&same, &changed, None, &ignore).expect("masked");
+        assert_eq!(compared.ssim_x10000, metric::SSIM_ONE);
+        assert_eq!(compared.mean_de_x100, 0);
+        assert!(
+            compare_with_ignore(&same, &changed, None, &[])
+                .map(|(_, score)| score)
+                .expect("all")
+                < 10_000
+        );
         // A full-frame ignore, or one outside the picture, refuses.
         assert_eq!(
-            compare_ignoring(&same, &changed, None, &[CompareRegion::Full])
+            compare_with_ignore(&same, &changed, None, &[CompareRegion::Full])
                 .expect_err("full ignore")
                 .code,
             "bad_args"
         );
         assert_eq!(
-            compare_ignoring(
+            compare_with_ignore(
                 &same,
                 &changed,
                 None,
@@ -1105,7 +1125,9 @@ mod tests {
             h: 8,
         });
         assert_eq!(
-            compare_ignoring(&same, &changed, region, &ignore).expect("region"),
+            compare_with_ignore(&same, &changed, region, &ignore)
+                .map(|(_, score)| score)
+                .expect("region"),
             10_000
         );
     }

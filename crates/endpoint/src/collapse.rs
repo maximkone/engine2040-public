@@ -478,6 +478,10 @@ mod tests {
     #[test]
     fn a_loaded_pack_grows_the_list_and_unload_restores_it() {
         let probe = server();
+        // The full default surface plus gym is over the hard tool budget, so
+        // the documented flow unloads the default packs first; the pack then
+        // fits the ledger's ceiling whole.
+        crate::packs::hide_default_packs(&probe);
         let before = probe.tools();
         load(&probe, "gym");
         let after = probe.tools();

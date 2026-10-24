@@ -999,6 +999,20 @@ fn api_load(service: &McpServer, param: &ApiLoadArgs) -> Result<ApiLoadOutput, M
     })
 }
 
+/// Test helper: hide the default-loaded packs, so a wide pack (gym, view) can
+/// join the session under the hard tool budget. The full default surface plus
+/// one of those packs is over [`TOOL_LIST_BUDGET_CHARS`], so the documented
+/// flow unloads first: `api.load` says so in its refusal. Returns the names it
+/// hid. A fresh test server re-loads the defaults on its own, so callers need
+/// no restore.
+#[cfg(test)]
+pub(crate) fn hide_default_packs(server: &crate::mcp::McpServer) {
+    let mut state = server.lock().expect("test lock holds");
+    for pack in PackRegistry::shipped().default_loaded() {
+        state.load_pack(pack, true).expect("a default pack unloads");
+    }
+}
+
 crate::e2_tool!(
     /// `api.load` tool: advertise or hide one verb pack for this session.
     ApiLoadTool,
@@ -1476,6 +1490,10 @@ mod tests {
             !before.contains(&"log.digest".to_owned()),
             "view pack waits for api.load"
         );
+        // The full default surface plus view is over the hard tool budget, so
+        // the documented flow unloads the default packs first.
+        crate::packs::hide_default_packs(&server);
+        let core_before = listed(&server);
         let loaded = ApiLoadTool::invoke(
             &server,
             ApiLoadArgs {
@@ -1490,7 +1508,7 @@ mod tests {
         assert!(loaded.list_chars > 0 && loaded.list_chars <= loaded.budget_chars);
         let after = listed(&server);
         assert!(after.contains(&"log.digest".to_owned()));
-        assert!(after.len() > before.len());
+        assert!(after.len() > core_before.len());
         // The verb is advertised when it fits the ledger's max and hidden
         // otherwise; a hidden verb keeps its definition and stays callable by
         // exact name.
@@ -1504,6 +1522,17 @@ mod tests {
         )
         .expect("view unloads");
         assert!(!unloaded.loaded);
+        assert_eq!(listed(&server), core_before);
+        // The default pack reloads on the same flow, and the list comes back
+        // exactly as it was.
+        ApiLoadTool::invoke(
+            &server,
+            ApiLoadArgs {
+                pack: "scene".to_owned(),
+                unload: None,
+            },
+        )
+        .expect("scene reloads");
         assert_eq!(listed(&server), before);
         // Unknown packs refuse with the legal names.
         let refused = ApiLoadTool::invoke(

@@ -6,6 +6,10 @@ Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 <!-- 2026-10-21: the `node tools/land.mjs <packet> --dry` half of this template was removed with the loop tools on 2026-10-17 (commit 6bdf32bf; `tools/land.mjs` does not exist). Land by path and paste the proof output. -->
 > Golden `d57b5c8ae3096614` holds for every landing below unless the block names a move; new blocks paste the land+proof output, not hand-typed hashes.
 
+### 2026-10-24, book gaps 4: the run clip's plants reach the sand cue
+
+- f76491d02 BG5: `FighterLook` fills a std `ClipEventLane` each tick from every running slot's clip phase; `engine-anim`'s authored plant track (`EventBank`/`Router`/`CallbackLog`) fires the footstep, and the audio feed plays one sand cue on the exact tick and stands that slot's stride cue down (the stride stays the fallback for a clip with no event). Proof: `cargo test -p engine-game --features app --lib clip_events` 7 passed (run 40041551294), `cargo test -p engine-game --features app --lib bg5_` 1 passed (run 40042435035), `cargo test -p engine-game --features app --lib window_audio_space` 14 passed (`[local]`, gh-check routes that filter to the PC); rust-quality PASS with three file pins accepted (fighter_look, lib, windowed), casts unchanged at 129; presentation only, so the golden `d57b5c8ae3096614` cannot move.
+
 ### 2026-10-23, book gaps 4: door children, rules undo, clip verbs, inline jobs, bare arena
 
 - dfab6a88c BG2: `read_resource_text` splits a child id off the four template roots and reads the same backing source the root prints; unknown children still refuse `unknown_uri`. Proof: `cargo test -p engine-endpoint --features mcp --lib resource_template_reads_one_child` PASS (run 40003227287), `tool_count_pin` unchanged.

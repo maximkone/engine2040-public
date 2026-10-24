@@ -106,8 +106,7 @@ mod u64_text {
 // asserts the generated schemas still match the command shapes.
 // ---------------------------------------------------------------------------
 
-/// Pose in meters (position), quaternion (rotation) and scale, mirroring
-/// [`Transform`](engine_scene::transform::Transform).
+/// Pose in meters, quaternion and scale, mirroring `Transform`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -120,63 +119,61 @@ pub struct PoseDto {
     pub scale: [f32; 3],
 }
 
-/// One schema-typed edit, mirroring [`Op`](engine_editor::commands::Op): `id`
-/// is UUID text, `parent` is UUID text with the nil id meaning "no parent"
-/// (a root).
+/// One schema-typed edit, mirroring [`Op`](engine_editor::commands::Op).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde", tag = "op", rename_all = "snake_case")]
 #[schemars(crate = "rmcp::schemars")]
 pub enum OpDto {
-    /// Add a fresh node under `parent` (nil for a root).
+    /// Add a node under `parent` (nil = root).
     Insert {
-        /// Fresh id; must not be nil and must not exist yet.
+        /// Fresh id; not nil, not present.
         id: String,
-        /// Parent node, or the nil id for a root.
+        /// Parent or nil id.
         parent: String,
-        /// Pose in meters relative to the parent.
+        /// Pose in the parent frame.
         local: PoseDto,
     },
-    /// Delete a node; children relink to its parent.
+    /// Delete a node; children relink up.
     Remove {
         /// Node to delete.
         id: String,
     },
     /// Replace a node's local pose.
     SetLocal {
-        /// Node to move in its parent frame.
+        /// Node to move.
         id: String,
-        /// New pose relative to the parent.
+        /// New pose, parent frame.
         local: PoseDto,
     },
-    /// Move a node, keeping its world pose (nil detaches to a root).
+    /// Move a node, keeping its world pose (nil detaches).
     Reparent {
         /// Node to move.
         id: String,
-        /// New parent, or the nil id for a root.
+        /// New parent or nil id.
         new_parent: String,
     },
-    /// Bind a material to a node (`None` clears).
+    /// Bind a material (`None` clears).
     SetMaterial {
         /// Node to bind.
         id: String,
         /// Material name, `None` clears.
         material: Option<String>,
     },
-    /// Set one typed component on a node (adds it or replaces that kind).
+    /// Set one typed component (adds or replaces that kind).
     SetComponent {
-        /// Node carrying the component.
+        /// Node.
         id: String,
-        /// Kind: mesh, collider, material, light, spawner, destructible, anatomy, rig.
+        /// mesh, collider, material, light, spawner, destructible, anatomy, rig.
         component: String,
-        /// Fields of that kind's schema (`api.describe component:<kind>`).
+        /// Fields of that kind (`api.describe component:<kind>`).
         value: Value,
-        /// Schema version of `value`; omitted means the current one.
+        /// Schema version; omitted means current.
         #[serde(default)]
         version: Option<u32>,
     },
-    /// Remove one component kind from a node.
+    /// Remove one component kind.
     RemoveComponent {
-        /// Node carrying the component.
+        /// Node.
         id: String,
         /// Kind to remove.
         component: String,
@@ -344,22 +341,20 @@ pub struct TxApplyOutput {
     pub key: u64,
     /// Journal position hint (entries shift on eviction/undo/redo).
     pub journal_index: u64,
-    /// Document content digest before the write: 64 lowercase hex chars.
+    /// Content digest before the write: 64 lowercase hex chars.
     #[serde(default)]
     pub before_digest: String,
-    /// Content digest of the applied state as staged, before it landed.
+    /// Content digest of the staged state.
     #[serde(default)]
     pub staged_digest: String,
-    /// Content digest read back after landing. Equal to `staged_digest` unless
-    /// the store carried different bytes; the durable path refuses that with
-    /// `landed_mismatch` instead of returning a receipt.
+    /// Content digest read back after landing; a mismatch refuses `landed_mismatch`.
     #[serde(default)]
     pub after_digest: String,
     /// Stable undo identity: pass back to `tx.undo`.
     #[serde(with = "u64_text")]
     #[schemars(with = "String")]
     pub undo_token: u64,
-    /// Bounded "what changed" summary: revisions, counts and clipped rows.
+    /// Bounded "what changed" summary.
     #[serde(default)]
     pub changes: ChangeListDto,
     /// Stored writer: `model:<provider>/<model>`, `script:<name>` or `human`.
@@ -369,52 +364,47 @@ pub struct TxApplyOutput {
     pub spatial_delta: Option<SpatialDeltaDto>,
 }
 
-/// Bounded "what changed" summary for one landed write, on the receipt.
-///
-/// Consumer: an agent reads which objects the call added, removed or moved
-/// instead of re-reading the scene. The counts are the full totals; `rows`
-/// keeps at most `MAX_CHANGES` of them and `truncated` says when it clipped,
-/// so a count never lies.
+/// Bounded "what changed" summary for one landed write; counts are full totals.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ChangeListDto {
-    /// Document revision before the change.
+    /// Revision before.
     pub revision_before: u64,
-    /// Document revision after the change.
+    /// Revision after.
     pub revision_after: u64,
-    /// Objects present after only.
+    /// Objects only after.
     pub added: u32,
-    /// Objects present before only.
+    /// Objects only before.
     pub removed: u32,
-    /// Objects on both sides whose world pose moved.
+    /// Objects on both whose world pose moved.
     pub moved: u32,
     /// One row per change, clipped to the cap.
     pub rows: Vec<String>,
-    /// True when `rows` dropped entries; counts stay the full totals.
+    /// `rows` dropped entries; counts stay full.
     pub truncated: bool,
-    /// Document content digest on the before side: 64 lowercase hex chars.
+    /// Content digest before: 64 lowercase hex.
     #[serde(default)]
     pub digest_before: String,
-    /// Document content digest on the after side.
+    /// Content digest after.
     #[serde(default)]
     pub digest_after: String,
-    /// Touched object ids in id-text order, clipped to the cap.
+    /// Touched ids, clipped.
     #[serde(default)]
     pub ids: Vec<String>,
-    /// Full count of `ids` before the cap.
+    /// Full `ids` count before the cap.
     #[serde(default)]
     pub ids_total: u32,
-    /// Relation edges gained, a row per edge: `+ relation <a> <rel> <b>`.
+    /// Edges gained: `+ relation <a> <rel> <b>`.
     #[serde(default)]
     pub edges_added: Vec<String>,
-    /// Full count of relation edges gained.
+    /// Full count of edges gained.
     #[serde(default)]
     pub edges_added_total: u32,
-    /// Relation edges lost, a row per edge: `- relation <a> <rel> <b>`.
+    /// Edges lost: `- relation <a> <rel> <b>`.
     #[serde(default)]
     pub edges_removed: Vec<String>,
-    /// Full count of relation edges lost.
+    /// Full count of edges lost.
     #[serde(default)]
     pub edges_removed_total: u32,
 }

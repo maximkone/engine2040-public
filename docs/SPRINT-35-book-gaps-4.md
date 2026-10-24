@@ -51,7 +51,8 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   digest as the library call on the fixture, refuses without the write flag and
   is undoable through the existing clip store. F2P: the verb does not exist.
   P2P: the four `anim.graph.*` verbs and the golden unchanged. needs: none.
-- [ ] BG5 game: animation events reach no consumer — `anim/src/events.rs:3-4`
+- [x] BG5 game: animation events reach no consumer — Landed f76491d02.
+  `anim/src/events.rs:3-4`
   promises audio and combat; `rg "engine_anim::events" crates --glob '!crates/anim/**'`
   is 0; the live footstep is derived from stride
   (`window_audio_space.rs:395`). Deliver the clip's footstep event to the sand

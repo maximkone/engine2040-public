@@ -25,14 +25,17 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   F2P: `build` refuses an unlocked dependency (new test). P2P: existing project
   tests stay green. Accept: one lock file, one refusal. (Licence and supply-chain
   call belongs to the owner.)
-- [ ] WG4 endpoint: `prefab.save` and `prefab.place` - `crates/scene/src/prefab.rs`
-  is finished (`OverrideMap:413`) and `git grep -i prefab -- crates/endpoint` is 0.
+- [x] WG4 endpoint: `prefab.save` and `prefab.place` - `crates/scene/src/prefab.rs`
+  is finished (`OverrideMap:413`) and `git grep -i prefab -- crates/endpoint` was 0.
   Tier A. Size S. Owns `crates/endpoint/src/packs/scene/`, `crates/editor/src/prefab.rs`.
   F2P: the two verbs are absent from `tools/list` and the new pack test fails.
   P2P: `cargo test -p engine-endpoint --features mcp --lib` stays green.
   Accept: save a subtree, place it twice, undo both, same digest.
-  Blocked 2026-10-24: 34 files under `crates/endpoint/src/` are held dirty by
-  another seat; take it when they land.
+  Landed `894f1ea0c` (runs 40039035075, 40040955789): one batch through `commands::apply`,
+  so `tx.undo` takes a placement back; the digest uses the revision-free
+  `commands::document_digest`. The listing grew past its pin, so `6742abd90` trimmed
+  5,232 chars of DTO docs (66,725 -> 61,493 against the 62,400 pin) with no name, type
+  or refusal changed.
 - [ ] WG5 world/render: 3D terrain and foliage - `crates/assets/src/collider_cook.rs:17`
   says heightfields are not cooked; no terrain hits in render, nav, assets, spatial.
   Tier B. Size L. Owns `crates/world/src/`, `crates/assets/src/`, `crates/render/src/`.

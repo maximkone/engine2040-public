@@ -1207,53 +1207,51 @@ pub struct SceneQueryArgs {
     /// Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m; measure anchor, other; room_of anchor; in_room room; exits_of anchor|room; glance eye_m; coverage anchor, eye_m; view eye_m; lidar eye_m; map eye_m; pixel eye_m; diff revision_a, revision_b. a|b means either.
     #[schemars(schema_with = "cards::kind_schema")]
     pub kind: String,
-    /// Object label from scene.brief (`lamp_2 [uuid]`) or bare UUID: the subject.
+    /// Object label from scene.brief (`lamp_2 [uuid]`) or bare UUID.
     pub anchor: Option<String>,
-    /// Second object label: far end for between, viewer for relation.
+    /// Second object: far end (between) or viewer (relation, sees).
     pub other: Option<String>,
-    /// Radius in cm, 1..=10000: search radius (default 500), slide range (500), clearance width needed (60), measure gap needed.
+    /// Radius in cm, 1..=10000: search (500), slide range (500), clearance width (60), measure gap.
     pub radius_cm: Option<i32>,
-    /// Point [x, y, z] in meters: the eye for visible and cone, the threat for cover_near.
+    /// Eye or threat point [x, y, z] in meters.
     pub eye_m: Option<[f32; 3]>,
-    /// Facing in radians, 0 = +X (visible, cone from eye_m); default 0.
+    /// Facing in radians, 0 = +X; default 0.
     pub yaw: Option<f32>,
-    /// True to test crouched cover (cover_near).
+    /// True to test crouched cover.
     pub crouch: Option<bool>,
-    /// Clearance radius in cm, 0..=10000, default 30 (largest_open, free_space).
+    /// Clearance radius in cm, 0..=10000, default 30.
     pub capsule_radius_cm: Option<i32>,
-    /// Smallest gap between samples in cm, default 100 (free_space).
+    /// Smallest gap between samples in cm, default 100.
     pub min_gap_cm: Option<i32>,
-    /// Spots to sample, default 8 (free_space).
+    /// Spots to sample, default 8.
     pub max_samples: Option<u32>,
-    /// Sampler seed, default 7 (free_space).
+    /// Sampler seed, default 7.
     pub seed: Option<u64>,
     /// Most hits, 1..=64, default 64.
     pub limit: Option<u32>,
     /// Answer budget in bytes, 1..=16384, default 4096.
     pub budget_bytes: Option<u32>,
-    /// Cone half-width in whole degrees, 1..=180 (cone); half the field of view (glance, coverage).
+    /// Half width in whole degrees, 1..=180 (cone, glance, coverage).
     pub half_angle_deg: Option<i32>,
-    /// Keep cone rows whose label contains this text.
+    /// Keep rows whose label contains this text.
     pub filter: Option<String>,
     /// Relation word: above, below, in_front_of, behind, left_of, right_of, against, around, aligned, near, far, visible_from, reachable_from.
     pub relation: Option<String>,
-    /// Answer shape: rows (default, one row per hit), ids (labels of matched hits only), count (matched count only).
+    /// Answer shape: `rows` (default), `ids` (labels of matched hits), `count`.
     pub format: Option<String>,
-    /// Drop unmatched rows. Default true for visible (pass false for blocked rows), false otherwise.
+    /// Drop unmatched rows. Default true for visible, false otherwise.
     pub matched_only: Option<bool>,
-    /// Slide direction: +x, -x, +z, -z, up, down, +x+z, +x-z, -x+z, -x-z (slide).
+    /// Slide direction: +x, -x, +z, -z, up, down, or a two-axis pair (slide).
     pub dir: Option<String>,
-    /// gap (default), overlap, align or contain (measure).
+    /// `gap` (default), `overlap`, `align` or `contain` (measure).
     pub what: Option<String>,
     /// Room number from room_of (in_room, exits_of).
     pub room: Option<u32>,
-    /// Camera pitch in radians, up is positive (coverage).
+    /// Camera pitch in radians, up positive (coverage).
     pub pitch: Option<f32>,
-    /// View or pixel box `[w, h, x, y]` in cells, edges 1..=128 (view, pixel;
-    /// default [24,16,0,0], x and y inside the view). The map uses the eye as
-    /// its center and `radius_cm` as its reach.
+    /// View or pixel box `[w, h, x, y]` in cells, edges 1..=128 (default [24,16,0,0]).
     pub cells: Option<[i32; 4]>,
-    /// Before revision of a diff (diff); must be held by the journal.
+    /// Before revision of a diff; must be held by the journal.
     pub revision_a: Option<u64>,
     /// After revision of a diff; may be lower than revision_a.
     pub revision_b: Option<u64>,

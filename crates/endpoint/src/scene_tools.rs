@@ -336,168 +336,138 @@ fn pin_refusal(error: PinError) -> McpToolError {
     McpToolError::new(code, error.to_string())
 }
 
-/// Arguments for `scene.brief`: optional brief-text budget in bytes.
-/// `None` selects [`SCENE_BRIEF_DEFAULT_BUDGET`]; `0` or above
-/// [`SCENE_BRIEF_MAX_BUDGET`] fails with `bad_budget`. Read-only.
+/// Arguments for `scene.brief`: text budget, page cursor, spatial summary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneBriefArgs {
-    /// Brief-text budget in bytes (1..=[`SCENE_BRIEF_MAX_BUDGET`]).
+    /// Text budget in bytes (1..=SCENE_BRIEF_MAX_BUDGET).
     pub budget_bytes: Option<u32>,
-    /// First object index of the `ids`/`objects`/`poses` page (default 0);
-    /// pass the previous reply's `next_cursor` to read on.
+    /// First index of this page; `next_cursor` reads on.
     pub cursor: Option<u32>,
-    /// True adds `spatial`: the verdict, finding count and hash of a
-    /// default `scene.spatial` call, plus the findings the text left out.
+    /// True adds a `scene.spatial` summary.
     pub include_spatial: Option<bool>,
 }
 
-/// Output of `scene.brief`: document revision, spatial digest, bounded text rows,
-/// and one page of the index-to-UUID table, the index-aligned `name [id]`
-/// labels and the pose rows. The page holds about a quarter of the text
-/// budget in bytes; `next_cursor` continues it. Read-only: nothing is staged,
-/// applied or locked.
+/// Output of `scene.brief`: bounded text rows plus one page of ids, labels and poses.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneBriefOutput {
-    /// Document revision the brief was read at.
+    /// Revision read.
     pub revision: u64,
-    /// Spatial graph digest over the snapshot (budget-independent). It counts
-    /// nodes and edges, so any insert moves it; a per-object `#digest` in the
-    /// place rows (and `poses`) is the stable one.
+    /// Graph digest: counts nodes and edges.
     pub digest: u64,
-    /// Brief text rows within the budget, always starting with the digest line:
-    /// extent and problem rows, folded look-alike rows, then one place row per
-    /// object (`lamp_2 [index] x y z sx sy sz dir #digest`, whole cm) while it
-    /// fits, then groups, relations and findings.
+    /// Text rows: place rows are `lamp_2 [i] x y z sx sy sz dir #digest`, cm.
     pub text: String,
-    /// True when groups, relations or findings were cut to fit the budget.
+    /// Text was cut to fit the budget.
     pub truncated: bool,
-    /// Index-to-UUID table page: bare UUID text per staged object, id-text sorted.
+    /// UUID page, id-text sorted.
     pub ids: Vec<String>,
-    /// MCP8 `name [id]` labels (`lamp_2 [<uuid>]`), index-aligned with
-    /// `ids`: the bracketed id resolves, the name never does.
+    /// `name [id]` labels, aligned with `ids`.
     pub objects: Vec<String>,
-    /// One pose row per object, aligned with `ids`:
-    /// `name [index] x y z sx sy sz dir #digest`, whole cm, a compass facing
-    /// and the object's own place digest (stable when another object moves).
+    /// One pose row per object, aligned with `ids`.
     pub poses: Vec<String>,
-    /// First object index of the next page; absent on the last page.
+    /// First index of the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<u32>,
     /// Spatial summary, when `include_spatial` was true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial: Option<BriefSpatial>,
-    /// How many times in a row this exact call was made (2..=4); absent on a first call.
+    /// Identical calls in a row (2..=4).
     #[serde(default, skip_serializing_if = "no_repeat")]
     pub repeat_count: u32,
-    /// Session-local latest watch digest, when a `scene.watch` is live.
+    /// Latest `scene.watch` digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_digest: Option<u64>,
-    /// Server-owned live subscription id, when a `scene.watch` is live.
+    /// Live watch subscription id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_subscription: Option<u64>,
 }
 
-/// Arguments for `scene.spatial`: optional check filter plus a findings page limit.
-/// `None` checks run every offline check with [`SCENE_SPATIAL_DEFAULT_LIMIT`]
-/// rows. Unknown names fail with `bad_check`, nav-only names with
-/// `needs_nav_view`, over-long lists with `too_many_checks`, and a `0` or
-/// over-[`SCENE_SPATIAL_MAX_FINDINGS`] limit with `bad_limit`. Read-only.
+/// Arguments for `scene.spatial`: check filter, page limit, allow rows.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneSpatialArgs {
-    /// Checks to run, at most [`SCENE_SPATIAL_MAX_CHECKS`] (`None` = every
-    /// offline check); opt-in names run only when listed here.
+    /// Checks to run (`None` = every offline check).
     pub checks: Option<Vec<String>>,
-    /// Findings rows per page, 1..=[`SCENE_SPATIAL_MAX_FINDINGS`].
+    /// Findings rows per page, 1..=SCENE_SPATIAL_MAX_FINDINGS.
     pub limit: Option<u32>,
-    /// First object index of the `ids`/`objects` page (default 0).
+    /// First index of the ids page (default 0).
     pub cursor: Option<u32>,
-    /// Answer shape: rows (default), ids (only the objects that carry a
-    /// finding, no finding rows), count (verdict and counts only).
+    /// Answer shape: `rows` (default), `ids` or `count`.
     pub format: Option<String>,
-    /// True keeps only red findings (rows, total and ids).
+    /// True keeps only red findings.
     pub matched_only: Option<bool>,
     /// Z-fight tolerance in cm, 0..=50, default 1 (zfight).
     pub epsilon_cm: Option<i32>,
-    /// True judges overlaps by component role (collider on its mesh is intentional).
+    /// True judges overlaps by component role.
     pub triage: Option<bool>,
-    /// Verdict rows, max 256: `check a b|- verdict rev expiry reason` (uuids, 0 = none). Matched findings move to `suppressed`.
+    /// Verdict rows, max 256: `check a b|- verdict rev expiry reason`; matched findings move to `suppressed`.
     pub allow: Option<Vec<String>>,
 }
 
-/// Output of `scene.spatial`: verdict, spatial hash, paged brief-style finding
-/// lines, the id table plus `name [id]` labels, the checks that ran and the
-/// catalog checks the door could not drive, and each node's size source
-/// ([`Self::checks_run`], [`Self::skipped`], [`Self::size_source`]). Read-only.
+/// Output of `scene.spatial`: verdict, hash, paged findings and each node's size source.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneSpatialOutput {
-    /// Document revision read.
+    /// Revision read.
     pub revision: u64,
     /// `clean`, `warn` or `red`.
     pub verdict: String,
-    /// Hash of the full finding set, page-independent.
+    /// Hash of all findings, page-independent.
     pub hash: u64,
-    /// Finding count across all pages.
+    /// Findings across all pages.
     pub total: u64,
-    /// Findings were cut to the page limit.
+    /// Findings cut to the page limit.
     pub truncated: bool,
-    /// Finding lines, `finding <check> <a> <b|-> <severity> <pct>`.
+    /// Lines: `finding <check> <a> <b|-> <severity> <pct>`.
     pub findings: Vec<String>,
-    /// One page of bare UUID text per staged object, id-text sorted.
+    /// UUID page, id-text sorted.
     pub ids: Vec<String>,
-    /// `name [id]` labels, index-aligned with `ids`.
+    /// `name [id]` labels, aligned with `ids`.
     pub objects: Vec<String>,
-    /// First object index of the next `ids`/`objects` page; absent on the last.
+    /// First index of the next ids page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<u32>,
-    /// How many times in a row this exact call was made (2..=4); absent on a first call.
+    /// Identical calls in a row (2..=4).
     #[serde(default, skip_serializing_if = "no_repeat")]
     pub repeat_count: u32,
-    /// Finding counts: total, returned in this reply, suppressed.
+    /// Total, returned here, suppressed.
     pub counts: SpatialCounts,
-    /// The ten actors with the most findings, across all pages.
+    /// Ten actors with the most findings.
     pub worst_actors: Vec<WorstActor>,
     /// Checks that ran, catalog order.
     pub checks_run: Vec<String>,
-    /// Catalog checks that did not run, each with one reason.
+    /// Checks not run, with one reason each.
     pub skipped: Vec<SkippedCheck>,
-    /// Where each staged node's size came from.
+    /// Where each node's size came from.
     pub size_source: SizeSource,
-    /// One line per node on this page whose box is the fallback, not a
-    /// collider measurement: `label x.xx x.xx x.xx m: default size ...`.
-    /// Empty when every box on the page was measured.
+    /// Page nodes sized by fallback, not a collider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_sized: Vec<String>,
-    /// Findings set aside by an allow row or the learner, with the reason.
+    /// Findings set aside, with the reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suppressed: Vec<String>,
-    /// Light reach (SP66): nodes at least one light covers, counted, and the
-    /// indexes of the nodes no light reaches — `dark` and `unknown` apart.
-    /// Absent when the document carries no light.
+    /// Light reach; absent without a light.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light: Option<LightReachOut>,
 }
 
-/// `scene.spatial` light reach (SP66); indexes are into [`SceneSpatialOutput::ids`]
-/// (id-text order), ascending.
+/// `scene.spatial` light reach; indexes are into `ids`, ascending.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct LightReachOut {
-    /// Nodes at least one light covers.
+    /// Nodes a light covers.
     pub lit: u32,
-    /// Nodes judged (a node with no readable pose is not judged).
+    /// Nodes judged.
     pub judged: u32,
-    /// Indexes no light reaches: dark.
+    /// Indexes no light reaches.
     pub dark: Vec<u32>,
-    /// Indexes no light reaches while a range was unreadable.
+    /// Indexes unreadable, so unreached is unknown.
     pub unknown: Vec<u32>,
 }
 
@@ -560,14 +530,10 @@ fn selected_checks(args: &SceneSpatialArgs) -> Result<Option<Vec<&str>>, McpTool
     })
 }
 
-/// Arguments for `scene.place`: the revision the intent was built against, an
-/// idempotency key, the object to move (bare UUID or `name [id]` label), and
-/// up to [`MAX_PLACE_WANTS`] want lines in the
-/// `<relation> <target> [<lo>,<hi>]?` grammar. Malformed wants fail with
-/// `bad_want`/`bad_relation`/`bad_wall`/`bad_id`, stale revisions with
-/// `stale_revision`, injected lines with `injection_refused`, parented nodes
-/// with `not_a_root`, and a busy scene guard with `apply_in_flight`.
-/// Unsolvable intents answer the conflict shape, never an error.
+/// Arguments for `scene.place`: base revision, idempotency key, object and want lines.
+/// Wants use `<relation> <target> [<lo>,<hi>]?`; a bad want, stale revision or
+/// injected line refuses with its code, and an unsolvable intent returns the
+/// conflict shape rather than an error.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -576,9 +542,9 @@ pub struct ScenePlaceArgs {
     pub expected_revision: u64,
     /// Idempotency key for the gated apply; doubles as the undo token.
     pub idempotency_key: u64,
-    /// Object to move: bare UUID text or a `name [id]` label (id decides).
+    /// Object to move: bare UUID text or a `name [id]` label (the id decides).
     pub object: String,
-    /// Want lines, at most [`MAX_PLACE_WANTS`], each at most [`MAX_WANT_CHARS`] chars.
+    /// Want lines, at most MAX_PLACE_WANTS, each at most MAX_WANT_CHARS chars.
     pub wants: Vec<String>,
     /// `false` skips the spatial delta (default true).
     #[serde(default)]
@@ -586,7 +552,7 @@ pub struct ScenePlaceArgs {
 }
 
 /// One solved placement: the staged node id plus its grounded world pose in
-/// meters and Y yaw in radians (pure-Y rotation round-trip).
+/// meters and Y yaw in radians.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -636,66 +602,50 @@ impl PlacedDto {
     }
 }
 
-/// One solver-computed repair for a `scene.place` conflict: relax the
-/// dropped want and take this placement instead. Meters in `placement`,
-/// integer cm in `move_cm`; mapped from `ConflictSet.hints`, so the same
-/// conflict always maps the same DTOs in solver order.
-/// `dropped` indexes the failed intent's `wants`, `placement` is the
-/// quantized solver output satisfying every other want, and `note` is a
-/// short stable code like `drop NextTo wall North`. The caller applies a
-/// hint by re-placing without the dropped want; the hinted placement then
-/// verifies clean.
+/// One solver repair for a `scene.place` conflict: drop that want, take this placement.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct RepairHintDto {
-    /// Index into the failed intent's `wants` that was relaxed.
+    /// Index into the failed intent's `wants`.
     pub dropped: usize,
-    /// The relaxed want's source text, copied so callers need no lookup.
+    /// That want's source text.
     pub dropped_want: String,
-    /// Solver placement satisfying every other want, self-verified clean.
+    /// Placement satisfying every other want, verified clean.
     pub placement: PlacedDto,
     /// Integer-cm XZ move to `placement`; `(0, 0)` when unknown.
     pub move_cm: [i32; 2],
-    /// Short stable repair code for briefs and logs, never a newline.
+    /// Short stable repair code, never a newline.
     pub note: String,
 }
 
-/// Output of `scene.place`: either a solved gated apply or the conflict shape.
-/// Solved answers carry the new revision, the placement, the preview effects
-/// and the undo key; conflict answers carry `solved: false` plus the culprit
-/// want texts, one recovery reason, the solver-computed repair hints and one
-/// dry-run summary per hint, writing nothing.
+/// Output of `scene.place`: the solved gated apply or the conflict shape.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ScenePlaceOutput {
-    /// Document revision after the call (unchanged on conflicts and refusals).
+    /// Revision after the call.
     pub revision: u64,
-    /// True when the intent solved and the gated apply landed.
+    /// True when the intent solved and landed.
     pub solved: bool,
     /// Solved placement; `None` on conflicts.
     pub placement: Option<PlacedDto>,
-    /// Staged preview effects (one per applied op); empty on conflicts.
+    /// Preview effects, one per applied op.
     pub effects: Vec<String>,
-    /// Undo token for the applied batch; `0` on conflicts.
+    /// Undo token; `0` on conflicts.
     pub key: u64,
-    /// Culprit want source texts, in intent order; empty when solved.
+    /// Culprit want texts, in intent order.
     pub conflicts: Vec<String>,
     /// Recovery reason; empty when solved.
     pub reason: String,
-    /// Solver repairs, one per viable single-want relaxation, in solver
-    /// order; empty when solved or unrepairable. Each hint verifies clean.
+    /// Solver repairs, in solver order.
     pub hints: Vec<RepairHintDto>,
-    /// Dry-run summary per hint: one `dry_run <i> drop ...` header plus
-    /// that hint's `dry_run <i> ...` relation rows, diffed in memory
-    /// without touching the scene. Applying the hint replays the same
-    /// move, so the rows equal the applied diff. Empty when solved.
+    /// Dry-run summary per hint: `dry_run <i> ...` rows.
     pub dry_run: Vec<String>,
-    /// Why each unmet want failed (SPR6); empty when solved or without geometry.
+    /// Why each unmet want failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<WantBlockDto>,
-    /// Spatial findings this move changed (SPX3); absent with `delta: false`.
+    /// Spatial findings this move changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial_delta: Option<SpatialDeltaDto>,
 }

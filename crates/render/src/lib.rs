@@ -238,6 +238,10 @@ pub mod baked_bake;
 /// Baked lightmaps with validity mask + SH probes reusing the ibl SH path
 /// (RL5): bake identical bytes x2; consumer is the WIN1/ED1 arena + Q1.
 pub mod baked_gi;
+/// Debug G-buffer frame (A3): octahedral normal, depth, albedo and material
+/// id with one digest each, built from the slices the crate already holds.
+/// Std-only and headless; the GPU readback seam is named, not built.
+pub mod buffers;
 /// Hero motion-hold clip: fixed 120-frame slow push-in over the twin
 /// establishing view through the frozen temporal resolve. Std-only;
 /// consumer is the twin establishing view through `present::look`.

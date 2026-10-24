@@ -559,9 +559,9 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
-| `budget_bytes` | `Option<u32>` | no |  | `1..=16384`; Brief-text budget in bytes (1..=`SCENE_BRIEF_MAX_BUDGET` (16384)). |
-| `cursor` | `Option<u32>` | no |  | First object index of the `ids`/`objects`/`poses` page (default 0); pass the previous reply's `next_cursor` to read on. |
-| `include_spatial` | `Option<bool>` | no |  | True adds `spatial`: the verdict, finding count and hash of a default `scene.spatial` call, plus the findings the text left out. |
+| `budget_bytes` | `Option<u32>` | no |  | `1..=16384`; Text budget in bytes (1..=SCENE_BRIEF_MAX_BUDGET). |
+| `cursor` | `Option<u32>` | no |  | First index of this page; `next_cursor` reads on. |
+| `include_spatial` | `Option<bool>` | no |  | True adds a `scene.spatial` summary. |
 
 <details><summary>12 typed refusals</summary>
 
@@ -595,14 +595,14 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
-| `checks` | `Option<Vec<String>>` | no |  | `at most 32`; Checks to run, at most `SCENE_SPATIAL_MAX_CHECKS` (32) (`None` = every offline check); opt-in names run only when listed here. |
-| `limit` | `Option<u32>` | no |  | `1..=256`; Findings rows per page, 1..=`SCENE_SPATIAL_MAX_FINDINGS` (256). |
-| `cursor` | `Option<u32>` | no |  | First object index of the `ids`/`objects` page (default 0). |
-| `format` | `Option<String>` | no |  | Answer shape: rows (default), ids (only the objects that carry a finding, no finding rows), count (verdict and counts only). |
-| `matched_only` | `Option<bool>` | no |  | True keeps only red findings (rows, total and ids). |
+| `checks` | `Option<Vec<String>>` | no |  | `at most 32`; Checks to run (`None` = every offline check). |
+| `limit` | `Option<u32>` | no |  | `1..=256`; Findings rows per page, 1..=SCENE_SPATIAL_MAX_FINDINGS. |
+| `cursor` | `Option<u32>` | no |  | First index of the ids page (default 0). |
+| `format` | `Option<String>` | no |  | Answer shape: `rows` (default), `ids` or `count`. |
+| `matched_only` | `Option<bool>` | no |  | True keeps only red findings. |
 | `epsilon_cm` | `Option<i32>` | no |  | `0..=50`; Z-fight tolerance in cm, 0..=50, default 1 (zfight). |
-| `triage` | `Option<bool>` | no |  | True judges overlaps by component role (collider on its mesh is intentional). |
-| `allow` | `Option<Vec<String>>` | no |  | Verdict rows, max 256: `check a b\|- verdict rev expiry reason` (uuids, 0 = none). Matched findings move to `suppressed`. |
+| `triage` | `Option<bool>` | no |  | True judges overlaps by component role. |
+| `allow` | `Option<Vec<String>>` | no |  | Verdict rows, max 256: `check a b\|- verdict rev expiry reason`; matched findings move to `suppressed`. |
 
 <details><summary>11 typed refusals</summary>
 
@@ -637,8 +637,8 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 |---|---|---|---|---|
 | `expected_revision` | `u64` | yes |  | Document revision the intent was built against; must equal the live revision. |
 | `idempotency_key` | `u64` | yes |  | Idempotency key for the gated apply; doubles as the undo token. |
-| `object` | `String` | yes |  | Object to move: bare UUID text or a `name [id]` label (id decides). |
-| `wants` | `Vec<String>` | yes |  | `at most 16`; Want lines, at most `MAX_PLACE_WANTS` (16), each at most `MAX_WANT_CHARS` (256) chars. |
+| `object` | `String` | yes |  | Object to move: bare UUID text or a `name [id]` label (the id decides). |
+| `wants` | `Vec<String>` | yes |  | `at most 16`; Want lines, at most MAX_PLACE_WANTS, each at most MAX_WANT_CHARS chars. |
 | `delta` | `Option<bool>` | no |  | `false` skips the spatial delta (default true). |
 
 <details><summary>58 typed refusals</summary>
@@ -808,29 +808,29 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `kind` | `String` | yes |  | Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor\|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m; measure anchor, other; room_of anchor; in_room room; exits_of anchor\|room; glance eye_m; coverage anchor, eye_m; view eye_m; lidar eye_m; map eye_m; pixel eye_m; diff revision_a, revision_b. a\|b means either. |
-| `anchor` | `Option<String>` | no |  | Object label from scene.brief (`lamp_2 [uuid]`) or bare UUID: the subject. |
-| `other` | `Option<String>` | no |  | Second object label: far end for between, viewer for relation. |
-| `radius_cm` | `Option<i32>` | no |  | Radius in cm, 1..=10000: search radius (default 500), slide range (500), clearance width needed (60), measure gap needed. |
-| `eye_m` | `Option<[f32; 3]>` | no |  | Point [x, y, z] in meters: the eye for visible and cone, the threat for cover_near. |
-| `yaw` | `Option<f32>` | no |  | Facing in radians, 0 = +X (visible, cone from eye_m); default 0. |
-| `crouch` | `Option<bool>` | no |  | True to test crouched cover (cover_near). |
-| `capsule_radius_cm` | `Option<i32>` | no |  | Clearance radius in cm, 0..=10000, default 30 (largest_open, free_space). |
-| `min_gap_cm` | `Option<i32>` | no |  | Smallest gap between samples in cm, default 100 (free_space). |
-| `max_samples` | `Option<u32>` | no |  | Spots to sample, default 8 (free_space). |
-| `seed` | `Option<u64>` | no |  | Sampler seed, default 7 (free_space). |
+| `anchor` | `Option<String>` | no |  | Object label from scene.brief (`lamp_2 [uuid]`) or bare UUID. |
+| `other` | `Option<String>` | no |  | Second object: far end (between) or viewer (relation, sees). |
+| `radius_cm` | `Option<i32>` | no |  | Radius in cm, 1..=10000: search (500), slide range (500), clearance width (60), measure gap. |
+| `eye_m` | `Option<[f32; 3]>` | no |  | Eye or threat point [x, y, z] in meters. |
+| `yaw` | `Option<f32>` | no |  | Facing in radians, 0 = +X; default 0. |
+| `crouch` | `Option<bool>` | no |  | True to test crouched cover. |
+| `capsule_radius_cm` | `Option<i32>` | no |  | Clearance radius in cm, 0..=10000, default 30. |
+| `min_gap_cm` | `Option<i32>` | no |  | Smallest gap between samples in cm, default 100. |
+| `max_samples` | `Option<u32>` | no |  | Spots to sample, default 8. |
+| `seed` | `Option<u64>` | no |  | Sampler seed, default 7. |
 | `limit` | `Option<u32>` | no |  | Most hits, 1..=64, default 64. |
 | `budget_bytes` | `Option<u32>` | no |  | Answer budget in bytes, 1..=16384, default 4096. |
-| `half_angle_deg` | `Option<i32>` | no |  | Cone half-width in whole degrees, 1..=180 (cone); half the field of view (glance, coverage). |
-| `filter` | `Option<String>` | no |  | Keep cone rows whose label contains this text. |
+| `half_angle_deg` | `Option<i32>` | no |  | Half width in whole degrees, 1..=180 (cone, glance, coverage). |
+| `filter` | `Option<String>` | no |  | Keep rows whose label contains this text. |
 | `relation` | `Option<String>` | no |  | Relation word: above, below, in_front_of, behind, left_of, right_of, against, around, aligned, near, far, visible_from, reachable_from. |
-| `format` | `Option<String>` | no |  | Answer shape: rows (default, one row per hit), ids (labels of matched hits only), count (matched count only). |
-| `matched_only` | `Option<bool>` | no |  | Drop unmatched rows. Default true for visible (pass false for blocked rows), false otherwise. |
-| `dir` | `Option<String>` | no |  | Slide direction: +x, -x, +z, -z, up, down, +x+z, +x-z, -x+z, -x-z (slide). |
-| `what` | `Option<String>` | no |  | gap (default), overlap, align or contain (measure). |
+| `format` | `Option<String>` | no |  | Answer shape: `rows` (default), `ids` (labels of matched hits), `count`. |
+| `matched_only` | `Option<bool>` | no |  | Drop unmatched rows. Default true for visible, false otherwise. |
+| `dir` | `Option<String>` | no |  | Slide direction: +x, -x, +z, -z, up, down, or a two-axis pair (slide). |
+| `what` | `Option<String>` | no |  | `gap` (default), `overlap`, `align` or `contain` (measure). |
 | `room` | `Option<u32>` | no |  | Room number from room_of (in_room, exits_of). |
-| `pitch` | `Option<f32>` | no |  | Camera pitch in radians, up is positive (coverage). |
-| `cells` | `Option<[i32; 4]>` | no |  | View or pixel box `[w, h, x, y]` in cells, edges 1..=128 (view, pixel; default [24,16,0,0], x and y inside the view). The map uses the eye as its center and `radius_cm` as its reach. |
-| `revision_a` | `Option<u64>` | no |  | Before revision of a diff (diff); must be held by the journal. |
+| `pitch` | `Option<f32>` | no |  | Camera pitch in radians, up positive (coverage). |
+| `cells` | `Option<[i32; 4]>` | no |  | View or pixel box `[w, h, x, y]` in cells, edges 1..=128 (default [24,16,0,0]). |
+| `revision_a` | `Option<u64>` | no |  | Before revision of a diff; must be held by the journal. |
 | `revision_b` | `Option<u64>` | no |  | After revision of a diff; may be lower than revision_a. |
 
 <details><summary>10 typed refusals</summary>
@@ -2660,7 +2660,7 @@ Listed in a fresh session: no, call `api.load` with `view`. Source: `crates/endp
 | `region` | `Option<CompareRegion>` | no |  |  |
 | `ignore` | `Option<Vec<CompareRegion>>` | no |  |  |
 
-<details><summary>11 typed refusals</summary>
+<details><summary>12 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -2675,6 +2675,7 @@ Listed in a fresh session: no, call `api.load` with `view`. Source: `crates/endp
 | `bad_args` | ignore names a full-frame region: legal entries are rectangles {"kind":"rect","x":..,"y":..,"w":..,"h":..} inside the frame; re-run without that entry or with a rect |
 | `bad_args` | ignored rect {}x{} at ({},{}) does not fit the {}x{} frame; re-run with a rect inside the picture |
 | `bad_args` | the resolved region and the ignored rects leave no pixel to score: re-run with a wider region or a smaller ignore list |
+| `bad_image` | ignored-region compare refused the pair: {error} |
 
 </details>
 
@@ -3849,7 +3850,7 @@ Listed in a fresh session: no, call `api.load` with `world`. Source: `crates/end
 
 ## Coverage
 
-117 tools parsed, 926 refusal rows printed, 0 declarations the parser could not read.
+117 tools parsed, 927 refusal rows printed, 0 declarations the parser could not read.
 A verb whose handler converts a typed error defined in another file (the log tools, the level builder) shows fewer refusals than it can return, and a handler whose call graph passes the 500-function walk stops there; the tests next to its source are the full list.
 
 Tools with no refusal site found: `note.pin.list`, `note.pin.clear`, `wound.table.get`, `material.list`, `asset.generate`, `rules.get`, `door.status`, `perf.doctor`, `settings.get`, `session.activity`, `codex.search`.

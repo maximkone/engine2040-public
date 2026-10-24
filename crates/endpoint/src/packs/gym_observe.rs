@@ -600,6 +600,9 @@ mod tests {
                 .any(|row| row.name == TOOL_SIM_OBSERVE),
             "unloaded, the verb stays out of the list"
         );
+        // The full default surface plus gym is over the hard tool budget, so
+        // the documented flow unloads the default packs first.
+        crate::packs::hide_default_packs(&server);
         ApiLoadTool::invoke(
             &server,
             ApiLoadArgs {

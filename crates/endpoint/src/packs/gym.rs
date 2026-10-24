@@ -525,6 +525,9 @@ mod tests {
             "api.search hit: path={} kind={} score={:.3} brief={}",
             hit.path, hit.kind, hit.score, hit.brief
         );
+        // The full default surface plus gym is over the hard tool budget, so
+        // the documented flow unloads the default packs first.
+        crate::packs::hide_default_packs(&server);
         let loaded = ApiLoadTool::invoke(
             &server,
             ApiLoadArgs {

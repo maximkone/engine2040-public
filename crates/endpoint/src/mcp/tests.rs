@@ -1224,9 +1224,18 @@ fn assert_budget_grows(server: &McpServer, all: &[String]) {
     // 2026-10-23 (door budget): `scene.query` advertises the diff shape once
     // (`tx.apply` owns the inlined `ChangeListDto`), taking the default list to
     // 61,742: bound 64_400 -> 62_400.
+    // 2026-10-24 (WG4/AX25): five verbs landed on the default `scene` pack -
+    // `prefab.save` and `prefab.place` (894f1ea0c) and `note.pin.add`,
+    // `note.pin.list`, `note.pin.clear` (6b8ef7df3) - taking the default list to
+    // 66,725: bound 62_400 -> 67_400. The growth is those five default verbs:
+    // they are the only additions to the default surface since the 61,742
+    // measurement, and each one is a journaled scene contract with its own
+    // tests, so the feature cannot drop them. The ledger ceiling
+    // (`MAX_ADVERTISED_CHARS`, 72,952) still binds first, so this bound only
+    // guards a doubling contract.
     assert!(
-        budget < 62_400,
-        "default list {budget} stays near the measured 2026-10-23 door (61_742)"
+        budget < 67_400,
+        "default list {budget} stays near the measured 2026-10-24 door (66_725)"
     );
     assert!(budget < everything, "the default list hides something");
     assert!(core_only < budget, "the scene pack adds to the core");
@@ -1240,8 +1249,13 @@ fn assert_budget_grows(server: &McpServer, all: &[String]) {
         ledger.headroom_chars
     );
 
-    // Loading a pack advertises its verbs and grows the list; the
-    // ledger follows the live list.
+    // Loading a pack advertises its verbs and grows the list; the ledger
+    // follows the live list. The full default surface plus view is over the
+    // hard tool budget (`api.load` refuses it and names this flow), so the
+    // documented flow unloads the default packs first: the pack then
+    // advertises whole instead of being trimmed by the guardrail.
+    crate::packs::hide_default_packs(server);
+    let bare = server.tool_list_budget_chars();
     server
         .lock()
         .expect("test lock holds")
@@ -1261,8 +1275,8 @@ fn assert_budget_grows(server: &McpServer, all: &[String]) {
             TOOL_LIST_BUDGET_CHARS.saturating_sub(grown)
         );
     assert!(
-        grown > budget,
-        "loading view grows the list: {grown} vs {budget}"
+        grown > bare,
+        "loading view grows the list: {grown} vs {bare}"
     );
     assert_eq!(server.tool_budget_ledger().total_chars, grown);
     // The loaded list is a real advertised list too: the same ledger gate

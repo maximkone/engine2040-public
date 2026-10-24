@@ -50,43 +50,41 @@ pub struct PlacedDto {
     pub yaw: f32,
 }
 
-/// Door output for `level.build`: solved placements plus the AB4 input
-/// line, or the refusal with conflicts and findings. Undo rides the
-/// existing `tx.undo` tool with `undo_token`.
+/// Door output for `level.build`: solved placements plus the AB4 input line, or
+/// the refusal with conflicts and findings. Undo rides `tx.undo`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct BuildLevelOutput {
-    /// Document revision after the call (unchanged on refusal).
+    /// Revision after the call (unchanged on refusal).
     pub revision: u64,
     /// True when the level placed.
     pub solved: bool,
     /// Landed props with live ids.
     pub placements: Vec<PlacedDto>,
-    /// Gate finding lines (empty on a pass).
+    /// Gate finding lines; empty on a pass.
     pub findings: Vec<String>,
-    /// Culprit want source lines on a refusal.
+    /// Culprit want lines on a refusal.
     pub conflicts: Vec<String>,
-    /// Why the build refused, empty on a pass.
+    /// Why the build refused; empty on a pass.
     pub reason: String,
     /// Repair rounds consumed.
     pub repairs_used: u8,
-    /// `"pass"` or `"refused"`.
+    /// `pass` or `refused`.
     pub verdict: String,
-    /// AB4 input line on a pass, empty on a refusal.
+    /// AB4 input line on a pass.
     pub next_ab4: String,
     /// Simulated cost units.
     pub cost_units: u64,
-    /// Landed batch key, zero on a refusal.
+    /// Landed batch key; zero on a refusal.
     pub key: u64,
-    /// Stable undo identity for `tx.undo`, zero on a refusal.
+    /// Undo identity for `tx.undo`; zero on a refusal.
     pub undo_token: u64,
-    /// Shared LW6 envelope record line (`BriefEnvelope::record_line`).
-    /// Every door write carries it so the audit traces end to end.
+    /// Shared LW6 envelope record line; every door write carries it.
     #[serde(default)]
     #[schemars(default)]
     pub record_line: String,
-    /// Relation changes this edit made (ARC12); empty on a refusal.
+    /// Relation changes this edit made.
     #[serde(default)]
     #[schemars(default)]
     pub relation_diff: Vec<String>,
