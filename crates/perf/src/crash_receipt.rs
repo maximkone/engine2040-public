@@ -18,6 +18,11 @@
 //! for a later look. Printing is one stderr write at start, never a per-tick
 //! cost.
 //!
+//! A GPU device loss is a crash the panic hook never sees, so the render loop
+//! calls [`device_lost_receipt`]: the same receipt, with `last_call` naming the
+//! failed pass and the backtrace block carrying the last [`FRAME_TAIL`] frame
+//! lines of that pass. Local files only; uploading is the owner's call.
+//!
 //! Determinism: the hook reads best-effort snapshot values with relaxed loads
 //! and never enters the fixed tick or a simulation hash; the recorded backtrace
 //! and file IO are presentation only.
@@ -49,6 +54,9 @@ pub const MAX_BACKTRACE_BYTES: usize = 64 * 1024;
 pub const UNKNOWN_CALL: &str = "unknown: no call recorded";
 /// Most names tried before a crash folder reads as full.
 pub const MAX_RECEIPT_TRIES: u32 = 1000;
+/// Frame lines a device-lost receipt keeps: the last 120 frame reports of the
+/// failed pass, newest last.
+pub const FRAME_TAIL: usize = 120;
 
 const HEADER: &str = "# engine2040 crash receipt v1";
 const BACKTRACE_KEY: &str = "backtrace:";
@@ -209,6 +217,48 @@ impl CrashReceipt {
         }
         Err(ReceiptError::TooManyReceipts)
     }
+}
+
+/// One line per frame, newest last, keeping at most [`FRAME_TAIL`] frames.
+/// Frame text never carries a newline of its own (control-free one-line
+/// reports are what a frame log is for), so a folded frame stays one line;
+/// blank frames are dropped rather than padding the tail.
+#[must_use]
+pub fn frame_tail_line(frames: &[String]) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(frames.len().min(FRAME_TAIL));
+    for frame in frames {
+        let folded: String = frame
+            .chars()
+            .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+            .collect();
+        let line = folded.trim();
+        if !line.is_empty() {
+            lines.push(line.to_owned());
+        }
+    }
+    let keep = lines.len().saturating_sub(FRAME_TAIL);
+    lines.split_off(keep).join("\n")
+}
+
+/// Write the device-lost receipt for one failed pass: a regular crash receipt
+/// whose `last_call` names the pass (`pass: <name>`) and whose backtrace block
+/// carries the last [`FRAME_TAIL`] frame lines. Uses the one writer a panic
+/// receipt uses, so a loss and a panic read the same to the next start, and a
+/// second loss in the same folder is numbered beside the first instead of
+/// overwriting it.
+///
+/// # Errors
+///
+/// The same failures as [`CrashReceipt::write_to`].
+pub fn device_lost_receipt(
+    dir: &Path,
+    pass: &str,
+    tick: u32,
+    hash: u64,
+    frames: &[String],
+) -> Result<PathBuf, ReceiptError> {
+    let call = format!("pass: {pass}");
+    CrashReceipt::new(tick, hash, &call, &frame_tail_line(frames)).write_to(dir)
 }
 
 /// Crash-receipt failures: bounded diagnostics, never panics.
@@ -543,5 +593,68 @@ mod tests {
         assert_eq!(receipt.last_call, "windowed: app.tick");
         assert!(!receipt.backtrace.is_empty(), "the backtrace is recorded");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 300-frame log of one present pass, newest last.
+    fn frames(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| format!("frame {index}: present pass gpu_present 16.7 ms"))
+            .collect()
+    }
+
+    #[test]
+    fn device_lost_leaves_one_report_naming_the_pass() {
+        let dir = temp_dir("device-lost");
+        let log = frames(300);
+        let path = device_lost_receipt(&dir, "gpu_present", 600, GOLDEN, &log)
+            .expect("the device-lost receipt lands");
+        assert!(path.is_file(), "one report file for the failed pass");
+        let text = std::fs::read_to_string(&path).expect("the receipt is readable");
+        let receipt = CrashReceipt::parse(&text).expect("the receipt round-trips");
+        assert_eq!(receipt.tick, 600);
+        assert_eq!(receipt.hash, GOLDEN);
+        assert_eq!(receipt.last_call, "pass: gpu_present");
+        let lines: Vec<&str> = receipt.backtrace.lines().collect();
+        assert_eq!(lines.len(), FRAME_TAIL, "the tail is exactly 120 frames");
+        assert_eq!(lines[0], "frame 180: present pass gpu_present 16.7 ms");
+        assert_eq!(
+            lines[FRAME_TAIL - 1],
+            "frame 299: present pass gpu_present 16.7 ms"
+        );
+        // The writer numbers a second loss beside the first, it never
+        // overwrites: same tick and hash reads -001, a later tick -000 again.
+        let same = device_lost_receipt(&dir, "gpu_present", 600, GOLDEN, &log)
+            .expect("the second loss lands");
+        assert_ne!(same, path);
+        assert!(
+            same.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("crash-600-001-")),
+            "the same tick is numbered: {}",
+            same.display()
+        );
+        let later = device_lost_receipt(&dir, "shadow_atlas", 601, GOLDEN, &log)
+            .expect("a later loss lands");
+        let files = receipt_files(&dir).expect("the folder lists");
+        assert_eq!(
+            files,
+            vec![path, same, later],
+            "one file per loss, in order"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn frame_tail_folds_multiline_frames_and_skips_blanks() {
+        let log = vec![
+            "two\nlines\r\nframe".to_owned(),
+            String::new(),
+            "  ".to_owned(),
+            "last frame".to_owned(),
+        ];
+        assert_eq!(frame_tail_line(&log), "two lines  frame\nlast frame");
+        assert_eq!(frame_tail_line(&[]), "");
+        let short = frames(7);
+        assert_eq!(frame_tail_line(&short).lines().count(), 7);
     }
 }
