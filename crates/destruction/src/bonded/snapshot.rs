@@ -175,6 +175,7 @@ impl BondedCollection {
         self.bond_broken = broken;
         self.log = log;
         self.flood_loads();
+        self.sag_reset();
         Ok(())
     }
 }
