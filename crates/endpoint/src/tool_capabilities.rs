@@ -545,18 +545,24 @@ pub const DOOR_TIER: u8 = DESTRUCTIVE_TIER;
 pub const SCOPE_POLICY_VERSION: u32 = 1;
 /// Largest scope-policy file read, in bytes.
 pub const SCOPE_POLICY_MAX_BYTES: usize = 8_192;
-/// Canonical bytes of the shipped scope-policy file.
+/// Canonical bytes of the shipped scope-policy file. No ops line means every
+/// op class stays granted, so the shipped door behaves exactly as before.
 pub const SCOPE_POLICY_DEFAULT_TEXT: &str = "scope-policy-version: 1\n";
+/// Op-class words the policy file may name, in canonical order. `set` is the
+/// wire word for the editor's `edit` class.
+pub const SCOPE_POLICY_OP_CLASSES: [&str; 4] = ["insert", "move", "set", "delete"];
 
 /// Versioned scope policy parsed from the policy file bytes.
 ///
 /// Consumer: the dispatch seam fronts every call with
 /// [`refuse_tool_call_with_policy`] under the loaded-or-default policy,
 /// while writers and previews face [`refuse_write`] plus [`refuse_preview`]
-/// with their batch at the tool path.
+/// with their batch at the tool path, and `startup::build_server` mints the
+/// session capability token from [`Self::ops`] (EA6).
 /// The table stays frozen: a current policy admits exactly what the table
 /// admits, and every refusal still names the legal values plus one recovery.
-/// Units: policy version as a plain count, bytes for the file cap.
+/// Units: policy version as a plain count, ops as op-class bits, bytes for the
+/// file cap.
 /// Determinism: the same file bytes always parse to the same policy on every
 /// machine; integer compares only, no wall clock, no float.
 /// Errors: [`ScopePolicyError`] names the legal file shape plus one recovery.
@@ -565,6 +571,7 @@ pub const SCOPE_POLICY_DEFAULT_TEXT: &str = "scope-policy-version: 1\n";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopePolicy {
     version: u32,
+    ops: OpMask,
 }
 
 impl ScopePolicy {
@@ -573,10 +580,16 @@ impl ScopePolicy {
         self.version
     }
 
-    /// Default policy matching the shipped file bytes.
+    /// Op classes this policy grants the session token.
+    pub fn ops(self) -> OpMask {
+        self.ops
+    }
+
+    /// Default policy matching the shipped file bytes: every op class.
     pub fn default_file() -> Self {
         Self {
             version: SCOPE_POLICY_VERSION,
+            ops: OpMask::ALL,
         }
     }
 }
@@ -588,8 +601,10 @@ pub enum ScopePolicyError {
     TooLarge,
     /// Missing or unparsable version line.
     BadVersion,
-    /// A line outside the version plus comment shape.
+    /// A line outside the version, ops plus comment shape.
     BadLine,
+    /// Unparsable op-class list (``insert`, `move`, `set`, `delete``).
+    BadOps,
     /// Disk read failed.
     ReadFailed,
 }
@@ -607,7 +622,12 @@ impl std::fmt::Display for ScopePolicyError {
             ),
             Self::BadLine => write!(
                 f,
-                "scope policy file holds an unknown line; re-run with the shipped file holding only the version line"
+                "scope policy file holds an unknown line; re-run with the shipped file holding only the version line and one `scope-policy-ops:` line"
+            ),
+            Self::BadOps => write!(
+                f,
+                "scope policy file names an op class outside `{}`; re-run with a comma-separated list of those classes",
+                SCOPE_POLICY_OP_CLASSES.join(", ")
             ),
             Self::ReadFailed => write!(
                 f,
@@ -619,39 +639,72 @@ impl std::fmt::Display for ScopePolicyError {
 
 impl std::error::Error for ScopePolicyError {}
 
-/// Parse one scope-policy file text into its version.
+/// Parse one scope-policy file text into its version plus its op grant.
 ///
 /// Skips blank lines and `#` comments, requires exactly one
-/// `scope-policy-version: <number>` line, and rejects any other content.
-/// Pure: reads the text only.
+/// `scope-policy-version: <number>` line, accepts at most one
+/// `scope-policy-ops: <class,class>` line (every class when absent), and
+/// rejects any other content. Pure: reads the text only.
 pub fn parse_scope_policy(text: &str) -> Result<ScopePolicy, ScopePolicyError> {
     if text.len() > SCOPE_POLICY_MAX_BYTES {
         return Err(ScopePolicyError::TooLarge);
     }
     let mut version: Option<u32> = None;
+    let mut ops: Option<OpMask> = None;
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let rest = match line.strip_prefix("scope-policy-version:") {
-            Some(rest) => rest,
-            None => return Err(ScopePolicyError::BadLine),
-        };
-        let parsed = match rest.trim().parse::<u32>() {
-            Ok(value) => value,
-            Err(_) => return Err(ScopePolicyError::BadVersion),
-        };
-        match version {
-            Some(seen) if seen != parsed => return Err(ScopePolicyError::BadLine),
-            Some(_) => {}
-            None => version = Some(parsed),
+        if let Some(rest) = line.strip_prefix("scope-policy-version:") {
+            let parsed = match rest.trim().parse::<u32>() {
+                Ok(value) => value,
+                Err(_) => return Err(ScopePolicyError::BadVersion),
+            };
+            match version {
+                Some(seen) if seen != parsed => return Err(ScopePolicyError::BadLine),
+                Some(_) => {}
+                None => version = Some(parsed),
+            }
+        } else if let Some(rest) = line.strip_prefix("scope-policy-ops:") {
+            if ops.is_some() {
+                return Err(ScopePolicyError::BadLine);
+            }
+            ops = Some(parse_policy_ops(rest.trim())?);
+        } else {
+            return Err(ScopePolicyError::BadLine);
         }
     }
     match version {
-        Some(value) => Ok(ScopePolicy { version: value }),
+        Some(value) => Ok(ScopePolicy {
+            version: value,
+            ops: ops.unwrap_or(OpMask::ALL),
+        }),
         None => Err(ScopePolicyError::BadVersion),
     }
+}
+
+/// Parse one `scope-policy-ops:` list into its op-class bits: comma-separated
+/// `insert`, `move`, `set` (the editor's `edit` class) and `delete`, or the
+/// single word `all`. An empty or unknown word is [`ScopePolicyError::BadOps`],
+/// so a narrow grant is never a silent typo.
+fn parse_policy_ops(list: &str) -> Result<OpMask, ScopePolicyError> {
+    let mut bits = 0_u8;
+    for word in list.split(',') {
+        let word = word.trim();
+        bits |= match word {
+            "insert" => OpMask::INSERT.0,
+            "move" => OpMask::MOVE.0,
+            "edit" | "set" => OpMask::EDIT.0,
+            "delete" => OpMask::DELETE.0,
+            "all" => OpMask::ALL.0,
+            _ => return Err(ScopePolicyError::BadOps),
+        };
+    }
+    if bits == 0 {
+        return Err(ScopePolicyError::BadOps);
+    }
+    Ok(OpMask(bits))
 }
 
 /// Read one scope-policy file from disk, bounded to [`SCOPE_POLICY_MAX_BYTES`].
