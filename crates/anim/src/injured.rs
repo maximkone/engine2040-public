@@ -1,19 +1,23 @@
-//! injured: single-loss joint masks plus support polygon after limb loss.
+//! injured: single-loss joint masks, support polygon and staged loss gait.
 //!
 //! Consumer: [`layers::apply_override`](super::layers::apply_override) reads the
 //! rebuilt [`MaskTable`] weights (lost joint dropped, stance kept) and
 //! [`hit_react::apply_hit_react`](super::hit_react::apply_hit_react) composes the
 //! rebuilt table with its own mask through [`compose`]; the double-loss rebuild
-//! extends this module's single-loss composition. Owner: `engine-anim`; this
-//! module owns [`Loss`], [`Rebuilt`] and [`InjuredError`] only, reusing the graph
+//! extends this module's single-loss composition. A loss also picks a
+//! [`Gait`] (hop, crawl, fall, one-arm guard) and a [`Staged`] ramp that reaches
+//! a legal state inside [`LEGAL_TICKS`]. Owner: `engine-anim`; this
+//! module owns [`Loss`], [`Rebuilt`], [`Gait`], [`Staged`] and [`InjuredError`]
+//! only, reusing the graph
 //! [`Pose`] width plus [`MaskTable`] and the `hit_react` joint ids without
 //! mirroring them. Units: mask bytes (0 drops the joint, 255 full drive),
 //! meters planar `[x, z]`; seeds are `u64` stream keys. Determinism: validated
 //! integers in, `+ - * /` plus comparisons only, joint order, no clock; same loss
 //! plus same seed gives the same bytes twice. Errors: [`InjuredError`], never a
 //! panic on caller data. Budget: one linear pass over [`FIGHTER_JOINTS`] lanes per
-//! rebuild; rebuilds run once per loss event and the table is reused every tick,
-//! so steady-state ticks allocate nothing.
+//! rebuild and per staged tick; rebuilds run once per loss event, a staged tick
+//! allocates nothing, and only [`Staged::to_mask`] materializes a table, so
+//! steady-state ticks allocate nothing.
 
 use super::graph::Pose;
 use super::hit_react::{ARM_L, ARM_R, FIGHTER_JOINTS, LEG_L, LEG_R, PELVIS, SPINE};
@@ -82,6 +86,11 @@ impl Loss {
 pub enum InjuredError {
     /// Joint past the fighter rig; culprit carried.
     BadJoint(usize),
+    /// Not one or two losses; got carried. BX5 owns at most two losses.
+    LossCount {
+        /// How many losses the caller passed.
+        got: usize,
+    },
     /// A mask build failed (over-wide rig); source carried.
     Layer(super::graph::GraphError),
 }
@@ -90,6 +99,9 @@ impl std::fmt::Display for InjuredError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BadJoint(j) => write!(f, "injured: joint {j} is past the rig"),
+            Self::LossCount { got } => {
+                write!(f, "injured (BX5): refuses {got} losses, at most two joints")
+            }
             Self::Layer(e) => write!(f, "injured layer: {e}"),
         }
     }
@@ -255,6 +267,305 @@ pub fn stance_contains(left_down: bool, right_down: bool, com: [f32; 2]) -> bool
         && com[1] <= hi[1] + STANCE_R
 }
 
+/// Ticks a fighter has to reach a legal state after a loss: the BX5 bar, and
+/// the longest settle a staged gait may take.
+pub const LEGAL_TICKS: u8 = 20;
+/// Shortest settle: a plan ramps for at least this many ticks before it can
+/// count as legal, so a loss never snaps the pose in one frame.
+pub const SETTLE_MIN: u8 = 8;
+/// Deepest drive a kept joint may take after a loss, per rig joint: past its
+/// limit the joint hyperextends, so the staged ramp never passes it. Arms cap
+/// lower than legs because a lone arm swings wider than a leg carries weight.
+/// Index order matches [`FIGHTER_JOINTS`] and every lane is at least
+/// [`STANCE_MIN`], so a legal ramp never shows a T-pose.
+pub const JOINT_LIMIT: [u8; FIGHTER_JOINTS] = [255, 240, 240, 216, 216, 232];
+/// Grounded gaits bear on the trunk, so the COM must stay inside this planar
+/// band, meters `[x, z]`: the hip and shoulder spread of the dropped torso.
+const TRUNK_HALF: [f32; 2] = [0.3, 0.2];
+
+/// Locomotion a fighter falls back on after a loss: which limbs still carry it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Gait {
+    /// Nothing lost: both feet planted, both arms free.
+    Stand,
+    /// One leg left: the fighter hops on the kept foot.
+    Hop,
+    /// One arm left: both feet planted, the kept arm holds the guard.
+    Guard,
+    /// Spine or pelvis lost: the torso drops and the floor bears it.
+    Fall,
+    /// Both legs lost: the fighter crawls on the kept arms and trunk.
+    Crawl,
+}
+
+impl Gait {
+    /// Gait after one loss: a leg hops, an arm guards, the torso falls.
+    pub fn for_loss(loss: Loss) -> Self {
+        Self::for_losses(&[loss])
+    }
+
+    /// Gait after one or two losses, joint order irrelevant: a torso loss
+    /// always drops the body, two lost legs crawl, a lone leg hops, a lone arm
+    /// guards, and losing only both arms still stands on both feet.
+    pub fn for_losses(losses: &[Loss]) -> Self {
+        let mut legs = 0u8;
+        let mut arms = 0u8;
+        let mut torso = false;
+        for loss in losses {
+            match loss {
+                Loss::LegL | Loss::LegR => legs += 1,
+                Loss::ArmL | Loss::ArmR => arms += 1,
+                Loss::Pelvis | Loss::Spine => torso = true,
+            }
+        }
+        if torso {
+            return Self::Fall;
+        }
+        match (legs, arms) {
+            (0, 0) => Self::Stand,
+            (0, 1) => Self::Guard,
+            (0, _) => Self::Stand,
+            (1, _) => Self::Hop,
+            _ => Self::Crawl,
+        }
+    }
+
+    /// True while the floor bears the body instead of the feet; the COM then
+    /// has to stay over the trunk band, not over a foot box.
+    pub fn grounded(self) -> bool {
+        matches!(self, Self::Fall | Self::Crawl)
+    }
+
+    /// Ticks for one locomotion cycle at 60 Hz: a hop is one push and one
+    /// landing, a crawl drags both arms through. A fall has no cycle (0).
+    pub fn cycle_ticks(self) -> u8 {
+        match self {
+            Self::Stand => 32,
+            Self::Hop => 24,
+            Self::Guard => 32,
+            Self::Fall => 0,
+            Self::Crawl => 40,
+        }
+    }
+
+    /// Stable byte for digests; never a discriminant cast.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Stand => 0,
+            Self::Hop => 1,
+            Self::Guard => 2,
+            Self::Fall => 3,
+            Self::Crawl => 4,
+        }
+    }
+}
+
+/// True while `gait` can bear `com` on the contacts it kept: upright gaits need
+/// the COM inside the foot box, grounded gaits inside the trunk band. Shared so
+/// the staged plan and fixtures answer the same question.
+pub fn gait_supported(gait: Gait, contacts: [bool; 2], com: [f32; 2]) -> bool {
+    if !com[0].is_finite() || !com[1].is_finite() {
+        return false;
+    }
+    if gait.grounded() {
+        return com[0].abs() <= TRUNK_HALF[0] && com[1].abs() <= TRUNK_HALF[1];
+    }
+    stance_contains(contacts[0], contacts[1], com)
+}
+
+/// Seeded settle length in `[SETTLE_MIN, LEGAL_TICKS]`: the loss tick never
+/// snaps to the gait pose, and every seed lands inside the legal bar.
+fn settle_for(seed: u64) -> u8 {
+    let span = u64::from(LEGAL_TICKS - SETTLE_MIN) + 1;
+    let wide = (splitmix64(seed ^ 0x5E77_1E00_0000_0001) >> 41) % span;
+    // Modulo by 13 keeps this under LEGAL_TICKS, so the narrowing never misses.
+    SETTLE_MIN + u8::try_from(wide).unwrap_or_default()
+}
+
+/// Integer ramp from `start` to `end` over `settle` ticks, inclusive at the end:
+/// `end` from tick `settle` on, never past it. `start <= end` by build.
+fn ramp(start: u8, end: u8, tick: u8, settle: u8) -> u8 {
+    if tick >= settle || settle == 0 {
+        return end;
+    }
+    let span = u16::from(end - start);
+    let walked = (span * u16::from(tick)) / u16::from(settle);
+    // `walked <= span`, and the sum fits a byte by build.
+    start + u8::try_from(walked).unwrap_or_default()
+}
+
+/// Staged switch from the standing mask to a loss gait: every tick drives the
+/// kept joints further out of the T-pose toward their capped target, and the
+/// plan reports legal at or before [`LEGAL_TICKS`]. The ramp is fixed-point
+/// bytes, so same losses plus same seed replay the same ticks twice.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Staged {
+    gait: Gait,
+    lost: [bool; FIGHTER_JOINTS],
+    target: [u8; FIGHTER_JOINTS],
+    weights: [u8; FIGHTER_JOINTS],
+    supported: bool,
+    settle_ticks: u8,
+    elapsed: u8,
+}
+
+impl Staged {
+    /// Stage one loss: the rebuilt mask supplies the targets, the gait says how
+    /// the fighter carries itself, and the ramp starts at the safe floor.
+    pub fn single(loss: Loss, seed: u64) -> Result<Self, InjuredError> {
+        let rebuilt = rebuild_single(loss, seed)?;
+        Self::from_parts(
+            &[loss],
+            rebuilt.mask(),
+            rebuilt.contacts(),
+            rebuilt.com(),
+            seed,
+        )
+    }
+
+    /// Stage one or two losses from an already rebuilt mask: the mask supplies
+    /// per-joint targets (capped at [`JOINT_LIMIT`]), the contacts plus COM
+    /// answer whether the gait can carry the body. A zero or three-loss call, a
+    /// non-finite COM or a wrong-width mask refuses and stages nothing.
+    pub fn from_parts(
+        losses: &[Loss],
+        mask: &MaskTable,
+        contacts: [bool; 2],
+        com: [f32; 2],
+        seed: u64,
+    ) -> Result<Self, InjuredError> {
+        if losses.is_empty() || losses.len() > 2 {
+            return Err(InjuredError::LossCount { got: losses.len() });
+        }
+        if mask.len() != FIGHTER_JOINTS {
+            return Err(InjuredError::Layer(
+                super::graph::GraphError::LengthMismatch {
+                    expected: FIGHTER_JOINTS,
+                    got: mask.len(),
+                },
+            ));
+        }
+        let gait = Gait::for_losses(losses);
+        let mut lost = [false; FIGHTER_JOINTS];
+        for loss in losses {
+            lost[loss.joint()] = true;
+        }
+        let mut target = [0u8; FIGHTER_JOINTS];
+        let mut weights = [0u8; FIGHTER_JOINTS];
+        for joint in 0..FIGHTER_JOINTS {
+            target[joint] = mask.weight(joint).min(JOINT_LIMIT[joint]);
+            weights[joint] = if lost[joint] { 0 } else { STANCE_MIN };
+        }
+        Ok(Self {
+            gait,
+            lost,
+            target,
+            weights,
+            supported: gait_supported(gait, contacts, com),
+            settle_ticks: settle_for(seed),
+            elapsed: 0,
+        })
+    }
+
+    /// Gait this plan switched to.
+    pub fn gait(&self) -> Gait {
+        self.gait
+    }
+
+    /// Ticks ramped so far; never past [`LEGAL_TICKS`].
+    pub fn elapsed(&self) -> u8 {
+        self.elapsed
+    }
+
+    /// Ticks this plan ramps before the pose reaches its gait targets.
+    pub fn settle_ticks(&self) -> u8 {
+        self.settle_ticks
+    }
+
+    /// Joint drive this tick: a lost joint reads 0, a kept joint sits between
+    /// [`STANCE_MIN`] and its [`JOINT_LIMIT`] lane.
+    pub fn weight(&self, joint: usize) -> u8 {
+        match self.weights.get(joint) {
+            Some(w) => *w,
+            None => 0,
+        }
+    }
+
+    /// All joint drives this tick, in rig order.
+    pub fn weights(&self) -> &[u8; FIGHTER_JOINTS] {
+        &self.weights
+    }
+
+    /// True while the plan holds a legal state: settled inside the bar, the
+    /// gait carries the body, no lost joint drives and no kept joint passes
+    /// its limit.
+    pub fn is_legal(&self) -> bool {
+        if self.elapsed < self.settle_ticks || !self.supported {
+            return false;
+        }
+        self.weights.iter().enumerate().all(|(joint, w)| {
+            if self.lost[joint] {
+                *w == 0
+            } else {
+                *w >= STANCE_MIN && *w <= JOINT_LIMIT[joint]
+            }
+        })
+    }
+
+    /// Advance one tick and re-ramp; returns [`Self::is_legal`] for this tick.
+    /// Pure integer work: no allocation, no clock.
+    pub fn tick(&mut self) -> bool {
+        if self.elapsed < LEGAL_TICKS {
+            self.elapsed += 1;
+        }
+        for joint in 0..FIGHTER_JOINTS {
+            self.weights[joint] = if self.lost[joint] {
+                0
+            } else {
+                ramp(
+                    STANCE_MIN,
+                    self.target[joint],
+                    self.elapsed,
+                    self.settle_ticks,
+                )
+            };
+        }
+        self.is_legal()
+    }
+
+    /// Tick up to [`LEGAL_TICKS`] and report how many ticks the legal state
+    /// took; `None` means the plan never settled (a broken gait or support).
+    pub fn run_to_legal(&mut self) -> Option<u8> {
+        for _ in 0..LEGAL_TICKS {
+            if self.tick() {
+                return Some(self.elapsed);
+            }
+        }
+        None
+    }
+
+    /// Materialize this tick's drives as a [`MaskTable`] for
+    /// [`apply_override`](super::layers::apply_override): one table per call,
+    /// built on the loss event and reused while the ramp bytes hold.
+    pub fn to_mask(&self) -> Result<MaskTable, InjuredError> {
+        Ok(MaskTable::from_vec(self.weights.to_vec())?)
+    }
+}
+
+/// Stable digest of a staged tick: gait, ramp bytes, elapsed and settle. Same
+/// losses plus same seed hash the same at the same tick.
+pub fn digest_staged(staged: &Staged) -> u64 {
+    let mut h = Fnv64::new();
+    h.write_u64(u64::from(staged.gait.code()));
+    for w in staged.weights {
+        h.write_u64(u64::from(w));
+    }
+    h.write_u64(u64::from(staged.elapsed));
+    h.write_u64(u64::from(staged.settle_ticks));
+    h.write_bool(staged.supported);
+    h.finish()
+}
+
 /// Intersect two masks joint-wise (per-joint minimum): how the rebuilt table
 /// meets the hit-react mask so a lost joint stays dropped under any layer.
 /// Widths must agree; steady-state ticks reuse the output table.
@@ -366,6 +677,30 @@ mod tests {
                     !stance_contains(a.contacts()[0], a.contacts()[1], [5.0, 5.0]),
                     "far point fails the polygon"
                 );
+                // The gait plan settles inside the BX5 bar, and no ramped lane
+                // sits over its limit or on a T-pose.
+                let mut plan = Staged::single(loss, s).expect("gait plan stages");
+                assert_eq!(
+                    plan.run_to_legal(),
+                    Some(plan.settle_ticks()),
+                    "loss {joint} seed {s}: legal inside 20 ticks"
+                );
+                assert_eq!(plan.gait(), Gait::for_loss(loss));
+                for (lane, w) in plan.weights().iter().enumerate() {
+                    if lane == joint {
+                        assert_eq!(*w, 0, "loss {joint} seed {s}: lost lane stays 0");
+                    } else {
+                        assert!(
+                            *w >= STANCE_MIN && *w <= JOINT_LIMIT[lane],
+                            "loss {joint} seed {s}: lane {lane} inside its limit"
+                        );
+                    }
+                }
+                assert_eq!(
+                    plan.to_mask().expect("staged mask builds").weight(joint),
+                    0,
+                    "loss {joint} seed {s}: staged mask drops the lane"
+                );
                 let both = compose(a.mask(), &hit).expect("masks compose");
                 assert_eq!(both.weight(joint), 0, "lost joint stays dropped under hit");
                 let d = digest(&a);
@@ -442,5 +777,212 @@ mod tests {
             InjuredError::BadJoint(FIGHTER_JOINTS)
         );
         assert_eq!(untouched, base);
+    }
+
+    /// Walk a plan tick by tick and return the ticks it took to turn legal.
+    fn walk_to_legal(plan: &mut Staged) -> Option<u8> {
+        for tick in 1..=LEGAL_TICKS {
+            let legal_now = plan.tick();
+            assert_eq!(plan.elapsed(), tick, "elapsed follows the tick");
+            if legal_now {
+                return Some(tick);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn injured_hop_reaches_legal_state_within_20_ticks() {
+        // 60 seeds per lost leg: the hop settles inside the bar on every one,
+        // then repeats byte for byte on a second plan.
+        for (loss, kept) in [(Loss::LegL, 1usize), (Loss::LegR, 0usize)] {
+            let lost = loss.joint();
+            for seed in 300..360u64 {
+                let rebuilt = rebuild_single(loss, seed).expect("leg loss rebuilds");
+                assert!(rebuilt.contacts()[kept], "seed {seed}: kept foot down");
+                assert!(!rebuilt.contacts()[1 - kept], "seed {seed}: lost leg up");
+                let mut hop = Staged::single(loss, seed).expect("hop stages");
+                assert_eq!(hop.gait(), Gait::Hop);
+                assert!(hop.settle_ticks() >= SETTLE_MIN && hop.settle_ticks() <= LEGAL_TICKS);
+                // The loss tick holds the safe floor: no T-pose, no snap.
+                assert!(!hop.is_legal(), "seed {seed}: not legal before a tick");
+                assert_eq!(hop.weight(lost), 0, "seed {seed}: lost leg stays dropped");
+                for lane in 0..FIGHTER_JOINTS {
+                    if lane != lost {
+                        assert_eq!(hop.weight(lane), STANCE_MIN, "seed {seed}: floor start");
+                    }
+                }
+                let ticks = walk_to_legal(&mut hop);
+                assert_eq!(
+                    ticks,
+                    Some(hop.settle_ticks()),
+                    "seed {seed}: legal at settle"
+                );
+                assert!(hop.is_legal(), "seed {seed}: hop is legal");
+                // The ramp finishes inside the first hop cycle, so the push is
+                // never taken on a half-ramped pose.
+                assert!(hop.settle_ticks() <= Gait::Hop.cycle_ticks());
+                for (lane, w) in hop.weights().iter().enumerate() {
+                    if lane == lost {
+                        assert_eq!(*w, 0, "seed {seed}: lost lane stays 0");
+                    } else {
+                        assert!(
+                            *w >= STANCE_MIN && *w <= JOINT_LIMIT[lane],
+                            "seed {seed}: lane {lane} inside its limit"
+                        );
+                    }
+                }
+                // The staged table feeds the layers path with the leg dropped.
+                let mask = hop.to_mask().expect("staged mask builds");
+                assert_eq!(mask.weight(lost), 0);
+                let base = bind_pose();
+                let mut over = base.clone();
+                for p in &mut over.positions {
+                    p[0] += 1.0;
+                }
+                let mut out = base.clone();
+                super::super::layers::apply_override(&base, &over, &mask, &mut out)
+                    .expect("staged mask drives the layers path");
+                assert_eq!(out.positions[lost], base.positions[lost]);
+                // Same loss plus same seed replays the same ticks.
+                let mut again = Staged::single(loss, seed).expect("hop stages again");
+                let _ = walk_to_legal(&mut again);
+                assert_eq!(digest_staged(&hop), digest_staged(&again));
+                assert_eq!(hop, again);
+            }
+        }
+    }
+
+    #[test]
+    fn injured_one_arm_guard_reaches_legal_state_within_20_ticks() {
+        let mut capped = 0u32;
+        for (loss, kept_arm) in [(Loss::ArmL, ARM_R), (Loss::ArmR, ARM_L)] {
+            let lost = loss.joint();
+            for seed in 400..460u64 {
+                let rebuilt = rebuild_single(loss, seed).expect("arm loss rebuilds");
+                assert_eq!(
+                    rebuilt.contacts(),
+                    [true, true],
+                    "both feet carry the guard"
+                );
+                let mut guard = Staged::single(loss, seed).expect("guard stages");
+                assert_eq!(guard.gait(), Gait::Guard);
+                assert_eq!(walk_to_legal(&mut guard), Some(guard.settle_ticks()));
+                assert!(guard.is_legal(), "seed {seed}: guard is legal");
+                assert_eq!(guard.weight(lost), 0, "seed {seed}: lost arm stays dropped");
+                let kept = guard.weight(kept_arm);
+                assert!(
+                    kept >= STANCE_MIN && kept <= JOINT_LIMIT[kept_arm],
+                    "seed {seed}: guard arm inside its limit"
+                );
+                if kept == JOINT_LIMIT[kept_arm] {
+                    capped += 1;
+                }
+            }
+        }
+        // The arm cap bites: some seed drives the lone arm into its limit.
+        assert!(capped > 0, "the guard arm cap is reached by some seed");
+    }
+
+    #[test]
+    fn injured_torso_loss_falls_to_legal_state_within_20_ticks() {
+        for loss in [Loss::Pelvis, Loss::Spine] {
+            let lost = loss.joint();
+            for seed in 500..560u64 {
+                let rebuilt = rebuild_single(loss, seed).expect("torso loss rebuilds");
+                let mut fall = Staged::single(loss, seed).expect("fall stages");
+                assert_eq!(fall.gait(), Gait::Fall);
+                assert!(fall.gait().grounded(), "the floor bears a dropped torso");
+                assert!(Gait::Fall.cycle_ticks() == 0, "a fall has no gait cycle");
+                assert!(
+                    gait_supported(Gait::Fall, rebuilt.contacts(), rebuilt.com()),
+                    "seed {seed}: the trunk stays over the band"
+                );
+                assert_eq!(walk_to_legal(&mut fall), Some(fall.settle_ticks()));
+                assert_eq!(fall.weight(lost), 0, "seed {seed}: lost torso lane stays 0");
+                assert!(
+                    !gait_supported(Gait::Fall, rebuilt.contacts(), [0.9, 0.0]),
+                    "a trunk far off the band is never supported"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gait_names_the_limbs_that_still_carry() {
+        assert_eq!(Gait::for_loss(Loss::LegL), Gait::Hop);
+        assert_eq!(Gait::for_loss(Loss::LegR), Gait::Hop);
+        assert_eq!(Gait::for_loss(Loss::ArmL), Gait::Guard);
+        assert_eq!(Gait::for_loss(Loss::ArmR), Gait::Guard);
+        assert_eq!(Gait::for_loss(Loss::Spine), Gait::Fall);
+        assert_eq!(Gait::for_loss(Loss::Pelvis), Gait::Fall);
+        assert_eq!(Gait::for_losses(&[]), Gait::Stand);
+        assert_eq!(Gait::for_losses(&[Loss::LegL, Loss::LegR]), Gait::Crawl);
+        assert_eq!(Gait::for_losses(&[Loss::ArmL, Loss::ArmR]), Gait::Stand);
+        assert_eq!(Gait::for_losses(&[Loss::LegL, Loss::ArmL]), Gait::Hop);
+        assert_eq!(Gait::for_losses(&[Loss::ArmL, Loss::Spine]), Gait::Fall);
+        assert_eq!(Gait::for_losses(&[Loss::Pelvis, Loss::LegR]), Gait::Fall);
+        // Every gait but the fall has a cycle, and codes stay stable bytes.
+        for (gait, code) in [
+            (Gait::Stand, 0u8),
+            (Gait::Hop, 1),
+            (Gait::Guard, 2),
+            (Gait::Fall, 3),
+            (Gait::Crawl, 4),
+        ] {
+            assert_eq!(gait.code(), code);
+            assert_eq!(gait.grounded(), cycle_is_grounded(gait));
+        }
+        assert!(Gait::Hop.cycle_ticks() > 0);
+        assert!(Gait::Crawl.cycle_ticks() > Gait::Hop.cycle_ticks());
+    }
+
+    fn cycle_is_grounded(gait: Gait) -> bool {
+        matches!(gait, Gait::Fall | Gait::Crawl)
+    }
+
+    #[test]
+    fn staged_refuses_bad_input_names_cause() {
+        let mask = rebuild_single(Loss::ArmL, 7)
+            .expect("arm loss rebuilds")
+            .mask()
+            .clone();
+        let com = [0.0, 0.0];
+        // Zero and three losses are outside BX5's one-or-two world.
+        let none: [Loss; 0] = [];
+        assert_eq!(
+            Staged::from_parts(&none, &mask, [true, true], com, 7).unwrap_err(),
+            InjuredError::LossCount { got: 0 }
+        );
+        assert_eq!(
+            Staged::from_parts(
+                &[Loss::ArmL, Loss::ArmR, Loss::LegL],
+                &mask,
+                [true, true],
+                com,
+                7
+            )
+            .unwrap_err(),
+            InjuredError::LossCount { got: 3 }
+        );
+        let narrow = MaskTable::full(3).expect("narrow mask");
+        assert_eq!(
+            Staged::from_parts(&[Loss::ArmL], &narrow, [true, true], com, 7).unwrap_err(),
+            InjuredError::Layer(crate::graph::GraphError::LengthMismatch {
+                expected: FIGHTER_JOINTS,
+                got: 3,
+            })
+        );
+        // A non-finite COM stages but never turns legal, so it cannot fake a
+        // supported gait.
+        let mut lost_ground =
+            Staged::from_parts(&[Loss::ArmL], &mask, [true, true], [f32::NAN, 0.0], 7)
+                .expect("a NaN COM stages, it just never holds");
+        assert_eq!(lost_ground.run_to_legal(), None);
+        assert!(!lost_ground.is_legal());
+        assert!(InjuredError::LossCount { got: 3 }.to_string().contains('3'));
+        assert!(InjuredError::LossCount { got: 3 }
+            .to_string()
+            .contains("BX5"));
     }
 }
