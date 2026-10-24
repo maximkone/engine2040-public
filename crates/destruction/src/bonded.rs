@@ -13,9 +13,13 @@ use engine_core::Fnv64;
 
 pub use crate::bake3d::Chunk3;
 pub use blast::MAX_BLAST_RADIUS_MM;
+pub use sag::{SagRules, MAX_OVERLOAD_RATE, MAX_SAG_TICKS, SAG_Q16_ONE};
 
 /// An authority explosion applied as impacts through the same bond rule.
 mod blast;
+/// Staged collapse: links sag under overload and unsupported clusters hang
+/// a few ticks before they fall. Opt-in; off by default.
+mod sag;
 /// Canonical snapshot bytes and restore of the moving state (rollback resim).
 mod snapshot;
 
@@ -94,8 +98,8 @@ impl BondedDesc {
         }
         let n = self.chunks.len();
         for (i, bond) in self.bonds.iter().enumerate() {
-            let (a, b) = (bond.a as usize, bond.b as usize);
-            let ends_ok = u64::from(bond.a) < n as u64 && u64::from(bond.b) < n as u64;
+            let (a, b) = (slot(bond.a), slot(bond.b));
+            let ends_ok = a < n && b < n;
             if !ends_ok || a == b {
                 return Err(BreakError::BadBond(i));
             }
@@ -119,8 +123,8 @@ impl BondedDesc {
             }
         }
         for anchor in &self.anchors {
-            if u64::from(*anchor) >= n as u64 {
-                return Err(BreakError::BadChunk(*anchor as usize));
+            if slot(*anchor) >= n {
+                return Err(BreakError::BadChunk(slot(*anchor)));
             }
         }
         if !self.break_threshold.is_finite()
@@ -196,6 +200,8 @@ pub enum BreakError {
     BadImpulse,
     /// Blast radius zero or past `MAX_BLAST_RADIUS_MM`, or a center outside the world.
     BadBlast,
+    /// Sag rules with a stage past `MAX_SAG_TICKS`, or the link rule on with no stress ticks.
+    BadSag,
     /// Snapshot bytes are truncated, versioned wrong, of another shape,
     /// non-finite or trailing.
     BadSnapshot,
@@ -213,6 +219,7 @@ impl core::fmt::Display for BreakError {
             BreakError::BadStrain => write!(f, "strain amount is out of bounds"),
             BreakError::BadImpulse => write!(f, "impact impulse is out of bounds"),
             BreakError::BadBlast => write!(f, "blast radius or center is out of bounds"),
+            BreakError::BadSag => write!(f, "sag rules are out of bounds"),
             BreakError::BadSnapshot => write!(f, "bonded snapshot bytes are not valid"),
         }
     }
@@ -267,6 +274,8 @@ pub struct BondedCollection {
     capacity_q16: u64,
     /// Chunks failing in the current wave; pre-sized scratch.
     wave_scratch: Vec<usize>,
+    /// Staged-collapse state; `None` (the default) keeps the plain step.
+    sag: Option<Box<sag::SagState>>,
 }
 
 impl BondedCollection {
@@ -306,6 +315,7 @@ impl BondedCollection {
             layer: vec![NO_LAYER; n],
             capacity_q16: 0,
             wave_scratch: Vec::with_capacity(n),
+            sag: None,
         };
         field.flood_loads();
         Ok(field)
@@ -338,8 +348,8 @@ impl BondedCollection {
             for b in (a + 1)..chunks.len() {
                 if in_contact(&chunks[a], &chunks[b]) {
                     bonds.push(Bond {
-                        a: a as u32,
-                        b: b as u32,
+                        a: wire(a),
+                        b: wire(b),
                         breaking_strain: DEFAULT_BOND_STRAIN,
                     });
                 }
@@ -353,7 +363,7 @@ impl BondedCollection {
         let mut anchors = Vec::new();
         for (i, c) in chunks.iter().enumerate() {
             if (c.y - c.hy) - bottom <= ANCHOR_EPS_M {
-                anchors.push(i as u32);
+                anchors.push(wire(i));
             }
         }
         Self::new(&BondedDesc {
@@ -397,7 +407,7 @@ impl BondedCollection {
             if self.bond_broken[bi] {
                 continue;
             }
-            let (a, b) = (self.bonds[bi].a as usize, self.bonds[bi].b as usize);
+            let (a, b) = (slot(self.bonds[bi].a), slot(self.bonds[bi].b));
             if a != chunk && b != chunk {
                 continue;
             }
@@ -417,7 +427,7 @@ impl BondedCollection {
                 broke_any = true;
                 self.log.push(BreakEvent::BondBroken {
                     tick,
-                    bond: bi as u32,
+                    bond: wire(bi),
                     strain: self.strain[bi],
                 });
             }
@@ -445,7 +455,7 @@ impl BondedCollection {
             self.bond_broken[bond] = true;
             self.log.push(BreakEvent::BondBroken {
                 tick,
-                bond: bond as u32,
+                bond: wire(bond),
                 strain: self.strain[bond],
             });
             self.refresh_support(tick);
@@ -464,6 +474,9 @@ impl BondedCollection {
         self.refresh_support(self.tick);
         if self.capacity_q16 != 0 {
             self.fail_overloaded(self.tick);
+        }
+        if self.sag.is_some() {
+            self.advance_sag(self.tick);
         }
         let (chunks, vel) = (&mut self.chunks, &mut self.vel);
         for i in 0..chunks.len() {
@@ -707,6 +720,8 @@ impl BondedCollection {
             return Err(BreakError::BadChunk(chunk));
         }
         let mut copy = self.clone();
+        // The forecast is the eventual outcome: no hang delay, no link stress.
+        copy.sag = None;
         copy.sever_chunk(chunk, self.tick)?;
         // Each wave fails at least one chunk, so the waves end within n.
         for _ in 0..copy.chunks.len() {
@@ -824,8 +839,9 @@ impl BondedCollection {
     /// [`Self::work_scratch`] list, so steady refreshes allocate nothing.
     fn refresh_support(&mut self, tick: u32) {
         self.flood_loads();
+        let defer = self.defers_free();
         for i in 0..self.chunks.len() {
-            if !self.support_scratch[i] && !self.freed[i] {
+            if !self.support_scratch[i] && !self.freed[i] && !defer {
                 self.freed[i] = true;
                 self.dynamic[i] = true;
                 self.log.push(BreakEvent::ChunkFreed {
@@ -972,8 +988,9 @@ fn mass_to_q16(mass: f32) -> u64 {
         return u64::MAX;
     }
     // Validated masses are finite and positive, so the rounded value is a
-    // non-negative integer in range; the floor keeps light chunks counted.
-    (scaled as u64).max(1)
+    // non-negative integer in range; the floor keeps light chunks counted. The
+    // named core conversion replaces the bare truncating cast.
+    engine_core::checked::saturating_f64_to_u64(scaled).max(1)
 }
 
 /// Sorted adjacency in compressed form: offsets per chunk plus
@@ -1053,6 +1070,17 @@ mod tests {
     use crate::bake3d::fracture3;
     use engine_core::alloc_probe::measure;
     use engine_core::laws;
+
+    #[test]
+    fn casts_keep_the_bonded_digests() {
+        // Pinned from the code before the CQ10 cast pass on `bonded.rs`: the load receipt and
+        // the collection state hash must not move.
+        let field = BondedCollection::new(&chain_desc()).expect("valid chain");
+        assert_eq!(
+            (field.load_digest(), field.state_hash()),
+            (2930726794485306885u64, 3418704538473639523u64)
+        );
+    }
 
     fn baked_chunks() -> Vec<Chunk3> {
         fracture3(0.0, 2.0, 0.0, 1.0, 1.0, 1.0, 6, 11)

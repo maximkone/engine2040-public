@@ -138,9 +138,229 @@ impl Receipt {
     }
 }
 
+/// What an agent claims about its own work (AD21). `Landed` says the write
+/// changed the document, `Confirmed` says a later check read it back clean,
+/// `Viewed` says a capture or view read showed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    Landed,
+    Confirmed,
+    Viewed,
+}
+
+/// What the journal and the read log hold for the receipt key a claim rests
+/// on. A key the journal no longer holds is `Unknown`, never backed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRecord {
+    /// The journal holds no entry for this key.
+    Unknown,
+    /// A preview key: staged for a dry run, never applied.
+    Preview,
+    /// An apply receipt: the revision it landed at, the staged content digest
+    /// and the digest read back after the write.
+    Applied {
+        revision: u64,
+        staged: [u8; 32],
+        after: [u8; 32],
+    },
+}
+
+/// One read the log kept: the revision it read at, how many checks ran, how
+/// many findings they raised, and whether it was a capture or view read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadRecord {
+    pub revision: u64,
+    pub checks_run: u32,
+    pub findings: u32,
+    pub view: bool,
+}
+
+/// The answer to a claim check: backed, unknown, or refused with the missing
+/// proof named and one live verb to go and get it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimVerdict {
+    Backed,
+    /// The key is not in the journal any more: nothing to check against.
+    Unknown,
+    /// The claim is not backed: `missing` names the proof, `next` the verb
+    /// that produces it.
+    Refused {
+        missing: &'static str,
+        next: &'static str,
+    },
+}
+
+/// Refusal code for a claim with no backing proof.
+pub const CLAIM_NOT_BACKED: &str = "claim_not_backed";
+
+/// Check one claim against what the journal and the read log hold (AD21).
+///
+/// Pure and read-only: the caller gathers the record and the reads, this
+/// function answers. `landed` needs an apply receipt whose staged and read
+/// back digests are equal; a preview key never claims it. `confirmed` needs
+/// an apply at revision `r` and a read at `r` with checks run and no
+/// findings. `viewed` needs a capture or view read at the key's revision.
+pub fn claim_check(claim: Claim, key: KeyRecord, reads: &[ReadRecord]) -> ClaimVerdict {
+    let refused =
+        |missing: &'static str, next: &'static str| ClaimVerdict::Refused { missing, next };
+    match (claim, key) {
+        (_, KeyRecord::Unknown) => ClaimVerdict::Unknown,
+        (Claim::Landed, KeyRecord::Preview) => refused(
+            "an apply receipt for this key; a preview key never lands",
+            "tx.apply",
+        ),
+        (Claim::Landed, KeyRecord::Applied { staged, after, .. }) => {
+            if staged == after {
+                ClaimVerdict::Backed
+            } else {
+                refused(
+                    "an apply whose read-back digest equals the staged digest",
+                    "scene.read",
+                )
+            }
+        }
+        (Claim::Confirmed | Claim::Viewed, KeyRecord::Preview) => refused(
+            "an apply receipt for this key before any read of it",
+            "tx.apply",
+        ),
+        (Claim::Confirmed, KeyRecord::Applied { revision, .. }) => {
+            let clean = reads.iter().any(|read| {
+                !read.view && read.revision == revision && read.checks_run > 0 && read.findings == 0
+            });
+            if clean {
+                ClaimVerdict::Backed
+            } else {
+                refused(
+                    "a later read at this revision with checks run and no findings",
+                    "scene.spatial",
+                )
+            }
+        }
+        (Claim::Viewed, KeyRecord::Applied { revision, .. }) => {
+            let viewed = reads
+                .iter()
+                .any(|read| read.view && read.revision == revision);
+            if viewed {
+                ClaimVerdict::Backed
+            } else {
+                refused("a capture or view read at this revision", "capture")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn applied(revision: u64, staged: u8, after: u8) -> KeyRecord {
+        KeyRecord::Applied {
+            revision,
+            staged: [staged; 32],
+            after: [after; 32],
+        }
+    }
+
+    fn checked_read(revision: u64) -> ReadRecord {
+        ReadRecord {
+            revision,
+            checks_run: 4,
+            findings: 0,
+            view: false,
+        }
+    }
+
+    #[test]
+    fn claim_check_preview_key_never_claims_landed() {
+        let verdict = claim_check(Claim::Landed, KeyRecord::Preview, &[]);
+        assert!(
+            matches!(verdict, ClaimVerdict::Refused { .. }),
+            "{verdict:?}"
+        );
+        assert_ne!(verdict, ClaimVerdict::Backed);
+    }
+
+    #[test]
+    fn claim_check_apply_with_equal_digests_is_backed() {
+        assert_eq!(
+            claim_check(Claim::Landed, applied(3, 7, 7), &[]),
+            ClaimVerdict::Backed
+        );
+    }
+
+    #[test]
+    fn claim_check_confirmed_needs_a_later_checked_read() {
+        let key = applied(3, 7, 7);
+        let none = claim_check(Claim::Confirmed, key, &[]);
+        assert!(
+            matches!(none, ClaimVerdict::Refused { .. }),
+            "no read: {none:?}"
+        );
+        let found = claim_check(Claim::Confirmed, key, &[checked_read(3)]);
+        assert_eq!(found, ClaimVerdict::Backed);
+        // A read at another revision, or with findings, does not back it.
+        let other_rev = claim_check(Claim::Confirmed, key, &[checked_read(2)]);
+        assert!(matches!(other_rev, ClaimVerdict::Refused { .. }));
+        let dirty = ReadRecord {
+            findings: 1,
+            ..checked_read(3)
+        };
+        assert!(matches!(
+            claim_check(Claim::Confirmed, key, &[dirty]),
+            ClaimVerdict::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn claim_check_one_flipped_digest_byte_flips_the_answer() {
+        let mut after = [7u8; 32];
+        after[31] ^= 1;
+        let flipped = KeyRecord::Applied {
+            revision: 3,
+            staged: [7u8; 32],
+            after,
+        };
+        assert_eq!(
+            claim_check(Claim::Landed, applied(3, 7, 7), &[]),
+            ClaimVerdict::Backed
+        );
+        assert!(matches!(
+            claim_check(Claim::Landed, flipped, &[]),
+            ClaimVerdict::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn claim_check_unknown_key_answers_unknown_never_backed() {
+        for claim in [Claim::Landed, Claim::Confirmed, Claim::Viewed] {
+            let verdict = claim_check(claim, KeyRecord::Unknown, &[checked_read(3)]);
+            assert_eq!(verdict, ClaimVerdict::Unknown, "{claim:?}");
+        }
+    }
+
+    #[test]
+    fn claim_check_every_refusal_names_a_live_verb() {
+        let keys = [KeyRecord::Preview, applied(3, 7, 8), applied(3, 7, 7)];
+        for key in keys {
+            for claim in [Claim::Landed, Claim::Confirmed, Claim::Viewed] {
+                if let ClaimVerdict::Refused { missing, next } = claim_check(claim, key, &[]) {
+                    assert!(!missing.is_empty(), "the proof is named");
+                    assert!(
+                        crate::tools::lookup(next).is_some(),
+                        "next `{next}` is a registered verb"
+                    );
+                }
+            }
+        }
+        assert_eq!(CLAIM_NOT_BACKED, "claim_not_backed");
+    }
+
+    #[test]
+    fn claim_check_equal_bytes_twice() {
+        let a = format!("{:?}", claim_check(Claim::Viewed, applied(3, 7, 7), &[]));
+        let b = format!("{:?}", claim_check(Claim::Viewed, applied(3, 7, 7), &[]));
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn envelope_carries_recovery() {

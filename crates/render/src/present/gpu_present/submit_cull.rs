@@ -133,7 +133,7 @@ pub(super) const GPU_CULL_ENV: &str = "E2040_GPU_CULL";
 /// The flag as a bool, from the raw env value. Named so a test reads the
 /// parse without touching the process environment.
 pub(super) fn gpu_cull_flag_value(value: Option<&str>) -> bool {
-    matches!(value, Some("1") | Some("true"))
+    matches!(value, Some("1" | "true"))
 }
 
 /// Is the GPU cull plan asked for this frame? Read once per submit.
@@ -223,9 +223,8 @@ pub(super) fn gpu_submit_order(
     if slots == 0 {
         return None;
     }
-    for slot in 0..slots {
-        let draw = sorted[slot];
-        plan.spheres[slot] = bounds.spheres.get(draw).copied().unwrap_or([0.0; 4]);
+    for (slot, draw) in sorted.iter().enumerate().take(slots) {
+        plan.spheres[slot] = bounds.spheres.get(*draw).copied().unwrap_or([0.0; 4]);
         plan.flags[slot] = 0;
     }
     let packed =
@@ -233,8 +232,8 @@ pub(super) fn gpu_submit_order(
     if packed != slots {
         return None;
     }
-    for slot in 0..slots {
-        if !bounds.cullable.get(sorted[slot]).copied().unwrap_or(false) {
+    for (slot, draw) in sorted.iter().enumerate().take(slots) {
+        if !bounds.cullable.get(*draw).copied().unwrap_or(false) {
             plan.flags[slot] = 1;
         }
     }
@@ -242,9 +241,9 @@ pub(super) fn gpu_submit_order(
     plan.args = crate::draw::indirect_args_5(count);
     plan.packed = slots;
     plan.submitted = 0;
-    for slot in 0..slots {
+    for (slot, draw) in sorted.iter().enumerate().take(slots) {
         if plan.flags[slot] == 1 {
-            plan.order[plan.submitted] = sorted[slot];
+            plan.order[plan.submitted] = *draw;
             plan.submitted += 1;
         }
     }
