@@ -287,8 +287,7 @@ pub struct KitPiece {
     /// Source triangle count of the merged mesh.
     pub triangles: u64,
     /// The import's 128 px RGBA8 thumbnail, cooked from its base-colour map
-    /// (else its first map) at [`THUMB_EDGE`] px.
-    /// [`THUMB_EDGE`]: crate::thumb_cook::THUMB_EDGE
+    /// (else its first map) at `THUMB_EDGE` px.
     /// `None` when the piece carries no map, or when the codec refuses the one
     /// it carries: a preview never fails an import, and the browser draws its
     /// placeholder instead of a fake image.
