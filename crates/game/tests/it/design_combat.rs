@@ -312,9 +312,10 @@ fn every_counter_code_names_a_live_outcome() {
 /// ADR 0010, the parry 8 to 13 sweep: a parry must never cover a whole
 /// move's tell, so the window stays below the fastest weapon's startup in
 /// `weapons.rows` (`docs/design/FORMAT.md`: startup counts up to and
-/// including the first active tick). Candidates 12 and 13 cover the
-/// pugio's whole 12-tick tell; the shipped v2 window sits below it. The
-/// 8-tick house cap is held by `v2_parry_window_shorter_than_startup`.
+/// including the first active tick). The pugio's tell is 24 ticks (OPT59
+/// doubled the weapon rows with the readable 30-tick startup); the shipped
+/// v2 window sits far below it. The 8-tick house cap is held by
+/// `v2_parry_window_shorter_than_startup`.
 #[test]
 fn parry_window_stays_below_the_fastest_tell() {
     let (_, rows) = weapons_parse_table(WEAPONS_SRC);
@@ -342,11 +343,12 @@ fn parry_window_stays_below_the_fastest_tell() {
 ///   gate needs a cost).
 ///
 /// The sweep's numbers are pasted in `docs/adr/0010-parry-window.md`: with the
-/// readable 30-tick startup and the pugio's 12-tick tell, candidates 12 and 13
-/// fall to the tell gate, 8 to 11 pass it, the half gate (a window no wider
-/// than half the tell) no longer binds because 13 * 2 = 26 <= 30, and the
-/// shipped 7 covers 266 permille (8 of 30 ticks) inside both gates. This test
-/// holds that verdict.
+/// readable 30-tick startup and the pugio's 24-tick tell (the weapon rows are
+/// the old 12-24 doubled), no candidate from 8 to 13 falls to either gate: the
+/// tell gate stops at 23 ticks, the half gate (a window no wider than half the
+/// tell) at 15, so the half gate now sets the widest window, and the shipped 7
+/// covers 266 permille (8 of 30 ticks) well inside both. This test holds that
+/// verdict.
 #[test]
 fn parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on() {
     let (_, rows) = weapons_parse_table(WEAPONS_SRC);
@@ -383,8 +385,8 @@ fn parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on() {
     }
     assert_eq!(
         (fell_to_tell, fell_to_half),
-        (2, 0),
-        "candidates 12 and 13 swallow the {}'s {fastest}-tick tell; no candidate 8 to 13 answers more than half the {startup}-tick tell",
+        (0, 0),
+        "no candidate 8 to 13 swallows the {}'s {fastest}-tick tell or answers more than half the {startup}-tick tell",
         fastest_row.id
     );
     // The widest window both gates allow, and the row that ships.
@@ -392,18 +394,19 @@ fn parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on() {
         .filter(|window| window * 2 <= startup && *window < fastest)
         .max()
         .expect("some window fits both gates");
-    assert_eq!(widest, 11, "the tell gate stops the window at 11 ticks");
+    assert_eq!(widest, 15, "the half gate stops the window at 15 ticks");
     assert!(
         TABLES_V2.parry_window_ticks <= widest,
         "the shipped parry {} must sit inside the widest window both gates allow ({widest})",
         TABLES_V2.parry_window_ticks
     );
     // The number the sweep decided on: covered press ticks of the tell, in
-    // permille, for the shipped row as measured by its own tapes.
+    // permille, for the shipped row as measured by its own tapes. The first
+    // parrying press is tick 23 (30 - 7); the 8 covered ticks are 23..=30.
     let (earliest, covered) = parry_span(&TABLES_V2);
     assert_eq!(
         (earliest, covered, covered * 1000 / startup),
-        (8, 8, 266),
+        (23, 8, 266),
         "the shipped parry {} covers {covered} of {startup} tell ticks",
         TABLES_V2.parry_window_ticks
     );
@@ -548,6 +551,11 @@ fn weapons_parse_line(line_text: &str, line: usize) -> WeaponRow {
             "recovery_ticks" => recovery = Some(parsed),
             "punish_ticks" => punish = Some(parsed),
             "mass_g" => mass = Some(parsed),
+            // BG15: the optional arrival wear of the edge, parts of a dulled edge.
+            "edge_wear_permille" => assert!(
+                parsed <= 1000,
+                "line {line}: edge_wear_permille {parsed} must fit 0..=1000"
+            ),
             _ => panic!("line {line}: unknown key `{k}`"),
         }
     }
@@ -752,8 +760,8 @@ fn every_move_carries_frame_data() {
             row.recovery_ticks
         );
         assert!(
-            row.speed_ticks + row.active_ticks + row.recovery_ticks <= 60,
-            "line {}: weapon `{}` startup+active+recovery {} must fit 60 ticks",
+            row.speed_ticks + row.active_ticks + row.recovery_ticks <= 120,
+            "line {}: weapon `{}` startup+active+recovery {} must fit 120 ticks (two seconds)",
             row.line,
             row.id,
             row.speed_ticks + row.active_ticks + row.recovery_ticks
