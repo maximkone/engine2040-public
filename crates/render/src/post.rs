@@ -178,6 +178,8 @@ mod taa;
 pub use taa::*;
 mod upscale;
 pub use upscale::*;
+mod fsr1;
+pub use fsr1::fsr1_easu;
 mod chain;
 pub use chain::*;
 pub(crate) mod auto_exposure;

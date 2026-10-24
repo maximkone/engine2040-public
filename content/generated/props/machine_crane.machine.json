@@ -1,0 +1,26 @@
+{
+  "bounds_m": {
+    "max": [
+      0.7495,
+      0.3772,
+      2.2774
+    ],
+    "min": [
+      -0.5943,
+      -0.3772,
+      0.0
+    ]
+  },
+  "budget": 5000,
+  "faces": 363,
+  "materials": [
+    "iron",
+    "tarp",
+    "wood"
+  ],
+  "preset": "crane",
+  "seed": "7",
+  "sha256": "60983ef821733b9d3f08be034823d84548c56413e9a8dc37ffa8fb09b540ea2d",
+  "tris": 770,
+  "verts": 994
+}
