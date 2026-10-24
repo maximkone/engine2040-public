@@ -81,6 +81,13 @@ pub enum Error {
     },
     /// The skeleton, pose or bone list failed the animation contract.
     Anim(AnimError),
+    /// A pose slice whose bone count differs from the ragdoll's; expected + got carried.
+    PoseLength {
+        /// Bones on the ragdoll.
+        expected: usize,
+        /// Bones the shorter slice carried.
+        got: usize,
+    },
 }
 
 impl Display for Error {
@@ -94,6 +101,9 @@ impl Display for Error {
             Error::UnknownBone { name } => write!(f, "`{name}` is not a bone of this body"),
             Error::UncuttableJoint { joint } => write!(f, "`{joint}` may not be cut"),
             Error::Anim(e) => write!(f, "invalid skeleton, pose or bones: {e:?}"),
+            Error::PoseLength { expected, got } => {
+                write!(f, "pose has {got} bones, the ragdoll has {expected}")
+            }
         }
     }
 }

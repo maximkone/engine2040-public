@@ -60,4 +60,23 @@ mod tests {
             4 * i64::from(big) * i64::from(big)
         );
     }
+
+    #[test]
+    fn cross3_takes_each_component_exactly() {
+        // (2*6 - 3*5, 3*4 - 1*6, 1*5 - 2*4): every product and difference is distinct.
+        assert_eq!(cross3([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), [-3.0, 6.0, -3.0]);
+    }
+
+    #[test]
+    fn dist2_sums_each_squared_difference() {
+        // Differences -3, -4, -6: 9 + 16 + 36.
+        assert_eq!(dist2([1.0, 2.0, 3.0], [4.0, 6.0, 9.0]), 61.0);
+    }
+
+    #[test]
+    fn orient2_subtracts_the_origin_from_every_point() {
+        // Off the origin the differences are not the raw coordinates:
+        // (3, 4) x (2, 7) = 21 - 8.
+        assert_eq!(orient2((1, 2), (4, 6), (3, 9)), 13);
+    }
 }
