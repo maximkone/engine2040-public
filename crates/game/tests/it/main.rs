@@ -27,3 +27,4 @@ mod legionary_slice;
 mod lobby_ui_flow;
 mod rome_numbers;
 mod rome_spec_drift;
+mod scene_cli;
