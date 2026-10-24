@@ -96,6 +96,27 @@ everything hanging below it in the tree (doc at `bonded.rs:218-221`). `fail_over
 capacity is set: one wave per tick, time-sliced (`capacity_rule_fails_one_wave_per_tick_and_matches_the_prediction`,
 `bonded.rs:1666`; `capacity_waves_are_time_sliced`, `bonded.rs:1752`).
 
+### 3.4 Staged collapse: sag before the break (DX18)
+
+`crates/destruction/src/bonded/sag.rs`. It is opt-in and off by default. With no rules set, `step` is the plain bonded step (module doc).
+
+- **Link load.** A link whose carried weight is over its limit builds stress. Each tick adds `SAG_Q16_ONE / stress_ticks`, times the overload rate, which is the carried weight over the limit and at most `MAX_OVERLOAD_RATE` (4) (`advance_sag`, `sag.rs:242`). When the stress reaches `SAG_Q16_ONE` the link snaps. A link under its limit relaxes at half that step.
+- **The limit.** The link's limit is `strength_q16_per_strain` times its `breaking_strain`, read once at `enable_sag` (`SagRules`, `sag.rs:42`; `enable_sag`, `sag.rs:98`).
+- **Unsupported clusters.** A chunk with no path to an anchor counts its lost ticks. After `drop_ticks` it is freed and a `BreakEvent::ChunkFreed` is logged. Zero `drop_ticks` frees it at once (`advance_sag`).
+- **Snaps.** A snapped link logs `BreakEvent::BondBroken` and its strain is set past its breaking strain (`advance_sag`). Snaps and frees run in chunk index order (module doc).
+- **Enabling.** `BondedCollection::enable_sag(SagRules { strength_q16_per_strain, stress_ticks, drop_ticks })` turns it on. Bad rules return `BreakError::BadSag` and change nothing (`sag.rs:98`, `bonded.rs:222`).
+- **Step hook.** `BondedCollection::step` calls `advance_sag` when sag is on (`crates/destruction/src/bonded.rs:478-479`).
+- **Read side.** `sag_q16(chunk)` (`sag.rs:164`) gives the lean of a standing chunk, which is the worst link stress to its anchor. For an unsupported chunk it gives the hang progress. `SAG_Q16_ONE` means "lets go now". `sag_offset_mm(chunk, span_mm)` (`sag.rs:185`) scales a span by that lean. `link_stress_q16(bond)` (`sag.rs:151`), `sagging_count()` (`sag.rs:192`) and `sag_digest()` (`sag.rs:201`) report the state. `sag_digest` is the receipt.
+
+**Limits.**
+
+- Nothing outside `crates/destruction` calls `enable_sag` or `sag_q16`. No picture leans yet.
+- Not wired yet: the lean in the arena picture (`sag_q16` into physfx), a lever arm for horizontal cantilevers, and sag in snapshot v2 (DX18 row, `docs/SPRINT-*` shards).
+- The sag state is not part of `state_hash` or the snapshot. A restore resets the lean (module doc).
+- The showcase station is SHOW3, not built (`docs/plan/showcase.md`).
+
+**Tests.** `node tools/gh-check.mjs cargo test -p engine-destruction --lib bonded::sag` runs 12 tests. They include `column_with_its_foot_knocked_out_sags_then_drops_everything_above`, `a_strong_link_holds_the_arm_a_weak_one_sags_then_falls`, `heavier_overload_fails_faster`, `losing_one_abutment_raises_the_strain_on_the_other_side`, `same_inputs_give_the_same_breaks_twice`, `restore_resets_the_lean` and `sag_steps_allocate_nothing` (`sag.rs:508-659`).
+
 ## 4. Cuts and baked chunks (`csg.rs`, `fracture.rs`)
 
 ### 4.1 Blade cuts and booleans (`csg.rs`)
