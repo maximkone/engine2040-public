@@ -1,5 +1,5 @@
-//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, twenty-four packs load on
-//! demand in contract order (`scene`, `break_`, `fx`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `settings`, `web`, `session`, `codex`, `world`, `level_paint`, `stage`, `ui`, `audio` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
+//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, twenty-seven packs load on
+//! demand in contract order (`scene`, `break_`, `fx`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `memory`, `project`, `replay`, `physics`, `physics_settings`, `web`, `session`, `codex`, `world`, `level_paint`, `stage`, `ui`, `audio`, `tasks`, `rome` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
 //!
 //! Consumer: the MCP door (`super::mcp::McpServer`) lists its core tools plus
 //! the packs a session loaded (`api.load`), dispatches any verb by exact
@@ -79,6 +79,7 @@ pub mod play;
 /// real project, build its package and play it headless.
 pub mod project;
 pub mod replay;
+pub mod rome;
 pub mod rules;
 pub mod scene;
 /// D17: the scene diff and the session activity feed (`scene.diff`,
@@ -89,6 +90,9 @@ pub mod session;
 /// `stage.camera.*`, `stage.shot.*`), on demand so the default tool list does
 /// not pay for them until a session asks.
 pub mod stage;
+/// `tasks`: the repo's build-task suite (`tasks.list`, BG14), on demand so the
+/// default tool list does not pay for it until a session asks.
+pub mod tasks;
 /// `ui`: the integer layout solver and one pinned drag (`ui.layout.solve`,
 /// `ui.layout.resize`), on demand so the default tool list does not pay for
 /// them until a session asks.
@@ -110,7 +114,7 @@ pub mod world;
 /// verifier verbs replace their replay-pack stand-ins in the same slot, so a
 /// build never serves one verb name twice.
 #[cfg(feature = "verify")]
-pub const PACK_NAMES: [&str; 26] = [
+pub const PACK_NAMES: [&str; 28] = [
     scene::PACK,
     break_::PACK,
     fx::PACK,
@@ -137,11 +141,13 @@ pub const PACK_NAMES: [&str; 26] = [
     stage::PACK,
     ui::PACK,
     audio::PACK,
+    tasks::PACK,
+    rome::PACK,
 ];
 
 /// Every pack name, in contract order. Each name has one module below.
 #[cfg(not(feature = "verify"))]
-pub const PACK_NAMES: [&str; 26] = [
+pub const PACK_NAMES: [&str; 28] = [
     scene::PACK,
     break_::PACK,
     fx::PACK,
@@ -168,6 +174,8 @@ pub const PACK_NAMES: [&str; 26] = [
     stage::PACK,
     ui::PACK,
     audio::PACK,
+    tasks::PACK,
+    rome::PACK,
 ];
 
 /// Core tool: call one verb from any pack by exact name.
