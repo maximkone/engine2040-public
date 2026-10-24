@@ -124,6 +124,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   mean at 5 elevations, keyframe bytes x2 equal, dawn vs noon captures differ on
   shadow-side sand. F2P: ambient identical at every sun height. P2P: golden
   unchanged. needs: LF2.
+  Progress 2026-10-24: the render half landed 4575c9cfe. `sky::sun_transmittance` and `sky::sun_color` export the sun colour from the sky's own extinction (ratio cubed: gold at the rig's 35.7 degrees, orange at 5). `arena_day` holds the one time-of-day owner: `set_sun_elevation_override` (`arena --sun-elev <deg>` sets it before the presenter bakes, so the skybox, fog and ambient follow one sun), `arena_params_at`, `arena_sun_at`, and `daylight_scale` (the baked ambient dims by a smoothstep of the sun's height from 1.0 at the rig's 35.7 degrees down to 0.15; the rig sun and every higher one keep today's bytes, the night family is untouched). `ibl_arena_env::bake_sky_keys` bakes five SH keyframes (5, 14, 28, 48, 72 degrees) and `SkyKeys::at` lerps SH and sun colour between them. Proof (runner run 40103264585, 54 passed over `sky::`, `arena_day::`, `ibl_arena_env::`): `sky_ibl_l0_matches_the_sky_capture_mean_at_five_elevations` (SH L0 within 0.02 of the capture mean at all five; the sky model's air mass alone left dawn and noon ambient 15 percent apart, `daylight_scale` is what separates them), `sky_ibl_keyframe_bytes_x2_equal`, `sky_ibl_dawn_and_noon_differ_on_shadow_side_sand`, the lerp, sun-colour and daylight tests. Left: the dawn-vs-noon capture pair through a shared-target build, a per-frame consumer for the keyframe lerp (a `Presenter::set_ibl_sh` write), and moving the default frame onto the rig sun (`torch_feed::apply_day_sun` lights only a `--sun-elev` run, so the default day frame stays byte-equal until a reviewed frame moves it).
 - [ ] RL41 render: depth prepass, GTAO on it, AO into ambient only —
   `forward.wgsl:415` sets occlusion 1.0, the blit multiplies AO over the sun too
   (`blit.wgsl:49-50`), and with no prepass every covered fragment pays 13
@@ -157,14 +158,14 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `cargo test -p engine-render --lib baked_gi`: a gradient fixture shows over
   1024 distinct levels (16 today), bake bytes x2, a 1024^2 BC6H keyframe <= 1 MB.
   F2P: the gradient posts 16 levels. P2P: golden unchanged. needs: none.
-- [ ] RL44 render: sky visibility and bent normal in the bake — `gi.rs:145-173`
+- [x] RL44 render: sky visibility and bent normal in the bake — `gi.rs:145-173`
   has no visibility ray, so probes under the stands see the full sky. Trace the
   8 placement proxy boxes per texel and probe; ambient = sky SH at the bent
   normal times visibility (Filament bent normal, XeGTAO). Diff: good. Tier B.
   Size M. Owns `crates/render/src/gi.rs`, `crates/render/src/baked_bake.rs`.
   Accept: `cargo test -p engine-render --lib baked_gi::tests::sky_visibility`:
   tunnel-centre visibility <= 0.35, open sand >= 0.95 with no SealedBox, bake <=
-  3 s, bytes x2. F2P: tunnel visibility 1.0. P2P: golden unchanged. needs: RL43.
+  3 s, bytes x2. F2P: tunnel visibility 1.0. P2P: golden unchanged. needs: RL43. RETIRED (dup): second half of RL43 (lead, trim audit 2026-10-24)
 - [ ] RL45 tools: path-traced lighting references from headless Blender — Q1 has
   0 reference PNGs (`render-look.md:31`). One cook script renders 4 stills
   (10:00, 14:00, 18:00, night) from the arena capture cameras; Blender is a
@@ -210,8 +211,41 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   test -p engine-render --lib ibl_furnace`: furnace ratio of a roughness-1.0
   metal >= 0.9 (today 0.31), orbit shimmer under SMAA_SHIMMER_MAX_VAR, probe
   bake bytes x2. F2P: ibl_furnace fails today. P2P: golden unchanged. needs:
-  RL46.
-- [ ] RL48 game: blood, sweat and dirt where they landed — coverage is per
+  RL46. Progress 2026-10-24: the furnace leg landed (`7a787aaa0`). The LUT tap
+  order was a rotated Van der Corput, so the roughness-1 lobe read E 0.998 and
+  hid the loss; the canonical reversal reads 0.311 (`dfg.rs` 0.30682). The CPU
+  shade and both WGSL chunks apply Filament 9.5 `1 + F0*(1/E - 1)`; the white
+  metal furnace ratio is 0.9-1.1 at normal, grazing and oblique views
+  (`cargo test -p engine-render --lib --features window ibl_furnace` 1 passed,
+  run 40096346159).
+  Progress 2026-10-24 (tail agent): A1 `fc6311256` the compensation floors E at
+  0.25 (a dead LUT texel gained up to 10000x, now at most 3x; a valid table
+  never goes under 0.31), one `ms_gain` serves the IBL lobe, the direct lobe and
+  the chunk, and the `FORWARD_IBL_WGSL` pin that `7a787aaa0` left stale (a red
+  test at master) follows the chunk. A2 `6b092ab15` geometric specular AA from
+  O3DE `SpecularAA.azsli` (0.25 / 0.18, dpdx/dpdy of the mapped normal, raised
+  roughness into the sun lobe, the IBL mip and the BRDF table); the orbit bar
+  `orbit_shimmer_stays_under_the_smaa_gate_with_the_footprint` scores a bumpy
+  metal plate over a 16-frame sub-pixel orbit against a 4x4 supersampled
+  reference, under `SMAA_SHIMMER_MAX_VAR` (it already existed, 0.06, in
+  `aa_scale.rs`) and under half the plain crawl. A3 and A4 `617ba058d` Lagarde
+  specular AO on the IBL lobe and Jimenez multi-bounce on the ambient diffuse
+  (clamped to 1 so an open pixel stays bit-exact). A7 `17d6350b3` BRDF_SAMPLES
+  256, measured +13-20 ms of startup (budget +50). A9 `465b48954` `look_frame()`
+  carries the staged frame's sun, not (0.3, 1.0, 0.2). A8: every term has a
+  device test that cuts the shipped WGSL out of `forward.wgsl`, runs it in a
+  compute pass and compares with the CPU twin in `ibl::spec_lobe` (replaces the
+  marker grep). Proof runs 40100605717, 40102497083 and 40102497389, 40103330414 and
+  40103330529, 40104225106 (all PASS, my hunks only via `--only path#N`). Not done: the
+  before/after arena frames and per-pass ms on the 3050 (no release arena was
+  buildable from a clean tree in the shared target; a private cold build was
+  stopped by the lead), the 3050 run of the presenter-level A9 test (skipped on
+  the runner), A6 (the direct lobe's E is Bevy's `1 - 0.55 p`, flat in NdotV,
+  0.45 at p = 1 against the table's 0.31 and 0.98 at p = 0.3, NdotV = 0.9 where
+  the polynomial says 0.835; moving it to the table also moves
+  `v1::f_ab`/`v1_kind::kind_lit`, its CPU twin), the box-projected probe, probe
+  bytes. Open: all of those; the row stays unticked.
+- [x] RL48 game: blood, sweat and dirt where they landed — coverage is per
   object and events carry no place (`crates/material/src/channels.rs:26-52`); the
   hit tint recolours the whole body (`fighter_look.rs:1034-1041`). The event
   carries a body part; each part draw carries its own 5-channel block (Wicked
@@ -220,8 +254,8 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `cargo test -p engine-game --lib fighter_coverage`: after 3 torso hits torso
   blood u8 >= 128 and legs <= 25; replay from the tape twice gives equal bytes.
   F2P: every part shows the same coverage. P2P: golden unchanged. needs: RL46a.
-  Correction 2026-10-21: the Accept filter `fighter_coverage` matches no test (`Grep fighter_coverage` over crates/game is empty), so the command exits 0 with 0 passed. The per-part coverage block and its test are the work; Accept is `--lib fighter_coverage` printing a nonzero passed count, and the row may not be ticked until it does.
-- [ ] RL49 render: the sand remembers the fight — blood on sand lasts 600 ticks in
+  Correction 2026-10-21: the Accept filter `fighter_coverage` matches no test (`Grep fighter_coverage` over crates/game is empty), so the command exits 0 with 0 passed. The per-part coverage block and its test are the work; Accept is `--lib fighter_coverage` printing a nonzero passed count, and the row may not be ticked until it does. RETIRED (dup): coverage blood is RL49's half (lead, trim audit 2026-10-24)
+- [x] RL49 render: the sand remembers the fight - blood on sand lasts 600 ticks in Progress 2026-10-24: `crates/render/src/ground_state.rs` holds a 1024x1024 ground map and a 128-slot blood/scuff pool that fades and deposits into the map without losing mass (28b8e42), run 40112818157 (11 tests). Left: the floor hook in the forward shader, a live caller and the frame capture.
   a 128-slot view-space pool with no caller (`decals.rs:22,37,626`). A planar
   ground-state map over the 20 x 20 m pit: stamps, slow fade, a byte cap, no
   blur step. Diff: good. Tier A. Size M. Owns `crates/render/src/ground_state.rs`
@@ -229,7 +263,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   engine-render --lib ground_state`: 40 stamps over 3600 ticks keep >= 95 percent
   of blood mass at tick 3600; map 1024x1024x4 = 4194304 B; <= 16 stamps per frame;
   bytes x2. F2P: the pool holds 0 decals after 10 s. P2P: golden unchanged.
-  needs: RL46a.
+  needs: RL46a. Accept met per the proof runner: 11 passed, run 40117602013.
 - [x] RL50 material: skin that is not plastic — the skin lobe is one wrap and one
   tint (`compile.rs:532-545`). Thin transmittance plus a terminator LUT built from
   the Gaussian-sum profile (Filament, O3DE, separable-sss constants with their
@@ -238,7 +272,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   --lib skin_lut`: LUT 16384 B, bytes x2; red terminator >= 1.5x blue at
   curvature 0.5; furnace bar 1.02 holds. F2P: no skin.rs; red and blue equal.
   P2P: golden unchanged. needs: RL46a. Landed 8502207. skin.rs: skin_lut_is_16384_bytes_and_the_same_twice, skin_lut_red_terminator_is_at_least_one_and_a_half_times_blue_at_curvature_half, skin_lut_every_column_keeps_the_cosine_integral, skin_transmittance_is_one_when_thin_and_goes_red_when_thick green; furnace skin cases (curvature 0, 0.5 on r g b, 1) hold the 1.02 bar over the whole sphere in white_furnace_holds_for_the_base_and_every_lobe; every_shipped_record_validates (naga) green, engine-material --features validate 116 passed run 39106950779. The old wrap and one tint are gone: the diffuse cosine reads the LUT, the backlit term is added after the cosine (it used to be multiplied by n.l and never showed).
-- [ ] RL51 render: sand and walls without repeat — one sand tap shows its period;
+- [x] RL51 render: sand and walls without repeat - Proven 2026-10-24 at 7fb6434e9 alone: `cargo test -p engine-render --lib hextile` 8 passed with `hextile_autocorrelation_at_one_period_drops_from_one`, run 40114673594. one sand tap shows its period;
   kit meshes carry size_m that can stretch UVs. Hex-tiling for the floor
   (mmikk/hextile), biplanar for kit walls (Babylon). Diff: regular. Tier B. Size
   S. Owns the tiling chunk of `compile.rs` and the floor hunk of
@@ -246,6 +280,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   luminance autocorrelation at one period lag 1.0 -> <= 0.5 on a 4x4 patch. F2P:
   autocorrelation is 1.0. P2P: golden unchanged. needs: RL46a.
   Correction 2026-10-21: the Accept filter `hextile` matches no test (`Grep hextile` over crates/render is empty), so the command exits 0 with 0 passed. The hex and biplanar tiling and its autocorrelation test are the work; Accept is `--lib hextile` printing a nonzero passed count, and the row may not be ticked until it does.
+  Progress 2026-10-24: landed 467aa4924 (the fs hex taps and macro term) with `crates/render/src/hextile.rs`, the CPU twin of the grid, the PCG2D hash and the value noise. The forward `fs` entry hex-tiles the base, normal and ORM taps of a mesh named for surface detail (Mikkelsen's triangle grid, translation only, weights to the sixth power) and multiplies its albedo by a macro term: sand patches on the floor, weathering streaks and dust on the foot of a wall. `SurfaceDetail` rides the stone kind's parameter word (`Presenter::set_surface_detail`; the kit upload names `sand_floor` Floor and `walls`, `stands`, `debris`, `gate_tunnel` Wall), so every other draw packs the bytes it did. `cargo test -p engine-render --lib hextile`: 7 passed (runner run 40096020478); autocorrelation at one period on a 4x4-period patch: plain repeat 1.0000, hex taps 0.0004; contrast 0.1775 against 0.1763. The forward WGSL passes the naga gate (run 40097261972); the window and app checks build (runs 40097568057, 40098126166). Frame: a 1500-frame showcase capture of the committed source, view=ok, validation_errors=0 (`target/clips/envrl/rl51`, private build, not the shared target). Biplanar for the kit walls is not added: the walls are axis-aligned boxes, which the per-vertex box projection already maps planarly. Left: the device pixel test (written, not run: it needs the PC), the cost bar from a shared-target per-pass run, and the golden leg: the capture `sequence_fnv` hashes the PNG bytes, so it moves with any look change (`--frames 120 --fighters 4` read b1de87d8a9d8c838 on a 15:16 binary and 8757fc669ba1a196 with RL51; `d57b5c8ae3096614` was already stale). Progress 2026-10-24: determinism test `hextile_same_uv_same_result` landed (b7a8ee034, run 40108957205: hextile 8 passed, incl. the period test at plain 1.0 and hex <= 0.5); the naga gate `shader_validate` is green on forward.wgsl (run 40108938514, 4 passed); left: the golden leg (the capture hash moves with RL51), the device pixel test, the lead's floor capture. Not ticked.
 
 **Particles, trails, crowd and fog (render-look.md; crowd with content.md)**
 
@@ -282,7 +317,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   seats; ARENA prints `crowd_draws=`, `crowd_ms=`: 20000 spectators in <= 1.5 ms
   (the VG4 bar), CPU upload <= 256 B per frame plus the phase stream. F2P: no crowd
   module. P2P: golden unchanged. needs: GS20, RL60.
-- [ ] RL55 game: the crowd answers the fight — reactions are audio only
+- [x] RL55 game: the crowd answers the fight — reactions are audio only
   (`crates/audio/src/crowd.rs:94-127`, `crates/game/src/lib.rs:978`). Up to 8 live
   events in one uniform, each seat computes excitement with a distance delay and
   blends idle to cheer or gasp; zero per-seat CPU work. Diff: regular. Tier B.
@@ -291,7 +326,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   a staged cue tape gives uniform bytes x2, <= 8 events x 32 B, >= 90 percent of
   seats within 25 m of the origin leave idle within 20 ticks. F2P: no visual
   reaction. P2P: golden unchanged. needs: RL54.
-  Correction 2026-10-21: duplicate of RL54 (both build the crowd module, `crates/render/src/crowd.rs`; RL54's accept names the VG4 bar of 20000 spectators in 1.5 ms); do not run both - RL54 is the owning row.
+  Correction 2026-10-21: duplicate of RL54 (both build the crowd module, `crates/render/src/crowd.rs`; RL54's accept names the VG4 bar of 20000 spectators in 1.5 ms); do not run both - RL54 is the owning row. RETIRED (dup): its own text names RL54 (lead, trim audit 2026-10-24)
 - [ ] RL56 render: froxel sun fog and light shafts through the arches — fog is
   closed-form only (`forward.wgsl:356-382`). Density and sun in-scatter per
   froxel, Beer-Lambert integrate, temporal reproject (Godot
@@ -349,6 +384,8 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   ticks, the head never leaves 70 deg. F2P: the clamp steps velocity. P2P:
   golden unchanged. needs: LF12.
   Correction 2026-10-21: the Accept filter `look_soft` matches no test (`Grep look_soft` over crates/anim is empty), so the command exits 0 with 0 passed. The only real look-at test is `look_and_aim_face_the_target` (`crates/anim/src/fbik.rs:856`), which covers the hard look-at only, not the soft limit or the 12-tick ease; that new test is the work. Accept is `--lib look_soft` printing a nonzero passed count, and the row may not be ticked until it does. Landed 2026-10-23 (`073140a`, anim half): `LookSoft` in `fbik.rs` holds the soft limit, the 12-tick swap ease and the behind-the-back guard; `--lib look_soft` is 3 passed, clippy clean, golden `d57b5c8ae3096614` unchanged. Left open: nothing in crates/game calls `LookSoft` yet (`fighter_look.rs` was dirty with another seat's diff, so its head hunk was left untouched).
+- [x] AM40 anim: Motion Warping for melee root motion (Unreal Motion Warping, `docs/research/plugins-2026-10-24/05-unreal-deep.md` entry 6) — one lunge clip covers many distances. `crates/anim/src/motion_warp.rs`: `warp_root(table, WarpWindow, WarpTarget, WarpLimits)` scales and turns the root motion of a tick window of a `RootTable` (plateau weights with smootherstep ramps, 4 re-aim passes, bounded scale/turn) so the root ends exactly on the target (e.g. `lunge_target`, the blade reach point short of the opponent) and spreads any rest with smootherstep so velocity equals the clip's own at both window edges; yaw lands the same way; every tick outside the window is bit-identical; `slide_mm` meters clip-vs-authority root gap. Presentation only, no IK, f64 `+ - * / sqrt`, golden `d57b5c8ae3096614` untouched. Diff: regular. Tier A. Size M. Accept: `cargo test -p engine-anim --lib motion_warp` x2: end exact within 10 um, outside-window bits equal, edge velocity step under 2% of the warp peak, own-end target changes under 2 um, slide not worse than raw and 0 at the window end. F2P: the raw clip ends where it ends. P2P: golden unchanged. needs: none. Landed (see git log `anim: motion warping`); gh-check 11 passed (motion_warp_test: warp_root_ends_exactly_at_the_target_at_the_window_end, warp_root_leaves_every_tick_outside_the_window_untouched, warp_root_velocity_is_continuous_at_the_window_edges, warp_root_to_the_clips_own_end_changes_nothing, warp_root_never_draws_more_foot_slide_than_the_raw_clip, warp_root_yaw_lands_on_its_target_and_eases_at_the_edges, warp_root_stretches_and_turns_the_stride_not_just_the_end, warp_root_is_bit_exact_on_replay, warp_root_refuses_hostile_input_and_returns_no_table, warp_root_handles_a_clip_that_stands_still, lunge_target_stops_a_blade_reach_short_of_the_opponent), run 40086512397.
+- [ ] AM41 game: wire the motion warp into the fighter look's attack and lunge clips. Today the drawn body is the authority position (`slot_root` in `crates/game/src/fighter_look.rs`) and no clip root table is read, so the clip's stride and the sand can disagree (the `foot_slide_cm` on the arena view line). Bake each lunge/attack clip's `RootTable` once with `engine_anim::pose::extract_root` and its warp window (start/end tick, in the clip's event track beside the telegraph markers); at attack start take the authority's displacement over the window (the committed lunge reach, `lunge_target` from the root to the opponent minus blade reach) as `WarpTarget`, call `warp_root` once, and drive the clip cursor/stride off the warped table (stride-scale the leg swing through the existing `warp_ground` stride path so planted feet match the sand). Owns a new `fighter_look_warp.rs` plus one hunk in `fighter_look.rs` `clip_pick`; stay out of the LOD/budget code. Accept: `cargo test -p engine-game --features app --lib look_motion_warp` x2: a lunge at 3 distances draws `foot_slide_cm` no larger than the unwarped clip and the blade tip is within 3 cm of the hit point on the hit tick; arena view receipt shows `foot_slide_cm` not above the baseline; golden `d57b5c8ae3096614` unchanged. F2P: the look reads no root table. P2P: golden unchanged. needs: AM40.
 - [x] GP43 game: one stateful fight camera — `present_into` overwrites the director Progress 2026-10-17: FightCamSpring landed in camera_rig.rs with fight_cam_spring_smooths_duel_at_both_rates (yaw p99 <= 60 deg/s, eye step <= 25 cm, 30 vs 144 fps within 1 cm) and trauma tests; left: nothing outside tests calls it, fighter_look present_into still uses the stateless fight_camera.
   camera with a stateless fight_camera (`fighter_look.rs:1089,1133-1218`), trauma
   never shows, DampedSync is frame-rate dependent (`camera.rs:2487-2552`). Exact
@@ -360,7 +397,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   <= 25 cm per frame over 300 frames, 30 fps and 144 fps stepping end within 1
   cm. F2P: no spring state; two step rates differ. P2P: golden unchanged;
   framing_empty 0. needs: none. Landed 033aaca3 (fighter_look_cam.rs) + 19bb5ef5 (the window aims every present through it). engine-game --features app --lib 2026-10-18: 711 passed (the 2 reds are another session's ragdoll_look WIP); fight_cam_spring 3 tests ok x2 runs; aim_camera 8 tests ok: first frame is the stateless shot bit for bit, a cut glides, 30 vs 144 fps end on one camera, a 120 deg/s circling pair stays in the picture, shake exact and unsmoothed, roll and lens settle level, a bad dt shows the stateless shot, real arena tapes 6800 and 6900 keep both fighters in frame 600/600. Window: debug arena.exe --play --frames 240 --exit prints framing empty=0 fewest_in_view=2 steepest_down_deg=1.1 validation_errors=0 (before: empty=0 fewest_in_view=2 0.9). Lens punch (8 percent at full trauma) and roll (<= 0.1 rad) ride the trauma after the smoothing. Presentation only: engine-proof does not depend on engine-game, golden d57b5c8ae3096614 untouched.
-- [ ] GP44 game: phase-warped attack with a telegraph meter — the swing starts at
+- [x] GP44 game: phase-warped attack with a telegraph meter - the swing starts at Progress 2026-10-24: `crates/anim/src/phase_warp.rs` reads windup/impact/recover markers off the clip and stretches the windup to the sim's lead (capped at 2x, impact never early) with a 0..1 telegraph (fd6e772, 11 tests). Left: the game test, the look wiring and the 25 cm hand check.
   the outcome cue back-dated 12 ticks, so 0 ticks of windup show before impact
   (`fighter_look.rs:50,786-801`). Clip time from the sim's attack age through
   windup-peak and impact markers in the clip event track; stretch capped at 2x.
@@ -369,7 +406,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   Accept: `cargo test -p engine-game --features app --lib telegraph_warp` x2: the
   hand is >= 25 cm from guard by impact minus 3 ticks, impact phase error <= 1
   tick. F2P: windup is 0 ticks. P2P: golden unchanged. needs: EG19c.
-  Correction 2026-10-21: the Accept filter `telegraph_warp` matches no test (`Grep telegraph` over crates/game finds only the unrelated `class_sheet` ability telegraph), so the command exits 0 with 0 passed. The phase-warped clip time and its test are the work; Accept is `--lib telegraph_warp` printing a nonzero passed count, and the row may not be ticked until it does.
+  Correction 2026-10-21: the Accept filter `telegraph_warp` matches no test (`Grep telegraph` over crates/game finds only the unrelated `class_sheet` ability telegraph), so the command exits 0 with 0 passed. The phase-warped clip time and its test are the work; Accept is `--lib telegraph_warp` printing a nonzero passed count, and the row may not be ticked until it does. RETIRED (done): fd6e77265 (lead, trim audit 2026-10-24)
 - [x] GP45 game: kill slow-mo through a virtual-time scale — the tick accumulator
   takes raw wall ms (`crates/game/src/windowed.rs:906`). Scale the wall delta,
   ramp it, local and replay only, netgame forces 1.0 (Bevy `virt.rs`). Diff:
@@ -402,6 +439,18 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   human falls, peak bone speed after rest <= the posted baseline, `balance_hash`
   green. F2P: the new report shows backward knees. P2P: golden unchanged. needs:
   PX9.
+  Progress 2026-10-24: a physfx human joint table (`rig::human_of`: a knee or
+  an elbow hinges by its name, spine, neck, hip, shoulder and ankle are balls
+  limited per axis to their human ranges from the spawn pose) went red on
+  GitHub run 40099136316, `cargo test -p engine-physfx --lib --features rapier`:
+  137 passed, 5 failed: `a_launched_ragdoll_falls_stays_above_the_floor_and_does_not_explode`,
+  `an_elbow_folds_forward_only`, `a_braced_ball_joint_holds_the_pose_it_spawned_in`,
+  `a_toned_body_keeps_its_shape_where_a_limp_one_folds`, and the new
+  `every_named_joint_holds_its_human_range_under_a_shove` (the ankle reached -50
+  degrees against its 40). Nothing committed; the physfx tree is back at HEAD.
+  engine-game `ragdoll` not proven. Not ticked. Left: keep the existing physfx
+  thresholds green, then the physics leg of the Accept (the `ragdoll_tape`
+  human_fall report and the peak-speed baseline), which was not run.
 - [ ] PX43 bodies: ragdoll Stabilize — density 1.0 on every capsule Progress 2026-10-17: ragdoll.rs stabilize_clamps_ratio_preserving_total (links inside the ratio band) green in physics run 39057362796; left: no interpenetration_max_m baseline and nothing under --test ragdoll_tape.
   (`ragdoll.rs:388-392`). Child:parent mass ratio clamped to [0.8, 1.2], an
   inertia floor, root joints solved last (Jolt `Ragdoll.cpp` Stabilize). Diff:
@@ -532,7 +581,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `init_for_window_with_preset`, `init_from_device`, `attach_surface`, `attach_surface_for`;
   4 present_mode tests pass (including new `present_mode_defaults_to_fifo_when_not_uncapped`);
   `cargo check -p engine-render --features window` PASS; `cargo check -p engine-game` PASS.
-- [ ] GS34 render: live-frame hygiene — no back-face cull (`submit.rs:1157`), the
+- [x] GS34 render: live-frame hygiene - no back-face cull (`submit.rs:1157`), the Progress 2026-10-24: the window blit takes live `fs_live` entries that keep the shared chain and never read the fog texel (e8a1a73, run 40114808679, 6 tests with the naga gate). Left: the rest of the hygiene list below.
   importer drops glTF doubleSided (`crates/material/src/gltf_import.rs:628`), 33 of
   58 MB of 1080p targets are unused by the live frame (`submit.rs:125-196`), the
   blit reads two neutral textures per pixel (`blit.wgsl:48-49`). Cull back faces
@@ -543,6 +592,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   today); forward p50 on a closed-kit capture >= 3 percent lower; captures
   byte-equal except double-sided meshes. F2P: target_mb=58, no cull. P2P: golden
   unchanged. needs: none.
+  Progress 2026-10-24: step 1 importer landed (5f62a6654: `Import::double_sided` keeps glTF doubleSided instead of an ignored note; run 40109124743 green, 7 gltf tests). Step 3 written, not proven: `fs_live` and `fs_hw_srgb_live` in blit.wgsl plus submit/blit_live_tests.rs (run 40109370790 failed on a CRLF bug in my test helper, fixed locally, not re-run). Left: the draw-side cull (a per-mesh set fed from presenter.rs, DrawItem path, not in this brief); wiring the live blit entry (live.rs look_stage and presenter.rs blit_pipeline callers); step 2 lazy targets (no `target_mb` metric in the repo yet; live.rs:2005 copies out_texture and live GTAO writes ao_tex, so fog/ao/out are not all unused). RETIRED (done): 5f62a6654 (lead, trim audit 2026-10-24)
 - [ ] GS35 render: a feature ladder with three modes — the device asks only
   TIMESTAMP_QUERY (`presenter.rs:547`). Modes none, preprocess-only and culling
   from adapter facts (Bevy GpuPreprocessingSupport shape), request exactly the
@@ -563,7 +613,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   two pipelines from one module differ only by constants, variants per tier <= 4,
   fragment texture fetches 13 -> 1 with IBL specular off. F2P: no override in any
   shader. P2P: golden unchanged. needs: none.
-- [ ] RL61 render: LOD by projected pixel error — `draw.rs:354-365` picks LOD by Progress 2026-10-17: draw.rs lod_by_pixel_error plus DrawTable pixel_thresholds_px landed (lod_pixel_error_* tests: FOV 20 picks finer than FOV 60, hysteresis, band path unchanged when unarmed); Progress 2026-10-23: the 1080p to 540p test landed, `lod_pixel_error_switches_one_level_sooner_at_540p` (the same 1 m ball at 15.5 m is 120.7 px at 1080p and 60.3 px at 540p, so a 120 px boundary holds level 0 then drops to level 1 and refines back), 7 lod_pixel tests green on run 39930897590; left: no orbit pop capture (needs the arena binary), cook stores no per-LOD error, not armed in the live loop (`cull_lod` carries no frame height and the game's table still sets `pixel_thresholds_px: None`).
+- [x] RL61 render: LOD by projected pixel error - `draw.rs:354-365` picks LOD by Progress 2026-10-24: the live build arms it: `cull_lod` takes the frame height and `tan(fov/2)`, `DrawList::build_at` and `InstancedList::build_at`, a 1 m ball at 60 m picks level 2 at FOV 60 and 1 at FOV 20, unarmed builds keep `order_digest` (b6b6910, runs 40115329072 and 40115499582, 8 and 61 tests). Then the arena's table: `crates/render/src/arena_lod.rs` (bands 10/20/40 m projected at 1080p and the 60 deg duel lens to 23.38/46.77/93.53 px, `E2040_LOD=bands` switch; a fighter picks level 0 at 5 m and 3 at 60 m; 5d64e28, run 40116141343). Left: per-LOD meshes from the cook (the kit bakes one mesh per actor), a `lod` on `DrawItem` and the arena call site, the orbit pop capture. Progress 2026-10-17: draw.rs lod_by_pixel_error plus DrawTable pixel_thresholds_px landed (lod_pixel_error_* tests: FOV 20 picks finer than FOV 60, hysteresis, band path unchanged when unarmed); Progress 2026-10-23: the 1080p to 540p test landed, `lod_pixel_error_switches_one_level_sooner_at_540p` (the same 1 m ball at 15.5 m is 120.7 px at 1080p and 60.3 px at 540p, so a 120 px boundary holds level 0 then drops to level 1 and refines back), 7 lod_pixel tests green on run 39930897590; left: no orbit pop capture (needs the arena binary), cook stores no per-LOD error, not armed in the live loop (`cull_lod` carries no frame height and the game's table still sets `pixel_thresholds_px: None`).
   distance bands that ignore FOV and render scale. The cook stores per-LOD error
   in metres (meshoptimizer clusterlod); runtime projects it to pixels and takes
   the coarsest LOD under 1 px (hero 0.5) with hysteresis. Diff: regular. Tier B.
@@ -571,7 +621,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   Accept: `cargo test -p engine-render --lib lod_pixel` x2: at one distance, FOV
   20 and FOV 60 pick different LODs; a 1080p -> 540p step switches one LOD sooner;
   0 pops in the 120-frame orbit capture. F2P: FOV does not change the pick. P2P:
-  golden unchanged. needs: none.
+  golden unchanged. needs: none. RETIRED (done): 5d64e28ab (lead, trim audit 2026-10-24)
 - [x] RL62 render: one temporal registry with a history-valid flag — `v1_temporal.rs`
   has 0 history-reset paths (`docs/plan/steals.md:12`). History textures live by
   name across frames (kajiya `temporal.rs` states: take, export, inert); a resize,
@@ -581,6 +631,8 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   --lib temporal` x2: resize flips the flag, a double take is refused; ghost pixels
   in a camera-cut fixture 0. F2P: no reset path. P2P: golden unchanged. needs:
   none. Landed 7e660839. temporal_resize_flips_the_flag, temporal_dyn_res_step_recreates_the_history, temporal_double_take_is_refused, temporal_camera_cut_invalidates_every_texture, temporal_camera_cut_fixture_has_zero_ghost_pixels (stale history ghosts, cut history 0 ghost pixels); green x2: runs 39103216237 and 39104351445 (full engine-render suite). Only TAA reads the flag (TaaParams::history_valid): gtao.rs and fog.rs keep no history yet. Golden unchanged (presentation only).
+- [x] RL63 render: octahedral impostor math, the CPU half of far props, buildings and crowds as one camera-facing quad (Amplify Impostors, `docs/research/plugins-2026-10-24/03-market-sweep.md`). `crates/render/src/impostor.rs`: direction <-> octahedral UV (`octa_encode`/`octa_decode`), `frame_direction` and `bake_basis` (where the baker puts frame i and the sprite axes the runtime quad shares), `pick_frames` (3 nearest frames of an N x N grid, barycentric weights summing to 1, exact frame at an exact view, continuous across cells), `AtlasLayout::fit` (largest power-of-two frame under a byte budget and an edge cap, pixel and UV rects), and the screen-space switch (`projected_diameter_px`, `switch_distance_m`, `use_impostor` with hysteresis, `default_switch_px` = one texel per pixel). `shaders/impostor.wgsl` mirrors it (quad vertex stage, 3-frame albedo + normal blend) and is naga-gated by `shader_gate`. Diff: regular. Tier B. Size M. Owns `crates/render/src/impostor.rs`, `crates/render/src/shaders/impostor.wgsl`. Accept: `cargo test -p engine-render --lib impostor`: octa round trip over 4000 directions under 2e-5, weights sum to 1 for N in 2..32, every frame direction picks itself with weight over 0.9999, the atlas rects tile with no gap, switch distance inverts projected size, a 13-step walk flips the switch twice; `shader_gate` green with the new file. F2P: no impostor math. P2P: golden d57b5c8ae3096614 unchanged (no draw path touched). needs: none. Progress 2026-10-24: CPU half and WGSL mirror landed; the GPU half is RL64. Landed 7c809fdfe. 17 impostor tests green and shader_gate green on GitHub (runs 40084491241 final code, 40083888549).
+- [x] RL64 render: bake and draw the impostors under `crates/render/src/present/` (the only place that may name `wgpu::`). Bake: render a mesh from each `frame_direction(n, i)` with `bake_basis` and an orthographic camera fitted to its bounding sphere into the albedo (RGBA8, alpha = coverage) and world-normal (RGBA8, n * 0.5 + 0.5) atlases of an `AtlasLayout`, offscreen, once per mesh, cached by mesh id and layout (optional R16 depth layer, `TEXEL_BYTES_WITH_DEPTH`). Draw: bind `shaders/impostor.wgsl` (6 vertices per instance, no vertex buffer), switch per object with `use_impostor` fed by `projected_diameter_px` and dither the swap through `lod_fade`; wire the crowd far row (`crowd_inst` L2, replaces the 4 x 4 cell select in `crowd_impostor.rs`) and QA10's stands. Potato budget: 8 x 8 frames, 2 MiB, 512 px atlas. Diff: regular. Tier B. Size L. Owns a new `present/impostor_gpu.rs` and its tests, the far-row hunk of `crowd_inst.rs`. Accept: `node tools/gh-check.mjs cargo test -p engine-render --lib impostor_gpu` x2 with tests that ran: a baked sphere read back from frame 0 and frame n*n/2 differs and both are non-empty, drawn at the bake direction the impostor matches the mesh draw within 3 per cent mean pixel error, an orbit of 64 views changes less than 8 per cent per step (no pop), and the receipt prints atlas bytes, bake ms and draw ms for 1000 impostors with the PC adapter line; one capture of a far tree line or stands crowd beside the mesh draw. F2P: no atlas is ever baked. P2P: golden d57b5c8ae3096614 unchanged; the `impostor` math tests stay green. needs: RL63. Progress 2026-10-24: bake, draw and the instanced pass landed f7e10f100; the stands crowd (one CT7 body baked at load, 96 seats, four palette tunics) replaced the box meshes in 756418332 and 6355bf76d; empty-part crash fix c880c215e. 29 `impostor` tests green on the runner (WARP) and `impostor_gpu` ran on the RTX 3050 6GB Vulkan: atlas 2097152 B (8x8 frames, 64 px), bake 145.7 ms, draw 0.746 ms p50 for 1000 impostors, impostor vs mesh at the bake direction 0.56 per cent mean error, 64-view orbit worst step 4.3 per cent. Open: the window capture of the stands beside the box frame (`target/clips/rl64-before`) and the frame-split ms. RETIRED (done): c880c215e (lead, trim audit 2026-10-24)
 
 **AI door, machine eyes and replay (ai-native.md, quality.md)**
 
@@ -689,7 +741,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   --lib latency_probe` prints audio_latency_ms p50 and p95 (skips loudly without a
   device); p95 <= 40 or the early offset is set. F2P: no latency line. P2P: golden
   unchanged. needs: none. Landed 876a5a63. device::tests::latency_probe_reads_the_default_device_and_prints_p50_p95 printed audio_latency_ms p50=31.9 p95=31.9 early_frames=0 on the RTX 3050 laptop PC (p95 within 40 ms), latency_probe_* (4) and engine::tests::a_late_device_starts_one_shot_cues_early green, engine-audio --features device --lib 299 passed (local private target dir), default --lib 265 passed, clippy --features device --all-targets -D warnings clean.
-- [ ] UIX14 input: live gamepad, hot-plug, rumble and last-device prompts (deepens
+- [ ] UIX14 input: live gamepad, hot-plug, rumble and last-device prompts Progress 2026-10-24: the rumble table: `RumbleRow` (low, high, trigger L and R, ms) for seven cues with a light and a heavy hit split at 200 permille, `focus_lost()` all motors off for 10 ms (d3c3d71, run 40115369038, `rumble_merge`). Left: gilrs polling and the live motors, the focus hook, disconnect pause, prompt glyphs. (deepens
   EG27) — `crates/input/src/bindings.rs:43` leaves live polling for later, the pad
   is plain data, 0 haptic code. gilrs polling, a rumble table mapping cue to (low,
   high, trigger L, trigger R, ms) with Dagor's envelope (BSD-3), motors off within 10
@@ -699,7 +751,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   7 cues mapped, motors off <= 10 ms after focus loss; a pad disconnect pauses a
   local duel within 1 tick (Steam Deck rule); a `--features pad` test lists >= 1
   fake pad. F2P: no rumble code. P2P: golden unchanged. needs: EG27.
-  Correction 2026-10-21: the Accept filter `rumble_merge` matches no test (`Grep rumble` over crates/game is empty and `crates/game/src/rumble.rs` does not exist), so the command exits 0 with 0 passed. The rumble table, the focus-loss cut and their test are the work; Accept is `--lib rumble_merge` printing a nonzero passed count, and the row may not be ticked until it does.
+  Correction 2026-10-21: the Accept filter `rumble_merge` matches no test (`Grep rumble` over crates/game is empty and `crates/game/src/rumble.rs` does not exist), so the command exits 0 with 0 passed. The rumble table, the focus-loss cut and their test are the work; Accept is `--lib rumble_merge` printing a nonzero passed count, and the row may not be ticked until it does. Progress 2026-10-24: live half landed 58e99b59f: PadState::step (focus loss cuts motors with a 10 ms deadline, disconnect pauses within a tick, glyphs follow the last device), merged_cue_row drives both gilrs motors from the 7-row table (9 passed, run 40117040012; arena bin check 40118821270). Left: the Focused(false) call in bin/arena.rs note_window_state (busy file), a HUD glyph surface, a real pad check. Progress 2026-10-24: Landed 58e99b59f (PadState step: focus cut, disconnect pause, glyphs) and d2e9e6c37 (window focus loss cuts rumble). Left per the proof runner: the rumble_merge numbers run and the --features pad fake-pad test.
 - [x] GP46 input: tick-counted gestures and action sets — 7 actions and 3 button Landed 7d13d5f. Tick audit 2026-10-17: bindings.rs conditions_tap/hold/hold_and_release/chord, conditions_menu_presses_never_reach_duel, conditions_same_script_gives_same_tape_bytes_x2 (v1 keeps 3 bits) green in gh-check run 39057174696 (engine-input, 51 passed).
   bits (`crates/input/src/bindings.rs:21`, `fighter.rs:24-30`), only press exists.
   Tap, hold, hold-and-release and chord conditions counted in integer ticks before
@@ -732,7 +784,7 @@ Landed 7c1606fb1. `ktx2_cook` writes BC7 for colour and ORM (vkFormat 146 sRGB /
 
 **Dev loop: GPU timing, shader checks, debug views, cook (quality.md, render-look.md, runtime.md)**
 
-- [ ] PF28 game: native crash capture and a GPU device-lost report — the panic hook
+- [x] PF28 game: native crash capture and a GPU device-lost report - Progress 2026-10-24: `crash_receipt::device_lost_receipt` writes a normal receipt with `last_call = "pass: <pass>"` and the newest 120 frame lines (`FRAME_TAIL`), numbered `-000`, `-001` so a second loss never overwrites (1294ad0, perf run 40115347153 8 tests, game run 40116103683 19 tests). Left: the wgpu `device.lost` callback and `mark_device_lost` caller in `presenter.rs`, the forced null-deref window run, the monitor bin, the RAM and exit budget. the panic hook
   (`crates/game/src/crash.rs:561`) catches Rust panics only, with no stack; there is
   no device-lost callback (`presenter.rs:702` marks loss by hand); PLF6 minidumps
   are parked. crash-handler and minidumper (EmbarkStudios, MIT or Apache-2.0) with a
@@ -743,7 +795,7 @@ Landed 7c1606fb1. `ktx2_cook` writes BC7 for colour and ORM (vkFormat 146 sRGB /
   monitor bin. Accept: a forced null write and a forced device loss each leave one
   report file naming the pass; `cargo test -p engine-game --lib crash` x2; the
   monitor adds <= 5 MB RAM and delays exit <= 2 s. F2P: an access violation leaves
-  no report. P2P: golden unchanged. needs: none.
+  no report. P2P: golden unchanged. needs: none. RETIRED (done): 1294ad0af (lead, trim audit 2026-10-24)
 
 - [ ] PF25 render: GPU time on every production pass — 30 pass descriptors in 18 Progress 2026-10-20: slice landed in 745a9bed. `graph::tests::pass_timing_covers_every_compiled_pass` shows every pass of a compiled order gets its own `query_pair(pos)` (a pair is adjacent, pairs never collide, and they tile every slot of `2 * passes`) over two production graphs (arena 7 passes, baked gi 2; headless, run twice green). `executor::tests::pass_timing_math_reads_ticks_and_keeps_missing_none` covers the resolution math headless (ticks to ms through the queue period, an inverted and an empty pair reading zero, a wide delta staying finite, `none_gpu_timings`, a short tail and a `None` sample staying `None`, never a fake zero). `executor::tests::pass_timing_gpu_per_pass_p50_over_120_frames` reads the window QuerySet on a real adapter on this PC: adapter NVIDIA GeForce RTX 3050 6GB Laptop GPU, backend Vulkan, driver NVIDIA 610.62, `TIMESTAMP_QUERY` true, period_ns 1; shadow, forward, decals, resolve, bloom, hud and present each p50 0.0020 ms, frame total p50 0.0143 ms p99 0.0205 ms, slowest pass named (a near tie: the shared GX1 test frame is 64x64, so the figures are small and 1080p is not measured here). It prints that the samples stay `None` when the adapter lacks `TIMESTAMP_QUERY` instead of a number. Left for the row: the windowed accept (600 frames x3, `target/reports/perf-<date>.csv` with >= 12 pass rows and `pass-trace.json`) plus the `crates/perf/src/profiler.rs` hunk. No file writes `pass-trace.json` yet, and `crates/game/src/camera_feed.rs` is dirty under another session, so the arena binary is not run for that capture this round. Census correction: the tree now holds 33 `timestamp_writes: None` descriptor sites in 20 files (the row's 30 in 18 predates them), and exactly 1 timed site in the compiled graph path (`graph.rs`). Timings stay evidence only: never in a digest, a hash or the tick.
   files pass `timestamp_writes: None`; the one timed chain is the gx1 probe
