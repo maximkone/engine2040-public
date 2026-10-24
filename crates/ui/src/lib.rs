@@ -17,6 +17,9 @@ pub mod layout;
 /// LAN lobby screen model: host list, join, ready, start, no typed address.
 pub mod lobby_ui;
 pub mod menus;
+/// Directional focus navigation for the pause menu: pure, positions in data,
+/// one press resolves to the node in that direction ([`nav_focus::resolve_2d`]).
+pub mod nav_focus;
 /// Play-frame HUD snapshot: button echo and hints, the fighter-you arrow,
 /// FPS crosshair, hit flash and ammo as pure data beside [`DuelOverlay`].
 pub mod play_hud;

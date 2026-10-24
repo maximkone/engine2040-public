@@ -17,6 +17,13 @@
 //! whose passable kinds sit in more than one region, and writes a compact JSON
 //! map only when `out` names one.
 //!
+//! `world.rewrite` runs a seeded rewrite-rule program from its rules text (the
+//! format in `engine_world::rewrite`) and answers the grid as text, its hash and
+//! the steps taken. A bad rules line refuses with its 1-based line number, a
+//! grid over 128 cells a side refuses before any run starts, and a run that never
+//! settles refuses instead of answering a partial grid; it writes the grid text
+//! only when `out` names one.
+//!
 //! Units: texels for sides, rects and points, heights in texel steps
 //! `0..=255`, hundredths for the mean, permille for splat coverage. File IO
 //! only at the `out`/`path` edge and only under the project root: a relative
@@ -27,6 +34,7 @@
 
 use std::path::{Component, Path};
 
+use engine_world::rewrite::{Program, RulesError, RunError};
 use engine_world::scatter::poisson_disk;
 use engine_world::terrain::{
     bake_terrain, paint_terrain, parse_terrain, terrain_hash, terrain_stats, write_terrain, Edit,
@@ -502,6 +510,10 @@ fn paint_verb(_server: &McpServer, args: &PaintArgs) -> Result<PaintOutput, McpT
 pub const TOOL_WORLD_SCATTER: &str = "world.scatter";
 /// Verb: solve a wave-function-collapse tile map.
 pub const TOOL_WORLD_WFC: &str = "world.wfc";
+/// Verb: run a seeded rewrite-rule program from its rules text.
+pub const TOOL_WORLD_REWRITE: &str = "world.rewrite";
+/// Side, in cells, the rewrite door refuses past (the rules format's cap).
+pub const MAX_REWRITE_SIDE: u16 = engine_world::rewrite::MAX_SIDE;
 
 /// Most cells one scatter side may name; a cell is one centimetre.
 pub const MAX_SCATTER_SIDE: u16 = 4096;
@@ -963,6 +975,88 @@ fn wfc_verb(_server: &McpServer, args: &WfcArgs) -> Result<WfcOutput, McpToolErr
     run_wfc(&super::codex::project_root(None), args)
 }
 
+/// Args for `world.rewrite`: the rules text, a seed and an optional path for the
+/// grid text under the project root.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RewriteArgs {
+    /// Rules text: `size W H` and `alphabet SYMBOLS` first, then `put`, `rect`
+    /// and the `one`, `all`, `prl`, `markov` and `sequence` nodes; `#` starts a
+    /// comment. The first symbol fills the grid at the start.
+    pub rules: String,
+    /// Run seed; the same rules and seed always give the same grid and hash.
+    pub seed: u64,
+    /// Relative text path under the project root for the grid
+    /// (`target/world/insula.txt`). Omitted writes nothing.
+    #[serde(default)]
+    pub out: Option<String>,
+}
+
+/// `world.rewrite` result: the grid the rules made, its hash and the steps taken.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RewriteOutput {
+    /// Cells across.
+    pub width: u16,
+    /// Cells down.
+    pub height: u16,
+    /// The alphabet, fill symbol first: each character is one symbol.
+    pub symbols: String,
+    /// One line per row of symbol characters, a `\n` after each row; row 0 is
+    /// the top row.
+    pub grid: String,
+    /// Content hash of the grid: `0x` and 16 lowercase hex digits. The same
+    /// rules and seed answer the same hash.
+    pub hash: String,
+    /// Steps the run took, every node together.
+    pub steps: u32,
+    /// The relative path written, when the call named one.
+    pub out: Option<String>,
+}
+
+/// Refusal for a rules text the parser will not take; names the 1-based line.
+fn rules_refused(error: &RulesError) -> McpToolError {
+    bad_args(format!(
+        "{error}; re-run with that statement fixed: size takes 1..={MAX_REWRITE_SIDE} cells per \
+         side, and every symbol must sit in the alphabet line"
+    ))
+}
+
+/// Refusal for a run that passes its step or work cap; no partial grid comes back.
+fn run_refused(error: RunError) -> McpToolError {
+    bad_args(format!(
+        "{error}; re-run with a `steps=N` cap on the node that never settles, or rules that stop \
+         changing cells"
+    ))
+}
+
+/// Parse the rules, run them with the seed and optionally write the grid text.
+fn run_rewrite(root: &Path, args: &RewriteArgs) -> Result<RewriteOutput, McpToolError> {
+    let program = Program::parse(&args.rules).map_err(|error| rules_refused(&error))?;
+    let grid = program.run(args.seed).map_err(run_refused)?;
+    let mut out = RewriteOutput {
+        width: grid.width(),
+        height: grid.height(),
+        symbols: program.symbols(),
+        grid: grid.render(),
+        hash: format!("0x{:016x}", grid.hash()),
+        steps: grid.steps(),
+        out: None,
+    };
+    if let Some(rel) = args.out.as_deref() {
+        write_out(root, rel, out.grid.as_bytes())?;
+        out.out = Some(rel.to_owned());
+    }
+    Ok(out)
+}
+
+/// `world.rewrite` handler: the project root the door was built in.
+fn rewrite_verb(_server: &McpServer, args: &RewriteArgs) -> Result<RewriteOutput, McpToolError> {
+    run_rewrite(&super::codex::project_root(None), args)
+}
+
 crate::e2_tool!(
     /// `world.terrain.bake`: bake a seeded TVER map and report its stats.
     TerrainBakeTool,
@@ -1018,6 +1112,17 @@ crate::e2_tool!(
     invoke = wfc_verb
 );
 
+crate::e2_tool!(
+    /// `world.rewrite`: run a seeded rewrite-rule program from its rules text.
+    RewriteTool,
+    name = TOOL_WORLD_REWRITE,
+    description = "Run a seeded rewrite-rule grid from its rules text: MarkovJunior-style `IN=OUT` rules in one, all, prl, markov and sequence nodes (the format is in engine_world::rewrite). The rules name `size W H` (1..=128 cells per side) and `alphabet` first. Answers the grid as text, one line per row, its `0x` FNV hash and the steps taken. A bad statement refuses with its line number, and a run that never settles refuses instead of answering a partial grid. Writes the grid text only when `out` names a relative path under the project root; the same rules and seed always give the same grid and hash.",
+    readonly = false,
+    args = RewriteArgs,
+    output = RewriteOutput,
+    invoke = rewrite_verb
+);
+
 /// The world pack: terrain bake, sample and paint, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
@@ -1026,7 +1131,8 @@ pub fn pack() -> Result<PackDef, PackError> {
          3-way splat and reports its stats; world.terrain.sample answers height, hole and splat \
          at up to 4096 points; world.terrain.paint applies rect height/hole/splat edits and \
          reports what moved; world.scatter lays seeded Poisson-disk points over a square with \
-         terrain heights; world.wfc solves a tile map from an adjacency table. Every writer \
+         terrain heights; world.wfc solves a tile map from an adjacency table; world.rewrite \
+         runs a seeded rewrite-rule grid from its rules text. Every writer \
          writes only a relative `out` path under the project root",
         false,
     );
@@ -1062,6 +1168,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<WfcTool>(
         TOOL_WORLD_WFC,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<RewriteTool>(
+        TOOL_WORLD_REWRITE,
         PACK,
         CapabilityCard::Commit,
     )?);
@@ -1745,8 +1856,153 @@ mod tests {
         assert!(!root.exists(), "a refusal writes nothing");
     }
 
+    /// The maze rule set `content/maps/rewrite/` ships, read at compile time.
+    const MAZE_RULES: &str = include_str!("../../../../content/maps/rewrite/maze_streets.rules");
+    /// The UW12/UW20 insula floor plan, authored as a rules file.
+    const INSULA_RULES: &str = include_str!("../../../../content/maps/rewrite/insula_block.rules");
+
+    /// A rewrite call with the given rules text, seed 2040 and no path.
+    fn rewrite_of(rules: &str) -> RewriteArgs {
+        RewriteArgs {
+            rules: rules.to_owned(),
+            seed: 2040,
+            out: None,
+        }
+    }
+
     #[test]
-    fn pack_registers_its_seven_verbs() {
+    fn rewrite_bakes_the_maze_to_its_pinned_hash_twice() {
+        let root = scratch("rewrite");
+        let args = rewrite_of(MAZE_RULES);
+        let first = run_rewrite(&root, &args).expect("bakes the maze");
+        let second = run_rewrite(&root, &args).expect("bakes the maze twice");
+        assert_eq!(
+            first, second,
+            "the same rules and seed answer the same grid"
+        );
+        assert_eq!(first.hash, "0xf51cb0aeb99ba512", "the hash MJ1 pinned");
+        assert_eq!((first.width, first.height), (31, 31));
+        assert_eq!(first.symbols, "BWGR");
+        assert!(first.steps > 0, "the maze takes steps");
+        let rows: Vec<&str> = first.grid.lines().collect();
+        assert_eq!(rows.len(), 31, "one line per row");
+        assert!(rows.iter().all(|row| row.len() == 31), "{rows:?}");
+        assert!(!root.exists(), "no out path writes nothing");
+        // The door bakes the same grid the engine crate runs.
+        let direct = Program::parse(MAZE_RULES)
+            .expect("parses")
+            .run(2040)
+            .expect("settles");
+        assert_eq!(first.grid, direct.render());
+        // The tool handle answers the same row.
+        let served = RewriteTool::invoke(&server(), args).expect("serves through its tool");
+        assert_eq!(served.hash, first.hash);
+    }
+
+    #[test]
+    fn rewrite_refuses_a_bad_symbol_naming_its_line() {
+        let root = scratch("rewrite-bad");
+        // Line 4 writes `Q`, which the alphabet on line 2 does not name.
+        let rules = "size 8 8\nalphabet BW\nrect 0 0 8 8 B\nput 1 1 Q\n";
+        let refused = run_rewrite(&root, &rewrite_of(rules)).expect_err("a bad symbol refuses");
+        assert_eq!(refused.code, "bad_args");
+        assert!(
+            refused.message.contains("rules line 4"),
+            "{}",
+            refused.message
+        );
+        assert!(refused.message.contains("`Q`"), "{}", refused.message);
+        assert!(refused.message.contains("re-run"), "{}", refused.message);
+        assert!(!root.exists(), "a refusal writes nothing");
+    }
+
+    #[test]
+    fn rewrite_refuses_a_grid_over_128_a_side_before_running() {
+        let root = scratch("rewrite-side");
+        // These rules never settle: a refusal that names the size proves no run started.
+        let rules = "size 129 16\nalphabet BW\nput 0 0 B\nmarkov {\n  one { rule B = W }\n  one { rule W = B }\n}\n";
+        let refused = run_rewrite(&root, &rewrite_of(rules)).expect_err("129 cells refuse");
+        assert_eq!(refused.code, "bad_args");
+        assert!(
+            refused.message.contains("rules line 1"),
+            "{}",
+            refused.message
+        );
+        assert!(refused.message.contains("1..=128"), "{}", refused.message);
+        // 128 a side is the largest grid the door takes.
+        let edge = run_rewrite(
+            &root,
+            &rewrite_of("size 128 128\nalphabet BW\nrect 0 0 128 128 W\n"),
+        )
+        .expect("128 a side bakes");
+        assert_eq!((edge.width, edge.height, edge.steps), (128, 128, 1));
+    }
+
+    #[test]
+    fn rewrite_refuses_a_run_that_never_settles() {
+        let root = scratch("rewrite-loop");
+        // One cell flips between two symbols forever: no partial grid comes back.
+        let rules = "size 4 4\nalphabet BW\nput 0 0 B\nmarkov {\n  one { rule B = W }\n  one { rule W = B }\n}\n";
+        let refused = run_rewrite(&root, &rewrite_of(rules)).expect_err("a loop refuses");
+        assert_eq!(refused.code, "bad_args");
+        assert!(
+            refused.message.contains("without settling"),
+            "{}",
+            refused.message
+        );
+        assert!(refused.message.contains("re-run"), "{}", refused.message);
+    }
+
+    #[test]
+    fn rewrite_writes_the_grid_text_it_answers() {
+        let root = scratch("rewrite-out");
+        let args = RewriteArgs {
+            out: Some("rewrite/insula.txt".to_owned()),
+            ..rewrite_of(INSULA_RULES)
+        };
+        let written = run_rewrite(&root, &args).expect("bakes and writes");
+        assert_eq!(written.out.as_deref(), Some("rewrite/insula.txt"));
+        let bytes = std::fs::read(root.join("rewrite/insula.txt")).expect("file lands");
+        assert_eq!(
+            bytes,
+            written.grid.as_bytes(),
+            "the file holds the grid text"
+        );
+        // A path that leaves the project root refuses before a write.
+        let escaped = run_rewrite(
+            &root,
+            &RewriteArgs {
+                out: Some("../escape.txt".to_owned()),
+                ..args
+            },
+        )
+        .expect_err("escaping path refuses");
+        assert_eq!(escaped.code, "bad_args");
+    }
+
+    #[test]
+    fn rewrite_bakes_the_insula_floor_plan_from_its_rules_file() {
+        let root = scratch("rewrite-insula");
+        let args = rewrite_of(INSULA_RULES);
+        let plan = run_rewrite(&root, &args).expect("bakes the insula");
+        let again = run_rewrite(&root, &args).expect("bakes it twice");
+        assert_eq!(plan, again, "the same rules and seed give the same plan");
+        assert_eq!((plan.width, plan.height), (24, 18));
+        assert_eq!(plan.symbols, "SWRCD");
+        // The courtyard is 8 x 6 and no rule reaches it; the street margin stays street.
+        assert_eq!(plan.grid.matches('C').count(), 8 * 6);
+        let street = "S".repeat(24);
+        assert_eq!(plan.grid.lines().next(), Some(street.as_str()));
+        // The door bakes the file cell for cell, as the engine crate reads it.
+        let direct = Program::parse(INSULA_RULES)
+            .expect("parses")
+            .run(2040)
+            .expect("settles");
+        assert_eq!(plan.grid, direct.render());
+    }
+
+    #[test]
+    fn pack_registers_its_eight_verbs() {
         let pack = pack().expect("registers");
         assert_eq!(pack.name(), PACK);
         assert_eq!(
@@ -1758,7 +2014,8 @@ mod tests {
                 TOOL_WORLD_TERRAIN_SET,
                 TOOL_WORLD_TERRAIN_STATS,
                 TOOL_WORLD_SCATTER,
-                TOOL_WORLD_WFC
+                TOOL_WORLD_WFC,
+                TOOL_WORLD_REWRITE
             ]
         );
         assert!(!pack.default_loaded());
@@ -1897,6 +2154,7 @@ static PACK_ROW: super::PackModule = super::PackModule {
         "world.terrain.stats",
         "world.scatter",
         "world.wfc",
+        "world.rewrite",
     ],
     build: pack,
 };
