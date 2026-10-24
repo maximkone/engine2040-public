@@ -1,0 +1,5 @@
+Source: https://polyhaven.com/a/marble_tiles
+Licence: Creative Commons CC0 1.0 Universal (https://polyhaven.com/license ; https://creativecommons.org/publicdomain/zero/1.0/)
+Downloaded: 2026-10-24, 1K JPG from https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/marble_tiles/
+Normal map kept: nor_gl (OpenGL, +Y up). The DirectX variant (nor_dx) was dropped; DX = GL with the green channel inverted.
+Kept: Diffuse (Color, sRGB), nor_gl (Normal), Rough and AO (linear greyscale). Dropped: 2K/4K/8K, png, exr, spec, displacement, blend, gltf, mtlx.
