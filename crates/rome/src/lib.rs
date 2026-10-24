@@ -21,6 +21,7 @@
 
 pub mod camp;
 pub mod certainty;
+pub mod city;
 pub mod crane;
 pub mod geo;
 pub mod groma;
@@ -28,6 +29,7 @@ pub mod kit;
 pub mod lime;
 pub mod line;
 pub mod scutum;
+pub mod service;
 pub mod table;
 pub mod timber;
 
