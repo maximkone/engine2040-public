@@ -2,14 +2,19 @@
 
 mod blast;
 mod cloth;
+mod drive;
+mod follow;
 mod hit;
 mod joints;
 mod receipt;
 mod rest;
+mod roll;
 mod sever;
 mod tether;
 
-pub use hit::HIT_FADE_S;
+pub use drive::{Drive, DRIVE_DT, MAX_KEYFRAMED_SPEED_M_S};
+pub use follow::{MAX_DRIVE_ANGLE, MAX_DRIVE_OMEGA};
+pub use hit::{HIT_FADE_S, RAGDOLL_TONE};
 pub use receipt::RagdollReceipt;
 pub use sever::Severed;
 pub use tether::TetherInfo;
@@ -130,6 +135,8 @@ pub struct PhysFx {
     recycled: u64,
     contacts: usize,
     micros: u64,
+    /// Rolling resistance per contact, meters ([`roll::ROLLING`], [`roll::ROLLING_OFF`] off).
+    rolling: f32,
     clock: fn() -> u64,
 }
 
@@ -178,6 +185,7 @@ impl PhysFx {
             recycled: 0,
             contacts: 0,
             micros: 0,
+            rolling: roll::ROLLING_OFF,
             clock: no_clock,
         }
     }
@@ -418,6 +426,7 @@ impl PhysFx {
         let started = (self.clock)();
         self.fade_drives();
         self.world.step();
+        self.apply_rolling_resistance();
         self.settle_resting_bodies();
         self.step_tethers();
         self.soft.step();
