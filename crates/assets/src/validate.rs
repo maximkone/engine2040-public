@@ -1,511 +1,376 @@
-//! validate: std-only scene/rules schema gate. Compile once, refuse with key paths, never panic.
-//! Owner: engine-assets. Units: JSON docs. Determinism: sorted keys, capped refusals, no IO.
-//! Errors: Refusal names path plus reason; parse and compile refuse, never panic. No net, no fs.
-//! PORT(Stranger6667/jsonschema@3cd27a35:crates/jsonschema/src/lib.rs): one-shot plus compiled
-//! shape with structured refusals; method only, zero bytes vendored, offline core (no resolve).
-use std::collections::BTreeMap;
+//! Content rules over a cooked mesh. A rule names one defect, its severity and
+//! an optional fix. `validate` reports hits in `RULES` order; `fix` applies one
+//! repair and re-checks that rule. Std-only, no IO, no randomness.
+use super::cooked::CookedMesh;
+use super::import_repair::recompute_tangents;
 
-/// Cap on refusals per instance; counts saturate here, order stays deterministic.
-pub const MAX_REFUSALS: usize = 16;
-/// Cap on JSON nesting; deeper docs refuse instead of recursing.
-const MAX_DEPTH: usize = 32;
+/// Triangles with an area at or below this (square meters) are degenerate.
+const DEGENERATE_AREA_M2: f64 = 1.0e-12;
+/// A normal may differ from unit length by this much.
+const NORMAL_UNIT_TOL: f64 = 1.0e-3;
+/// A zero-length normal has no direction to keep, so it becomes +Y.
+const NORMAL_FALLBACK: [f32; 3] = [0.0, 1.0, 0.0];
 
-/// Typed refusal: dotted key path plus one-line reason. Never panics, always names its path.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Refusal {
-    /// Dotted key path (`count`, `transform.x`); `$` for the document root.
-    pub path: String,
-    /// One-line reason (`missing required key`, `expected integer`, `out of range`...).
-    pub reason: String,
+/// How bad one hit is. An error means the cook must refuse the mesh; a warning
+/// means the mesh is usable but the source should be fixed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// The cook must refuse the mesh.
+    Error,
+    /// The mesh is usable; the source should be fixed.
+    Warning,
 }
 
-/// Minimal JSON value; objects sort keys so validation order is deterministic.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Value {
-    /// JSON null.
-    Null,
-    /// JSON true/false.
-    Bool(bool),
-    /// Finite JSON number.
-    Num(f64),
-    /// JSON string.
-    Str(String),
-    /// JSON array.
-    Arr(Vec<Value>),
-    /// JSON object with sorted keys.
-    Obj(BTreeMap<String, Value>),
+/// One content rule: a defect check and the repair for it, if one exists.
+#[derive(Clone, Copy)]
+pub struct Rule {
+    /// Dotted id; the key that `fix` takes.
+    pub id: &'static str,
+    /// Severity of every hit this rule reports.
+    pub severity: Severity,
+    /// True when the mesh has the defect.
+    pub check: fn(&CookedMesh) -> bool,
+    /// Repair for the defect; `None` when only the source can change.
+    pub fix: Option<fn(&mut CookedMesh)>,
 }
 
-/// Compiled schema: shape-checked once, then validates many instances.
-#[derive(Debug, Clone)]
-pub struct Schema {
-    /// Checked schema document (object with required/properties/additionalProperties).
-    v: Value,
+/// One defect that `validate` found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hit {
+    /// The rule that fired.
+    pub id: &'static str,
+    /// The rule's severity.
+    pub severity: Severity,
 }
 
-fn bad(path: &str, reason: &str) -> Refusal {
-    Refusal {
-        path: path.into(),
-        reason: reason.into(),
-    }
+/// Why `fix` did not clear a rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixError {
+    /// No rule has this id.
+    Unknown(String),
+    /// The rule has no repair; the source has to change.
+    NoFix(&'static str),
+    /// The repair ran and the rule still fires. The mesh was changed; drop it.
+    StillHit(&'static str),
 }
 
-fn str_of(v: &Value) -> Option<&str> {
-    match v {
-        Value::Str(s) => Some(s),
-        _ => None,
-    }
+/// Every content rule, in the order `validate` reports them.
+pub const RULES: &[Rule] = &[
+    Rule {
+        id: "tangents.missing",
+        severity: Severity::Warning,
+        check: tangents_missing,
+        fix: Some(recompute_missing_tangents),
+    },
+    Rule {
+        id: "tri.degenerate",
+        severity: Severity::Warning,
+        check: tri_degenerate,
+        fix: Some(drop_degenerate_tris),
+    },
+    Rule {
+        id: "normal.not_unit",
+        severity: Severity::Warning,
+        check: normal_not_unit,
+        fix: Some(renormalize_normals),
+    },
+    Rule {
+        id: "float.nonfinite",
+        severity: Severity::Error,
+        check: float_nonfinite,
+        fix: None,
+    },
+];
+
+/// Every rule that fires on `mesh`, in `RULES` order. Same mesh, same hits.
+pub fn validate(mesh: &CookedMesh) -> Vec<Hit> {
+    RULES
+        .iter()
+        .filter(|rule| (rule.check)(mesh))
+        .map(|rule| Hit {
+            id: rule.id,
+            severity: rule.severity,
+        })
+        .collect()
 }
 
-fn join(path: &str, key: &str) -> String {
-    if path.is_empty() {
-        key.into()
-    } else {
-        format!("{path}.{key}")
-    }
-}
-
-/// Parse designer JSON text into a Value; malformed docs refuse, never panic.
-pub fn parse(doc: &str) -> Result<Value, Refusal> {
-    let mut p = P {
-        b: doc.as_bytes(),
-        i: 0,
+/// Apply rule `id`'s repair, then re-check that rule. `Ok(())` means the rule
+/// no longer fires. Other rules are not re-checked by this call.
+pub fn fix(mesh: &mut CookedMesh, id: &str) -> Result<(), FixError> {
+    let rule = RULES
+        .iter()
+        .find(|rule| rule.id == id)
+        .ok_or_else(|| FixError::Unknown(id.to_owned()))?;
+    let Some(repair) = rule.fix else {
+        return Err(FixError::NoFix(rule.id));
     };
-    p.ws();
-    let v = p.value(0)?;
-    p.ws();
-    if p.i != p.b.len() {
-        return Err(bad("$", "trailing characters"));
-    }
-    Ok(v)
-}
-
-struct P<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl<'a> P<'a> {
-    fn ws(&mut self) {
-        while self.i < self.b.len() && matches!(self.b[self.i], 32 | 9 | 10 | 13) {
-            self.i += 1;
-        }
-    }
-    fn peek(&self) -> Option<u8> {
-        self.b.get(self.i).copied()
-    }
-    fn value(&mut self, d: usize) -> Result<Value, Refusal> {
-        if d > MAX_DEPTH {
-            return Err(bad("$", "nesting too deep"));
-        }
-        match self.peek() {
-            None => Err(bad("$", "unexpected end")),
-            Some(b'n') => self.lit("null", Value::Null),
-            Some(b't') => self.lit("true", Value::Bool(true)),
-            Some(b'f') => self.lit("false", Value::Bool(false)),
-            Some(b'"') => Ok(Value::Str(self.string()?)),
-            Some(b'[') => self.array(d),
-            Some(b'{') => self.object(d),
-            Some(c) if c == b'-' || c.is_ascii_digit() => self.number(),
-            _ => Err(bad("$", "unexpected character")),
-        }
-    }
-    fn lit(&mut self, s: &str, v: Value) -> Result<Value, Refusal> {
-        let n = s.len();
-        if self.b.len().saturating_sub(self.i) >= n && &self.b[self.i..self.i + n] == s.as_bytes() {
-            self.i += n;
-            Ok(v)
-        } else {
-            Err(bad("$", "invalid literal"))
-        }
-    }
-    fn number(&mut self) -> Result<Value, Refusal> {
-        let s = self.i;
-        while self.i < self.b.len()
-            && matches!(
-                self.b[self.i],
-                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'
-            )
-        {
-            self.i += 1;
-        }
-        let t = core::str::from_utf8(&self.b[s..self.i]).map_err(|_| bad("$", "bad number"))?;
-        let n: f64 = t.parse().map_err(|_| bad("$", "bad number"))?;
-        if !n.is_finite() {
-            return Err(bad("$", "number out of range"));
-        }
-        Ok(Value::Num(n))
-    }
-    fn hex(&mut self) -> Result<char, Refusal> {
-        if self.b.len().saturating_sub(self.i) < 4 {
-            return Err(bad("$", "bad unicode"));
-        }
-        let t = core::str::from_utf8(&self.b[self.i..self.i + 4])
-            .map_err(|_| bad("$", "bad unicode"))?;
-        let u = u32::from_str_radix(t, 16).map_err(|_| bad("$", "bad unicode"))?;
-        self.i += 4;
-        Ok(char::from_u32(u).unwrap_or('\u{FFFD}'))
-    }
-    fn string(&mut self) -> Result<String, Refusal> {
-        self.i += 1;
-        let mut s = String::new();
-        loop {
-            let c = self
-                .b
-                .get(self.i)
-                .copied()
-                .ok_or_else(|| bad("$", "unterminated string"))?;
-            self.i += 1;
-            match c {
-                b'"' => return Ok(s),
-                b'\\' => {
-                    let e = self
-                        .b
-                        .get(self.i)
-                        .copied()
-                        .ok_or_else(|| bad("$", "bad escape"))?;
-                    self.i += 1;
-                    match e {
-                        b'"' => s.push('"'),
-                        b'\\' => s.push('\\'),
-                        b'/' => s.push('/'),
-                        b'b' => s.push('\u{8}'),
-                        b'f' => s.push('\u{C}'),
-                        b'n' => s.push('\n'),
-                        b'r' => s.push('\r'),
-                        b't' => s.push('\t'),
-                        b'u' => s.push(self.hex()?),
-                        _ => return Err(bad("$", "bad escape")),
-                    }
-                }
-                0..=31 => return Err(bad("$", "control in string")),
-                _ => {
-                    let rest = core::str::from_utf8(&self.b[self.i - 1..])
-                        .map_err(|_| bad("$", "bad utf8"))?;
-                    let ch = rest.chars().next().ok_or_else(|| bad("$", "bad utf8"))?;
-                    self.i += ch.len_utf8() - 1;
-                    s.push(ch);
-                }
-            }
-        }
-    }
-    fn array(&mut self, d: usize) -> Result<Value, Refusal> {
-        self.i += 1;
-        let mut v = Vec::new();
-        self.ws();
-        if self.peek() == Some(b']') {
-            self.i += 1;
-            return Ok(Value::Arr(v));
-        }
-        loop {
-            self.ws();
-            v.push(self.value(d + 1)?);
-            self.ws();
-            match self.peek() {
-                Some(b',') => self.i += 1,
-                Some(b']') => {
-                    self.i += 1;
-                    return Ok(Value::Arr(v));
-                }
-                _ => return Err(bad("$", "expected , or ]")),
-            }
-        }
-    }
-    fn object(&mut self, d: usize) -> Result<Value, Refusal> {
-        self.i += 1;
-        let mut m = BTreeMap::new();
-        self.ws();
-        if self.peek() == Some(b'}') {
-            self.i += 1;
-            return Ok(Value::Obj(m));
-        }
-        loop {
-            self.ws();
-            if self.peek() != Some(b'"') {
-                return Err(bad("$", "expected string key"));
-            }
-            let k = self.string()?;
-            self.ws();
-            if self.peek() != Some(b':') {
-                return Err(bad("$", "expected :"));
-            }
-            self.i += 1;
-            self.ws();
-            let v = self.value(d + 1)?;
-            m.insert(k, v);
-            self.ws();
-            match self.peek() {
-                Some(b',') => self.i += 1,
-                Some(b'}') => {
-                    self.i += 1;
-                    return Ok(Value::Obj(m));
-                }
-                _ => return Err(bad("$", "expected , or }")),
-            }
-        }
-    }
-}
-
-fn rule_shape(r: &Value, path: String) -> Result<(), Refusal> {
-    let Value::Obj(o) = r else {
-        return Err(Refusal {
-            path,
-            reason: "rule must be an object".into(),
-        });
-    };
-    if let Some(t) = o.get("type") {
-        match str_of(t) {
-            Some("string" | "integer" | "number" | "boolean" | "array" | "object" | "null") => {}
-            _ => {
-                return Err(Refusal {
-                    path,
-                    reason: "unknown type".into(),
-                })
-            }
-        }
-    }
-    for k in ["minimum", "maximum"] {
-        if let Some(n) = o.get(k) {
-            match n {
-                Value::Num(x) if x.is_finite() => {}
-                _ => {
-                    return Err(Refusal {
-                        path,
-                        reason: "range bound must be a number".into(),
-                    })
-                }
-            }
-        }
-    }
-    if let Some(e) = o.get("enum") {
-        if !matches!(e, Value::Arr(_)) {
-            return Err(Refusal {
-                path,
-                reason: "enum must be an array".into(),
-            });
-        }
-    }
-    if let Some(p) = o.get("properties") {
-        match p {
-            Value::Obj(m) => {
-                for (k, v) in m {
-                    rule_shape(v, join(&path, k))?;
-                }
-            }
-            _ => {
-                return Err(Refusal {
-                    path,
-                    reason: "properties must be an object".into(),
-                })
-            }
-        }
+    repair(mesh);
+    if (rule.check)(mesh) {
+        return Err(FixError::StillHit(rule.id));
     }
     Ok(())
 }
 
-impl Schema {
-    /// Compile a schema document once; bad shapes refuse here so validate stays total.
-    pub fn compile(schema: &Value) -> Result<Schema, Refusal> {
-        let Value::Obj(o) = schema else {
-            return Err(bad("$", "schema must be an object"));
+fn all_finite<const N: usize>(values: &[f32; N]) -> bool {
+    values.iter().all(|v| v.is_finite())
+}
+
+/// The position at `index`, or `None` when the index is out of range.
+fn position(mesh: &CookedMesh, index: u32) -> Option<&[f32; 3]> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| mesh.positions.get(i))
+}
+
+fn length(v: &[f32; 3]) -> f64 {
+    let (x, y, z) = (f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
+    (x * x + y * y + z * z).sqrt()
+}
+
+/// The tangent array does not hold one entry per vertex.
+fn tangents_missing(mesh: &CookedMesh) -> bool {
+    mesh.tangents.len() != mesh.positions.len()
+}
+
+/// Rebuild the tangents from positions and UVs with the import lane's solve.
+fn recompute_missing_tangents(mesh: &mut CookedMesh) {
+    mesh.tangents = recompute_tangents(mesh);
+}
+
+/// Zero-area test for one triangle. Out-of-range indices and non-finite
+/// corners answer false: range is `validate_mesh`'s job and NaN is
+/// `float.nonfinite`'s, so one defect never reports twice.
+fn triangle_is_degenerate(mesh: &CookedMesh, corners: [u32; 3]) -> bool {
+    let mut p = [[0.0f64; 3]; 3];
+    for (slot, index) in p.iter_mut().zip(corners) {
+        let Some(v) = position(mesh, index) else {
+            return false;
         };
-        if let Some(t) = o.get("type") {
-            if str_of(t) != Some("object") {
-                return Err(bad("$", "only object schemas supported"));
-            }
+        if !all_finite(v) {
+            return false;
         }
-        match o.get("required") {
-            None => {}
-            Some(Value::Arr(req)) if req.iter().all(|x| matches!(x, Value::Str(_))) => {}
-            Some(_) => return Err(bad("$.required", "required must list key names")),
+        *slot = [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])];
+    }
+    let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+    let e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+    let cross = [
+        e1[1] * e2[2] - e1[2] * e2[1],
+        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[0] * e2[1] - e1[1] * e2[0],
+    ];
+    let cross_len = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+    cross_len * 0.5 <= DEGENERATE_AREA_M2
+}
+
+fn tri_degenerate(mesh: &CookedMesh) -> bool {
+    mesh.indices
+        .chunks_exact(3)
+        .any(|t| triangle_is_degenerate(mesh, [t[0], t[1], t[2]]))
+}
+
+/// Drop every zero-area triangle. A trailing partial triangle stays as it is.
+fn drop_degenerate_tris(mesh: &mut CookedMesh) {
+    let mut kept = Vec::with_capacity(mesh.indices.len());
+    for t in mesh.indices.chunks_exact(3) {
+        if !triangle_is_degenerate(mesh, [t[0], t[1], t[2]]) {
+            kept.extend_from_slice(t);
         }
-        match o.get("properties") {
-            None => {}
-            Some(Value::Obj(m)) => {
-                for (k, v) in m {
-                    rule_shape(v, format!("$.properties.{k}"))?;
-                }
-            }
-            Some(_) => return Err(bad("$.properties", "properties must be an object")),
+    }
+    kept.extend_from_slice(mesh.indices.chunks_exact(3).remainder());
+    mesh.indices = kept;
+}
+
+/// A finite normal whose length is off unit length by more than the tolerance.
+fn normal_not_unit(mesh: &CookedMesh) -> bool {
+    mesh.normals
+        .iter()
+        .any(|n| all_finite(n) && (length(n) - 1.0).abs() > NORMAL_UNIT_TOL)
+}
+
+/// Renormalize each off-unit finite normal. A zero normal takes `NORMAL_FALLBACK`.
+fn renormalize_normals(mesh: &mut CookedMesh) {
+    for n in &mut mesh.normals {
+        if !all_finite(n) || (length(n) - 1.0).abs() <= NORMAL_UNIT_TOL {
+            continue;
         }
-        Ok(Schema { v: schema.clone() })
+        *n = unit_dir(n).unwrap_or(NORMAL_FALLBACK);
     }
 }
 
-fn push(out: &mut Vec<Refusal>, path: String, reason: String) {
-    if out.len() < MAX_REFUSALS {
-        out.push(Refusal { path, reason });
+/// Unit direction of `v` in f32. The largest component is scaled to 1 first,
+/// so the squares cannot overflow. `None` for a zero or non-finite vector.
+fn unit_dir(v: &[f32; 3]) -> Option<[f32; 3]> {
+    let big = v.iter().fold(0.0f32, |acc, x| acc.max(x.abs()));
+    if big == 0.0 || !big.is_finite() {
+        return None;
     }
+    let s = [v[0] / big, v[1] / big, v[2] / big];
+    let len = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
+    Some([s[0] / len, s[1] / len, s[2] / len])
 }
 
-/// One-shot accept check over a compiled schema.
-pub fn is_valid(schema: &Schema, instance: &Value) -> bool {
-    validate(schema, instance).is_empty()
-}
-
-/// Validate many instances against one compiled schema; refusals sort by key, cap at 16.
-pub fn validate(schema: &Schema, instance: &Value) -> Vec<Refusal> {
-    let mut out = Vec::new();
-    check_obj(&schema.v, instance, String::new(), &mut out);
-    out
-}
-
-fn check_obj(sch: &Value, inst: &Value, path: String, out: &mut Vec<Refusal>) {
-    let Value::Obj(sobj) = sch else { return };
-    let Value::Obj(iobj) = inst else {
-        let here = if path.is_empty() { "$".into() } else { path };
-        push(out, here, "expected object".into());
-        return;
-    };
-    if let Some(Value::Arr(req)) = sobj.get("required") {
-        for r in req {
-            if let Value::Str(k) = r {
-                if !iobj.contains_key(k) {
-                    push(out, join(&path, k), "missing required key".into());
-                }
-            }
-        }
-    }
-    if let Some(Value::Obj(props)) = sobj.get("properties") {
-        for (k, rule) in props {
-            if let Some(v) = iobj.get(k) {
-                check_rule(rule, v, join(&path, k), out);
-            }
-        }
-        if matches!(sobj.get("additionalProperties"), Some(Value::Bool(false))) {
-            for k in iobj.keys() {
-                if !props.contains_key(k) {
-                    push(out, join(&path, k), "unknown key".into());
-                }
-            }
-        }
-    }
-}
-
-fn check_rule(rule: &Value, v: &Value, path: String, out: &mut Vec<Refusal>) {
-    let Value::Obj(ro) = rule else { return };
-    if let Some(t) = ro.get("type") {
-        let ok = match (str_of(t), v) {
-            (Some("string"), Value::Str(_)) => true,
-            (Some("integer"), Value::Num(n)) => n.fract() == 0.0,
-            (Some("number"), Value::Num(_)) => true,
-            (Some("boolean"), Value::Bool(_)) => true,
-            (Some("array"), Value::Arr(_)) => true,
-            (Some("object"), Value::Obj(_)) => true,
-            (Some("null"), Value::Null) => true,
-            _ => false,
-        };
-        if !ok {
-            push(out, path, format!("expected {}", str_of(t).unwrap_or("?")));
-            return;
-        }
-    }
-    if let Some(Value::Arr(allow)) = ro.get("enum") {
-        if !allow.contains(v) {
-            push(out, path, "value not in enum".into());
-            return;
-        }
-    }
-    if let Value::Num(n) = v {
-        let low = ro.get("minimum").and_then(|x| match x {
-            Value::Num(l) => Some(*l),
-            _ => None,
-        });
-        let high = ro.get("maximum").and_then(|x| match x {
-            Value::Num(h) => Some(*h),
-            _ => None,
-        });
-        if low.is_some_and(|l| n < &l) || high.is_some_and(|h| n > &h) {
-            push(out, path, "out of range".into());
-            return;
-        }
-    }
-    if matches!(v, Value::Obj(_)) && ro.contains_key("properties") {
-        check_obj(rule, v, path, out);
-    }
+/// Any NaN or infinity in positions, normals, tangents or uv0.
+fn float_nonfinite(mesh: &CookedMesh) -> bool {
+    mesh.positions.iter().any(|v| !all_finite(v))
+        || mesh.normals.iter().any(|v| !all_finite(v))
+        || mesh.tangents.iter().any(|v| !all_finite(v))
+        || mesh.uv0.iter().any(|v| !all_finite(v))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    const SCENE: &str = "{\"type\":\"object\",\"required\":[\"name\",\"count\"],\"properties\":{\"name\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":8},\"mode\":{\"type\":\"string\",\"enum\":[\"day\",\"night\"]},\"transform\":{\"type\":\"object\",\"required\":[\"x\"],\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}}}},\"additionalProperties\":false}";
-    const RULES: &str = "{\"type\":\"object\",\"required\":[\"seed\",\"rounds\"],\"properties\":{\"seed\":{\"type\":\"integer\",\"minimum\":1},\"rounds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":600},\"tier\":{\"type\":\"string\",\"enum\":[\"potato\",\"pc\"]},\"label\":{\"type\":\"string\"}},\"additionalProperties\":false}";
-    fn schema(text: &str) -> Schema {
-        Schema::compile(&parse(text).expect("schema parses")).expect("schema compiles")
+
+    /// Two triangles on the XY plane: a quad every rule accepts.
+    fn clean() -> CookedMesh {
+        CookedMesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uv0: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            tangents: vec![[1.0, 0.0, 0.0, 1.0]; 4],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        }
     }
+
+    /// A fifth vertex at (0.5, 0, 0) and a triangle over vertices 0, 1 and 4.
+    /// All three sit on the x axis, so the triangle has no area.
+    fn add_collinear_tri(mesh: &mut CookedMesh) {
+        mesh.positions.push([0.5, 0.0, 0.0]);
+        mesh.normals.push([0.0, 0.0, 1.0]);
+        mesh.uv0.push([0.5, 0.0]);
+        mesh.tangents.push([1.0, 0.0, 0.0, 1.0]);
+        mesh.indices.extend([0, 1, 4]);
+    }
+
+    /// One defect on top of the clean quad, named by its rule id.
+    fn seeded(id: &str) -> CookedMesh {
+        let mut mesh = clean();
+        match id {
+            "tangents.missing" => mesh.tangents.clear(),
+            "tri.degenerate" => add_collinear_tri(&mut mesh),
+            "normal.not_unit" => mesh.normals[1] = [0.0, 0.0, 2.0],
+            "float.nonfinite" => mesh.positions[2][0] = f32::NAN,
+            other => panic!("no seed for rule {other}"),
+        }
+        mesh
+    }
+
+    /// Every defect at once. Vertex 2 is NaN, so its two triangles skip the
+    /// zero-area check and only `float.nonfinite` reports them.
+    fn all_defects() -> CookedMesh {
+        let mut mesh = clean();
+        add_collinear_tri(&mut mesh);
+        mesh.tangents.clear();
+        mesh.normals[1] = [0.0, 0.0, 2.0];
+        mesh.positions[2][0] = f32::NAN;
+        mesh
+    }
+
+    fn ids(mesh: &CookedMesh) -> Vec<&'static str> {
+        validate(mesh).into_iter().map(|hit| hit.id).collect()
+    }
+
     #[test]
-    fn validate_corpus_12_verdicts() {
-        let scene = schema(SCENE);
-        let rules = schema(RULES);
-        let cases: [(&Schema, &str, bool, &str); 12] = [
-            (
-                &scene,
-                "{\"name\":\"arena\",\"count\":4,\"mode\":\"day\",\"transform\":{\"x\":1.5}}",
-                true,
-                "",
-            ),
-            (&scene, "{\"count\":4}", false, "name"),
-            (
-                &scene,
-                "{\"name\":\"arena\",\"count\":\"four\"}",
-                false,
-                "count",
-            ),
-            (&scene, "{\"name\":\"arena\",\"count\":99}", false, "count"),
-            (
-                &scene,
-                "{\"name\":\"arena\",\"count\":4,\"mode\":\"dusk\"}",
-                false,
-                "mode",
-            ),
-            (
-                &scene,
-                "{\"name\":\"arena\",\"count\":4,\"fog\":true}",
-                false,
-                "fog",
-            ),
-            (&rules, "{\"seed\":2040,\"rounds\":600}", true, ""),
-            (&rules, "{\"seed\":2040}", false, "rounds"),
-            (&rules, "{\"seed\":\"2040\",\"rounds\":10}", false, "seed"),
-            (&rules, "{\"seed\":2040,\"rounds\":601}", false, "rounds"),
-            (
-                &rules,
-                "{\"seed\":1,\"rounds\":10,\"tier\":\"ps5\"}",
-                false,
-                "tier",
-            ),
-            (
-                &rules,
-                "{\"seed\":1,\"rounds\":10,\"cheat\":true}",
-                false,
-                "cheat",
-            ),
-        ];
-        for (s, doc, ok, path) in cases {
-            let v = parse(doc).expect("doc parses");
-            let r = validate(s, &v);
-            assert_eq!(r.is_empty(), ok, "doc {doc}");
-            assert!(r.iter().all(|x| !x.path.is_empty()), "doc {doc}");
-            if ok {
-                assert!(is_valid(s, &v), "doc {doc}");
-            } else {
-                assert!(r.iter().any(|x| x.path == path), "doc {doc} gives {r:?}");
-            }
+    fn validate_clean_mesh_reports_none() {
+        assert!(validate(&clean()).is_empty());
+    }
+
+    #[test]
+    fn validate_seeded_defect_reports_exactly_its_rule_id() {
+        for rule in RULES {
+            let hits = validate(&seeded(rule.id));
+            assert_eq!(
+                hits,
+                vec![Hit {
+                    id: rule.id,
+                    severity: rule.severity
+                }],
+                "seed for {}",
+                rule.id
+            );
         }
-        let v = parse("{\"name\":\"a\",\"count\":1,\"transform\":{}}").expect("doc parses");
-        let r = validate(&scene, &v);
-        assert!(
-            r.iter().any(|x| x.path == "transform.x"),
-            "nested path: {r:?}"
+    }
+
+    #[test]
+    fn validate_all_defects_reports_in_rule_order() {
+        assert_eq!(
+            ids(&all_defects()),
+            [
+                "tangents.missing",
+                "tri.degenerate",
+                "normal.not_unit",
+                "float.nonfinite"
+            ]
         );
-        let mut big = String::from("{\"name\":\"a\",\"count\":1");
-        for i in 0..24 {
-            big.push_str(&format!(",\"k{i}\":1"));
+    }
+
+    #[test]
+    fn validate_two_runs_give_identical_hits() {
+        let mesh = all_defects();
+        assert_eq!(validate(&mesh), validate(&mesh));
+    }
+
+    #[test]
+    fn validate_non_finite_normal_is_float_only() {
+        let mut mesh = clean();
+        mesh.normals[0] = [f32::INFINITY, 0.0, 0.0];
+        assert_eq!(ids(&mesh), ["float.nonfinite"]);
+    }
+
+    #[test]
+    fn fix_clears_its_seeded_hit() {
+        for rule in RULES.iter().filter(|rule| rule.fix.is_some()) {
+            let mut mesh = seeded(rule.id);
+            assert_eq!(fix(&mut mesh, rule.id), Ok(()), "fix for {}", rule.id);
+            assert!(
+                ids(&mesh).is_empty(),
+                "fix for {} left {:?}",
+                rule.id,
+                ids(&mesh)
+            );
         }
-        big.push('}');
-        let doc = parse(&big).expect("doc parses");
-        let first = validate(&scene, &doc);
-        assert_eq!(first.len(), MAX_REFUSALS);
-        assert_eq!(first, validate(&scene, &doc));
+    }
+
+    #[test]
+    fn fix_clears_its_hit_and_no_other() {
+        for rule in RULES.iter().filter(|rule| rule.fix.is_some()) {
+            let expected: Vec<Hit> = validate(&all_defects())
+                .into_iter()
+                .filter(|hit| hit.id != rule.id)
+                .collect();
+            let mut mesh = all_defects();
+            assert_eq!(fix(&mut mesh, rule.id), Ok(()), "fix for {}", rule.id);
+            assert_eq!(validate(&mesh), expected, "fix for {}", rule.id);
+        }
+    }
+
+    #[test]
+    fn fix_refuses_unknown_id_and_rule_without_repair() {
+        let mut mesh = seeded("float.nonfinite");
+        assert_eq!(
+            fix(&mut mesh, "float.nonfinite"),
+            Err(FixError::NoFix("float.nonfinite"))
+        );
+        assert_eq!(
+            fix(&mut mesh, "nope"),
+            Err(FixError::Unknown("nope".to_owned()))
+        );
+    }
+
+    #[test]
+    fn fix_reports_still_hit_when_repair_cannot_cover_the_mesh() {
+        // No normals: the tangent solve has nothing to orthogonalize against.
+        let mut mesh = clean();
+        mesh.normals.clear();
+        mesh.tangents.clear();
+        assert_eq!(
+            fix(&mut mesh, "tangents.missing"),
+            Err(FixError::StillHit("tangents.missing"))
+        );
     }
 }

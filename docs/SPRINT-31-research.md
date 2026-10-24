@@ -47,15 +47,15 @@ report section has the mechanism. Feel donors live in `02-feel.md` beside the FE
   the duel link so a model can test its netcode. Donor: Open-Godot-MCP `network.py`. Files:
   `crates/endpoint/src/packs/net.rs`, `crates/proof/src/chaos.rs`. Accept: 120 ms and 5% loss end
   a scripted duel on the same digest as a clean link. Landed 325a54fa6 + 6b58f4792. Proof: `cargo test -p engine-proof --lib chaos::tests::shap` 4 passed (run 39868576928), incl. `shaped_duel_at_120ms_and_5pct_loss_matches_the_clean_digest` — the 120 ms / 5% duel over the shipped loopback wire folds the same tape, tip and sim-only digest as a clean link, twice (digest 17089590214351568806, seed 2040), and the seed-2040 shaper drops exactly 46/1000 packets; `cargo test -p engine-endpoint --features mcp --lib packs::net` 10 passed; clippy proof + endpoint `-D warnings` PASS; rustfmt clean; `rust-quality --crate endpoint --crate proof` PASS. The verb is `net.shape` with integer conversions (ms -> ticks at 60 Hz rounded up, permille -> whole percent rounded up) and `Observe` reads; out-of-range args refuse with `bad_args`. Golden `d57b5c8ae3096614` untouched (proof, endpoint and one doc line only, no sim crate).
-- [ ] ARX01 physics: a hit picks stagger, step or fall by the capture point. The victim's capture
+- [x] ARX01 physics: a hit picks stagger, step or fall by the capture point. The victim's capture Landed 855540d. `crates/physics/src/capture_point.rs` picks hold, step or fall from the capture point against the support (integer mm) and `HitDir` carries the push; law tests: mirrored hits mirror the choice, a harder blow never picks a milder reaction; runs 40112186644 (10 tests) and 40112181770 (16 tests).
   point (centre of mass plus velocity times the pendulum time, integer mm) against its support:
   inside holds, near the edge steps, past it falls. Classic balance control (2603.08619 uses it as
   a training signal). Files: `crates/physics/src/balance.rs`, `crates/anim/src/hit_react.rs`.
   Accept: law tests: mirrored hits mirror the choice, a harder blow never picks a milder reaction.
-- [ ] ARX05 endpoint: the look judge reports its spread. The VLM judge answers over three prompt
+- [x] ARX05 endpoint: the look judge reports its spread. The VLM judge answers over three prompt
   wordings and returns the spread; it never gates alone (2607.25921). Files:
   `crates/endpoint/src/packs/view.rs`. Accept: a test with a fake judge that flips on one wording
-  reports the spread and no pass.
+  reports the spread and no pass. Landed 7f2a70cf1: judge answers three wordings, score = lowest, pass needs all three and spread <= 100 permille (look_judge 6 passed run 40114889002, hook + real tests green).
 - [x] ENG17 web: audio runs on an AudioWorklet fed by the existing mixer. The page ships a
   worklet processor that pulls from a ring buffer the mixer writes and keeps the
   ScriptProcessorNode only as the fallback when the worklet cannot load; the page receipt
