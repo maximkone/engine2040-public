@@ -175,6 +175,9 @@ engine-arena = { version = "0.1.0", path = "crates/arena" }
 engine-rules = { version = "0.1.0", path = "crates/rules" }
 engine-app = { version = "0.1.0", path = "crates/app" }
 engine-game = { version = "0.1.0", path = "crates/game" }
+# SW32: the presentation-knob dylib watcher. A leaf (std + libloading), off the
+# headless graph unless a leg asks for it.
+engine-live = { version = "0.1.0", path = "crates/live" }
 engine-world = { version = "0.1.0", path = "crates/world" }
 engine-combat = { version = "0.1.0", path = "crates/combat" }
 engine-anim = { version = "0.1.0", path = "crates/anim" }
@@ -185,6 +188,7 @@ burn = "0.21"
 engine-save = { version = "0.1.0", path = "crates/save" }
 engine-ui = { version = "0.1.0", path = "crates/ui" }
 engine-editor = { version = "0.1.0", path = "crates/editor" }
+engine-editor-derive = { version = "0.1.0", path = "crates/editor-derive" }
 engine-spatial = { version = "0.1.0", path = "crates/spatial" }
 engine-provider = { version = "0.1.0", path = "crates/provider" }
 glam = "0.33"
