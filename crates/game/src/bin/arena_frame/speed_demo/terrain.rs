@@ -5,8 +5,9 @@
 //! centered on the origin with hills of tens of meters. `height_at` reads it bilinearly
 //! between samples and clamps at the square's edge. `meshes` turns it into render tiles;
 //! normals come from central differences over the whole grid, so tile seams shade alike.
-//! Sand, grass and rock by slope are not here: `MeshData` has no colour channel yet.
-//! Presentation only, deterministic. Units: meters.
+//! Sand, grass and rock by slope (SD8): each tile is split into three meshes by the slope of
+//! its own triangles, and the demo draws each with its band colour (no vertex colour channel
+//! needed). Presentation only, deterministic. Units: meters.
 
 use engine_render::v1::{upload_mesh_tiled, MeshData};
 use engine_world::terrain::{bake_terrain, parse_terrain};
@@ -32,6 +33,12 @@ const TILE_CELLS: usize = 64;
 const VERTEX_LIMIT: usize = 65_535;
 /// Edge of one ground texture repeat, meters.
 const TEXTURE_TILE_M: f32 = 16.0;
+/// Up-component of a face normal at or above which the ground is sand (slope under ~16 deg).
+const SAND_UP: f32 = 0.96;
+/// Up-component at or above which it is grass; under it, rock (slope over ~30 deg).
+const GRASS_UP: f32 = 0.87;
+/// The three band colours, in slot order: sand, grass, rock (SD8).
+const BAND_COLOURS: [[f32; 3]; 3] = [[0.42, 0.40, 0.30], [0.24, 0.30, 0.14], [0.36, 0.35, 0.33]];
 
 /// The generated ground: `GRID_SIDE` x `GRID_SIDE` heights in meters, row by row along z.
 #[derive(Debug)]
@@ -73,11 +80,13 @@ impl DemoTerrain {
 
     /// The ground as render meshes: one per tile of `TILE_CELLS` cells a side (the last tile
     /// in each row and column may be smaller). Every mesh is under the vertex limit.
-    pub(super) fn meshes(&self) -> Result<Vec<MeshData>, String> {
+    /// Every tile of the grid, split into up to three slope-band meshes (SD8): each comes
+    /// with the band colour the caller draws it with.
+    pub(super) fn meshes(&self) -> Result<Vec<(MeshData, [f32; 3])>, String> {
         let mut out = Vec::new();
         for j0 in (0..GRID_CELLS).step_by(TILE_CELLS) {
             for i0 in (0..GRID_CELLS).step_by(TILE_CELLS) {
-                out.push(self.tile(i0, j0)?);
+                out.extend(self.tile_bands(i0, j0)?);
             }
         }
         Ok(out)
@@ -98,8 +107,10 @@ impl DemoTerrain {
         [-dx * inv, inv, -dz * inv]
     }
 
-    /// One tile whose first sample is (i0, j0), running to the grid's edge or `TILE_CELLS` on.
-    fn tile(&self, i0: usize, j0: usize) -> Result<MeshData, String> {
+    /// One tile whose first sample is (i0, j0), running to the grid's edge or `TILE_CELLS` on,
+    /// split into its slope bands (SD8): sand on the flats, grass on the shoulders, rock on
+    /// the steeps. Every band shares the tile's vertices and takes only its own triangles.
+    fn tile_bands(&self, i0: usize, j0: usize) -> Result<Vec<(MeshData, [f32; 3])>, String> {
         let i1 = (i0 + TILE_CELLS).min(GRID_CELLS);
         let j1 = (j0 + TILE_CELLS).min(GRID_CELLS);
         let width = i1 - i0 + 1;
@@ -115,23 +126,95 @@ impl DemoTerrain {
                 uvs.push([x / TEXTURE_TILE_M, z / TEXTURE_TILE_M]);
             }
         }
-        let mut indices = Vec::with_capacity((width - 1) * (depth - 1) * 6);
+        let mut bands: [Vec<usize>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for r in 0..depth - 1 {
             for c in 0..width - 1 {
                 // a = (c, r), b = (c, r + 1), d = (c + 1, r): both triangles face up.
-                let a = u32_of(r * width + c);
-                let b = a + u32_of(width);
-                indices.extend_from_slice(&[a, b, b + 1, a, b + 1, a + 1]);
+                let a = r * width + c;
+                let b = a + width;
+                for tri in [[a, b, b + 1], [a, b + 1, a + 1]] {
+                    bands[band_slot(face_up(&positions, tri))].extend_from_slice(&tri);
+                }
             }
         }
-        upload_mesh_tiled(&positions, &normals, &uvs, &indices)
-            .map_err(|e| format!("terrain tile ({i0}, {j0}): {e}"))
+        let mut out = Vec::new();
+        for (slot, indices) in bands.iter().enumerate() {
+            if indices.is_empty() {
+                continue;
+            }
+            // Only the vertices this band's triangles touch go into its mesh, so three
+            // bands cost the tile's vertices once, not three times (VRAM is finite).
+            let mesh = band_mesh(i0, j0, slot, &positions, &normals, &uvs, indices)?;
+            out.push((mesh, BAND_COLOURS[slot]));
+        }
+        Ok(out)
     }
 }
 
 /// World coordinate of sample `i` along x or z, meters.
 fn sample_m(i: usize) -> f32 {
     -HALF_M + f32_of(i) * CELL_M
+}
+
+/// One band mesh: the tile's shared vertices, compacted to the ones its triangles use.
+fn band_mesh(
+    i0: usize,
+    j0: usize,
+    slot: usize,
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    indices: &[usize],
+) -> Result<MeshData, String> {
+    let mut remap = vec![usize::MAX; positions.len()];
+    let mut band_positions = Vec::new();
+    let mut band_normals = Vec::new();
+    let mut band_uvs = Vec::new();
+    let mut band_indices = Vec::with_capacity(indices.len());
+    for i in indices {
+        let k = *i;
+        if remap[k] == usize::MAX {
+            remap[k] = band_positions.len();
+            band_positions.push(positions[k]);
+            band_normals.push(normals[k]);
+            band_uvs.push(uvs[k]);
+        }
+        band_indices.push(u32_of(remap[k]));
+    }
+    upload_mesh_tiled(&band_positions, &band_normals, &band_uvs, &band_indices)
+        .map_err(|e| format!("terrain tile ({i0}, {j0}) band {slot}: {e}"))
+}
+
+/// The band a face belongs to from its up-component (SD8): 0 sand, 1 grass, 2 rock.
+fn band_slot(up: f32) -> usize {
+    if !up.is_finite() {
+        return 2;
+    }
+    if up >= SAND_UP {
+        0
+    } else if up >= GRASS_UP {
+        1
+    } else {
+        2
+    }
+}
+
+/// Up-component of a triangle's face normal (unit); a degenerate triangle reads level.
+fn face_up(positions: &[[f32; 3]], tri: [usize; 3]) -> f32 {
+    let p = |k: usize| positions[k];
+    let (a, b, c) = (p(tri[0]), p(tri[1]), p(tri[2]));
+    let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let n = [
+        e1[1] * e2[2] - e1[2] * e2[1],
+        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[0] * e2[1] - e1[1] * e2[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if !len.is_finite() || len <= 1.0e-12 {
+        return 1.0;
+    }
+    n[1].abs() / len
 }
 
 /// Fractional sample index of world coordinate `v`: 0 at -HALF_M, `GRID_CELLS` at +HALF_M,
@@ -156,15 +239,74 @@ mod tests {
     }
 
     /// Vertex bytes and indices of every mesh in order: the mesh's identity on the GPU.
-    fn mesh_bytes(meshes: &[MeshData]) -> Vec<u8> {
+    fn mesh_bytes(meshes: &[(MeshData, [f32; 3])]) -> Vec<u8> {
         let mut out = Vec::new();
-        for m in meshes {
+        for (m, colour) in meshes {
             out.extend(m.vertex_bytes());
             for i in &m.indices {
                 out.extend_from_slice(&i.to_le_bytes());
             }
+            for c in colour {
+                out.extend_from_slice(&c.to_bits().to_le_bytes());
+            }
         }
         out
+    }
+
+    /// SD8: the baked dunes are not one colour — the flats read sand and some faces are
+    /// steeper than the grass band.
+    #[test]
+    fn the_ground_is_split_into_slope_bands() {
+        let meshes = terrain().meshes().expect("tiles");
+        let mut seen = [0usize; 3];
+        for (_, colour) in &meshes {
+            let slot = BAND_COLOURS
+                .iter()
+                .position(|c| c == colour)
+                .expect("every mesh carries a band colour");
+            seen[slot] += 1;
+        }
+        println!(
+            "terrain bands: sand {} grass {} rock {}",
+            seen[0], seen[1], seen[2]
+        );
+        assert!(seen[0] > 0, "the flats are sand: {seen:?}");
+        assert!(
+            seen[1] > 0 || seen[2] > 0,
+            "some ground is off the sand band: {seen:?}"
+        );
+    }
+
+    /// A level ground is sand everywhere and is still one mesh per tile (no empty bands).
+    #[test]
+    fn a_level_ground_is_all_sand() {
+        let flat = DemoTerrain {
+            heights_m: vec![12.0; GRID_SIDE * GRID_SIDE],
+        };
+        let meshes = flat.meshes().expect("tiles");
+        assert!(!meshes.is_empty(), "a level ground still makes tiles");
+        assert!(
+            meshes.iter().all(|(_, c)| *c == BAND_COLOURS[0]),
+            "a level ground is sand on every face"
+        );
+    }
+
+    /// A sawtooth (8 m up over one 7.8 m cell, about 45 deg) reads rock, so the steep class
+    /// is reachable and not dead.
+    #[test]
+    fn a_steep_ground_reads_rock() {
+        let mut heights_m = vec![0.0; GRID_SIDE * GRID_SIDE];
+        for j in 0..GRID_SIDE {
+            for i in 0..GRID_SIDE {
+                heights_m[j * GRID_SIDE + i] = if (i + j) % 2 == 0 { 0.0 } else { 8.0 };
+            }
+        }
+        let rough = DemoTerrain { heights_m };
+        let meshes = rough.meshes().expect("tiles");
+        assert!(
+            meshes.iter().any(|(_, c)| *c == BAND_COLOURS[2]),
+            "a sawtooth is rock"
+        );
     }
 
     #[test]
@@ -219,7 +361,7 @@ mod tests {
 
     #[test]
     fn every_normal_is_unit_and_points_up() {
-        for m in terrain().meshes().expect("tiles") {
+        for (m, _) in terrain().meshes().expect("tiles") {
             for n in &m.normals {
                 let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
                 assert!((len - 1.0).abs() < 1e-4, "normal {n:?} is not unit");
@@ -235,7 +377,7 @@ mod tests {
             meshes.len() > 1,
             "the full 256 x 256 grid is over the limit, so it must tile"
         );
-        for m in &meshes {
+        for (m, _) in &meshes {
             assert!(
                 m.positions.len() <= VERTEX_LIMIT,
                 "tile has {} vertices",

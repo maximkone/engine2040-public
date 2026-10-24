@@ -122,6 +122,13 @@ pub enum RulesError {
     },
     /// `explain` was asked with no script installed.
     NoScript,
+    /// The script compiled and ran clean in every smoke world but fired no
+    /// action in any of them, so it would pace nothing: refused unless the
+    /// caller declares it a deliberate no-op (AD13).
+    NoEffect {
+        /// Smoke worlds it ran clean through.
+        cases: usize,
+    },
 }
 
 impl fmt::Display for RulesError {
@@ -150,6 +157,11 @@ impl fmt::Display for RulesError {
                 write!(f, "recording spec {field} is out of range: {value}")
             }
             Self::NoScript => f.write_str("no script installed"),
+            Self::NoEffect { cases } => write!(
+                f,
+                "no_effect: the script fired no action in any of {cases} smoke worlds; \
+                 make it act or declare no_op, then re-run"
+            ),
         }
     }
 }
