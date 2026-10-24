@@ -82,6 +82,13 @@ impl Rng {
 mod tests {
     use super::*;
     #[test]
+    fn xorshift_folds_overlapping_bits_with_xor_not_or() {
+        // Bit 13 is set in the state and again in `state << 13`, so `|=` keeps it
+        // where `^=` clears it: the pinned word names the xor (AF5).
+        assert_eq!(Rng::from_state(0x2001).next_u64(), 8_864_880_263_169);
+    }
+
+    #[test]
     fn stream_same_seed() {
         let (mut a, mut b) = (Rng::new(2040), Rng::new(2040));
         let va: [u64; 8] = core::array::from_fn(|_| a.next_u64());
