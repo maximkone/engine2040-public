@@ -1,5 +1,5 @@
 # modmap: engine2040
-_43 crates, 1527 Rust files. One line per file: `crate/path` · lines · the file's own leading `//!` line. Read it with Grep (a crate name or a word), never whole. Generated from tracked files by `node tools/modmap.mjs --write`; do not edit by hand._
+_44 crates, 1528 Rust files. One line per file: `crate/path` · lines · the file's own leading `//!` line. Read it with Grep (a crate name or a word), never whole. Generated from tracked files by `node tools/modmap.mjs --write`; do not edit by hand._
 
 ## ai (engine-ai, 40 files, 27992 lines)
 - `ai/src/lib.rs` · 363 · ai: embedded seam (brief -> patch -> run). Typed, no strings; AI never touches sim memory.
@@ -490,6 +490,9 @@ _43 crates, 1527 Rust files. One line per file: `crate/path` · lines · the fil
 - `editor/tests/a2_material_roundtrip.rs` · 156 · A2 material-bind round trip: bind, save, reopen byte-identical.
 - `editor/tests/components.rs` · 388 · Typed component ops through the command service: eight kinds set, saved,
 - `editor/tests/material_ops.rs` · 345 · NS31a2: the document holds the material table and edits it with undo.
+
+## editor-derive (engine-editor-derive, 1 files, 224 lines)
+- `editor-derive/src/lib.rs` · 224 · `#[derive(Inspector)]`: a tuning struct draws its own editor panel.
 
 ## endpoint (engine-endpoint, 154 files, 94052 lines)
 - `endpoint/src/lib.rs` · 102 · endpoint: agent driving seam. Core is std-only; the `mcp` feature adds
@@ -1330,8 +1333,9 @@ _43 crates, 1527 Rust files. One line per file: `crate/path` · lines · the fil
 - `render/src/gtao.rs` · 3486 · gtao: half-res GTAO ambient occlusion plus the shared look bind shape.
 - `render/src/heal.rs` · 1137 · heal (AH2): surface Outdated/Lost plus device-loss recovery through the
 - `render/src/hud_pass.rs` · 844 · hud_pass: rasterizes one `engine-ui` [`HudFrame`] over a scene.
-- `render/src/ibl.rs` · 4409 · ibl: GPU image-based lighting baked from the Poly Haven HDRI (RL2).
+- `render/src/ibl.rs` · 4385 · ibl: GPU image-based lighting baked from the Poly Haven HDRI (RL2).
 - `render/src/ibl_arena_env.rs` · 248 · ibl_arena_env: the arena's own day sky as the live image-based light.
+- `render/src/ibl_shade.rs` · 151 · ibl_shade: the CPU IBL shade and its RL47 multiple-scatter factor.
 - `render/src/kam2_iso.rs` · 358 · Fixed 2.5D projection for the ground field.
 - `render/src/kam2_iso_proof.rs` · 702 · Windowed proof of the fixed 2.5D ground field.
 - `render/src/kam2_sprite_atlas.rs` · 440 · Procedural stand-in sprite atlas for the KAM1b proof.
