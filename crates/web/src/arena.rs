@@ -140,6 +140,9 @@ struct ArenaLoop {
     last_list_ms: f64,
     /// QW10: the arm that asked for the capture in flight.
     capture_arm: Option<perf_window::Arm>,
+    /// The device's `maxTextureDimension2D`: the tier's `texture_max_px` is cut to this before it
+    /// reaches the presenter, so an upload never asks for an edge the adapter cannot hold (QT9).
+    max_texture_2d: u32,
 }
 
 impl ArenaLoop {
@@ -178,7 +181,7 @@ impl ArenaLoop {
     /// Move the page to another tier: the presenter takes the knobs, the render scale starts
     /// over from the tier's (the ladder's earlier cuts of it are dropped with the old tier).
     fn set_tier(&mut self, tier: Quality) {
-        let knobs = quality::knobs(tier);
+        let knobs = tier_knobs(tier, self.max_texture_2d);
         self.presenter.apply_quality(&knobs);
         self.tier = tier;
         self.scale_pct = u32::from(knobs.render_scale_pct);
@@ -844,7 +847,7 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
     let mut presenter =
         Presenter::init_from_device(&instance, &adapter, device, queue, surface, w, h, false)
             .map_err(|e| present_failure(&e))?;
-    presenter.apply_quality(&quality::knobs(tier));
+    presenter.apply_quality(&tier_knobs(tier, max_texture_2d));
     let arena = ProceduralArena::build().map_err(|e| (Failure::NoDevice, e.to_string()))?;
     let kit_source = fetch_kit(&search).await;
     let fighter_source = fetch_fighters(&search).await;
@@ -869,6 +872,7 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         tier_why,
         scale_pct,
         software,
+        max_texture_2d,
     });
     frame.stage()?;
     let surface_format = frame.surface_format.clone();
@@ -909,6 +913,7 @@ struct LoopParts {
     tier_why: &'static str,
     scale_pct: u32,
     software: bool,
+    max_texture_2d: u32,
 }
 
 /// The frame loop over the device and the page: the presenter, the scenery, the match and the
@@ -929,6 +934,7 @@ fn arena_loop(parts: LoopParts) -> ArenaLoop {
         tier_why,
         scale_pct,
         software,
+        max_texture_2d,
     } = parts;
     let gate = has_flag(&search, "gate");
     // QW10: `?bundle=off|on|ab`; a page without the flag rebuilds the list as it always did.
@@ -971,6 +977,7 @@ fn arena_loop(parts: LoopParts) -> ArenaLoop {
         static_list: None,
         last_list_ms: 0.0,
         capture_arm: None,
+        max_texture_2d,
     }
 }
 
@@ -1061,12 +1068,9 @@ async fn fetch_kit(search: &str) -> Option<engine_assets::asset_source::BundleSo
     // the coarse level while the HDRI tier streams behind the progress bar.
     match crate::content::fetch_bundle_prefix(crate::content::ARENA_BUNDLE_URL).await {
         Ok(source) => {
-            // WEB6: the receipt says the asset really arrived and how big it was.
-            let entries = source.entries_in_file_order().count();
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "content: arena kit prefix bytes={} entries={entries}",
-                source.byte_len()
-            )));
+            // WEB6: the receipt says the asset really arrived, how big it was and the digest
+            // of its bytes, so a browser load compares with the native one by one number.
+            log_content(&source, "arena kit prefix");
             Some(source)
         }
         Err(err) => {
@@ -1088,11 +1092,7 @@ async fn fetch_fighters(search: &str) -> Option<engine_assets::asset_source::Bun
     set_text("hud", "loading the fighters...");
     match crate::content::fetch_bundle(crate::content::RIG_BUNDLE_URL).await {
         Ok(source) => {
-            let entries = source.entries_in_file_order().count();
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "content: fighters bytes={} entries={entries}",
-                source.byte_len()
-            )));
+            log_content(&source, "fighters");
             Some(source)
         }
         Err(err) => {
@@ -1103,6 +1103,14 @@ async fn fetch_fighters(search: &str) -> Option<engine_assets::asset_source::Bun
             None
         }
     }
+}
+
+/// Print the loaded-content line (WEB6): the bytes fetched, the files they hold and the digest
+/// of their bytes, so a browser load is compared with the native one by one number. A prefix
+/// that is still streaming its later tiers prints `digest=na` and the kit stays usable.
+fn log_content(source: &engine_assets::asset_source::BundleSource, label: &str) {
+    let line = crate::content::source_line_held(source, label);
+    web_sys::console::log_1(&JsValue::from_str(&line));
 }
 
 /// Load, texture and stage the cooked rig once, on the cold path. A refusal is named and
@@ -1348,9 +1356,25 @@ async fn run_probe(frame: &mut ArenaLoop, queue: &wgpu::Queue) -> ProbeDone {
     }
 }
 
+/// The tier's knobs as the page runs them (QT9): the tier row with `texture_max_px` cut to what
+/// the adapter can hold, so the presenter's uploads keep the mip that fits and the tier line's
+/// `tex_max=` names the edge they really use.
+fn tier_knobs(tier: Quality, max_texture_2d: u32) -> quality::Knobs {
+    let mut knobs = quality::knobs(tier);
+    knobs.texture_max_px =
+        u16::try_from(quality::texture_edge_px(&knobs, max_texture_2d)).unwrap_or(u16::MAX);
+    knobs
+}
+
 /// The tier's knobs as the page prints them (see [`TierFacts`]).
-fn tier_facts(tier: Quality, why: &str, adapter: &str, probe: (Option<f64>, u32)) -> TierFacts {
-    let knobs = quality::knobs(tier);
+fn tier_facts(
+    tier: Quality,
+    why: &str,
+    adapter: &str,
+    probe: (Option<f64>, u32),
+    max_texture_2d: u32,
+) -> TierFacts {
+    let knobs = tier_knobs(tier, max_texture_2d);
     TierFacts {
         name: tier.name().to_string(),
         why: why.to_string(),
@@ -1394,6 +1418,7 @@ fn publish_ready(frame: &ArenaLoop, ready: &Ready, warmed: &Warmed, init_ms: f64
         tier_why,
         &frame.adapter_hint,
         (*probe_ms, *late_compile),
+        frame.max_texture_2d,
     )
     .line();
     let pipelines_line = pipeline_warmup::ready_line(ledger, warm_ms);
