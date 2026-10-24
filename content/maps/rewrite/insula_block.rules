@@ -1,0 +1,28 @@
+# Roman insula block: one city block with a street ring (S), an outer wall (W),
+# a courtyard (C) inside its own wall, rooms (R) round the courtyard, and doors
+# (D): some from the street into rooms, some from rooms into the courtyard, and
+# one in each room divider.
+# Grid 24 x 18. The block is x 3..20, y 3..14; the street is the 3-wide margin.
+size 24 18
+alphabet SWRCD
+
+rect 3 3 18 12 W      # outer wall of the block
+rect 4 4 16 10 R      # everything inside is rooms for now
+rect 7 5 10 8 W       # the courtyard wall
+rect 8 6 8 6 C        # the courtyard
+
+# Up to 4 dividers across the 3-wide room strips left and right of the
+# courtyard; each leaves at least 2 rooms-rows on both sides.
+one steps=4 {
+  rule WRRRW/WRRRW/WRRRW/WRRRW/WRRRW = WRRRW/WRRRW/WWWWW/WRRRW/WRRRW sym=none
+}
+
+# Doors from the street through the outer wall: 4 of them, anywhere round it.
+one steps=4 { rule SWR = SDR }
+
+# Doors from a room into the courtyard: 3 of them.
+one steps=3 { rule RWC = RDC }
+
+# A door in each divider wall (a divider cell with a room above and below),
+# at most 3 of them.
+one steps=3 { rule R/W/R = R/D/R sym=none }

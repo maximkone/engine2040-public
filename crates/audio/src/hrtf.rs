@@ -8,8 +8,8 @@
 //! same octant plus same input slices give bit-identical stereo on one
 //! machine (presentation only, never hashed; math is `+ - * /` only).
 //! Errors: typed [`HrtfError`]; bad input returns errors, never panics.
-//! Measured sphere: 108 measured KEMAR directions interpolated bilinearly
-//! (azimuth wraps, elevation clamps) behind
+//! Measured sphere: 108 measured KEMAR directions interpolated in the
+//! log-magnitude/phase domain (azimuth wraps, elevation clamps) behind
 //! [`HrtfProcessor::set_measured_sphere`]; flag off keeps the octant path.
 //! Budget: 32 MAC per frame, ~0.6 KB fixed state, zero audio-thread allocs
 //! (counting-allocator test). Speakers mode is a bit-exact passthrough: the
@@ -469,9 +469,10 @@ impl HrtfProcessor {
 // degrees, clamped outside). Taps are 16 per ear at 44.1 kHz, each ear
 // aligned on its own measured arrival (3 samples before the peak) and both
 // ears of a direction scaled by one common factor, so ILD is the measured
-// one. The arrival itself is the ITD. Nothing here is synthesised: the
-// octant filter below stays the shipped path and this table is only read
-// when [`HrtfProcessor::set_measured_sphere`] is on.
+// one. The arrival itself is the ITD. Between measured columns the taps blend
+// in the log-magnitude/phase domain and the arrivals on their own line.
+// Nothing here is synthesised: the octant filter below stays the shipped path
+// and this table is only read when [`HrtfProcessor::set_measured_sphere`] is on.
 
 /// Measured azimuth columns around the head (10-degree steps, wraps).
 pub const SPHERE_AZ_COLS: usize = 36;
@@ -481,6 +482,11 @@ pub const SPHERE_ELEV_ROWS: usize = 3;
 pub const SPHERE_DIRECTIONS: usize = SPHERE_AZ_COLS * SPHERE_ELEV_ROWS;
 /// Rate the measured taps and onsets were captured at (Hz).
 pub const SPHERE_RATE_HZ: u32 = 44_100;
+/// Unique bins of a [`HRTF_TAPS`]-point real spectrum (DC through Nyquist).
+const SPHERE_BINS: usize = HRTF_TAPS / 2 + 1;
+/// Magnitude floor of the log domain (about -80 dB on the normalized taps),
+/// so a measured ear never reads as silence and `ln` never sees zero.
+const TAP_MAG_FLOOR: f32 = 1e-4;
 /// Azimuth step between measured columns in degrees (`360 / 36`).
 pub const SPHERE_AZ_STEP_DEG: f32 = 10.0;
 /// Degrees between octant centres (the legacy 8-way orbit).
@@ -1284,6 +1290,115 @@ pub const SPHERE_TAPS: [[[[i16; HRTF_TAPS]; 2]; SPHERE_AZ_COLS]; SPHERE_ELEV_ROW
 ];
 // end of generated table
 
+/// Cosine kernel of the 16-point real DFT: 9 unique bins by 16 taps, so a
+/// query needs no trig for the transform itself.
+#[rustfmt::skip]
+const DFT_COS: [[f32; HRTF_TAPS]; SPHERE_BINS] = [
+    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    [1.0, 0.9238795, 0.70710677, 0.38268343, 0.0, -0.38268343, -0.70710677, -0.9238795, -1.0, -0.9238795, -0.70710677, -0.38268343, 0.0, 0.38268343, 0.70710677, 0.9238795],
+    [1.0, 0.70710677, 0.0, -0.70710677, -1.0, -0.70710677, 0.0, 0.70710677, 1.0, 0.70710677, 0.0, -0.70710677, -1.0, -0.70710677, 0.0, 0.70710677],
+    [1.0, 0.38268343, -0.70710677, -0.9238795, 0.0, 0.9238795, 0.70710677, -0.38268343, -1.0, -0.38268343, 0.70710677, 0.9238795, 0.0, -0.9238795, -0.70710677, 0.38268343],
+    [1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0, 0.0],
+    [1.0, -0.38268343, -0.70710677, 0.9238795, 0.0, -0.9238795, 0.70710677, 0.38268343, -1.0, 0.38268343, 0.70710677, -0.9238795, 0.0, 0.9238795, -0.70710677, -0.38268343],
+    [1.0, -0.70710677, 0.0, 0.70710677, -1.0, 0.70710677, 0.0, -0.70710677, 1.0, -0.70710677, 0.0, 0.70710677, -1.0, 0.70710677, 0.0, -0.70710677],
+    [1.0, -0.9238795, 0.70710677, -0.38268343, 0.0, 0.38268343, -0.70710677, 0.9238795, -1.0, 0.9238795, -0.70710677, 0.38268343, 0.0, -0.38268343, 0.70710677, -0.9238795],
+    [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+];
+/// Sine kernel of the 16-point real DFT beside the cosine table (the
+/// forward kernel is `cos - i sin`, and the rebuild negates it back).
+#[rustfmt::skip]
+const DFT_SIN: [[f32; HRTF_TAPS]; SPHERE_BINS] = [
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.38268343, 0.70710677, 0.9238795, 1.0, 0.9238795, 0.70710677, 0.38268343, 0.0, -0.38268343, -0.70710677, -0.9238795, -1.0, -0.9238795, -0.70710677, -0.38268343],
+    [0.0, 0.70710677, 1.0, 0.70710677, 0.0, -0.70710677, -1.0, -0.70710677, 0.0, 0.70710677, 1.0, 0.70710677, 0.0, -0.70710677, -1.0, -0.70710677],
+    [0.0, 0.9238795, 0.70710677, -0.38268343, -1.0, -0.38268343, 0.70710677, 0.9238795, 0.0, -0.9238795, -0.70710677, 0.38268343, 1.0, 0.38268343, -0.70710677, -0.9238795],
+    [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0],
+    [0.0, 0.9238795, -0.70710677, -0.38268343, 1.0, -0.38268343, -0.70710677, 0.9238795, 0.0, -0.9238795, 0.70710677, 0.38268343, -1.0, 0.38268343, 0.70710677, -0.9238795],
+    [0.0, 0.70710677, -1.0, 0.70710677, 0.0, -0.70710677, 1.0, -0.70710677, 0.0, 0.70710677, -1.0, 0.70710677, 0.0, -0.70710677, 1.0, -0.70710677],
+    [0.0, 0.38268343, -0.70710677, 0.9238795, -1.0, 0.9238795, -0.70710677, 0.38268343, 0.0, -0.38268343, 0.70710677, -0.9238795, 1.0, -0.9238795, 0.70710677, -0.38268343],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+];
+
+/// Forward spectrum of one ear: `(real, imag)` at [`SPHERE_BINS`] bins, with
+/// the `e^{-i w n}` kernel, so bin `k` sits at `k * rate / 16`.
+fn spectrum(taps: &[f32; HRTF_TAPS]) -> ([f32; SPHERE_BINS], [f32; SPHERE_BINS]) {
+    let mut re = [0.0f32; SPHERE_BINS];
+    let mut im = [0.0f32; SPHERE_BINS];
+    let mut k = 0;
+    while k < SPHERE_BINS {
+        let mut r = 0.0f32;
+        let mut s = 0.0f32;
+        let mut n = 0;
+        while n < HRTF_TAPS {
+            r += taps[n] * DFT_COS[k][n];
+            s += taps[n] * DFT_SIN[k][n];
+            n += 1;
+        }
+        re[k] = r;
+        im[k] = -s;
+        k += 1;
+    }
+    (re, im)
+}
+
+/// Rebuild the taps from a Hermitian spectrum (bins `0` and `8` real).
+fn from_spectrum(re: &[f32; SPHERE_BINS], im: &[f32; SPHERE_BINS]) -> [f32; HRTF_TAPS] {
+    let inv = 1.0 / HRTF_TAPS as f32;
+    let mut taps = [0.0f32; HRTF_TAPS];
+    let mut n = 0;
+    while n < HRTF_TAPS {
+        let mut v = re[0];
+        let mut k = 1;
+        while k + 1 < SPHERE_BINS {
+            v += 2.0 * (re[k] * DFT_COS[k][n] - im[k] * DFT_SIN[k][n]);
+            k += 1;
+        }
+        v += re[SPHERE_BINS - 1] * DFT_COS[SPHERE_BINS - 1][n];
+        taps[n] = v * inv;
+        n += 1;
+    }
+    taps
+}
+
+/// Blend two measured ears in the log-magnitude/phase domain: magnitudes
+/// combine as powers (the geometric mean at a midpoint), phases turn the
+/// short way round. A linear tap blend adds two shapes whose 8 kHz phase
+/// differs by nearly half a cycle and cancels a band the measured direction
+/// carries; this keeps that band's level. Arrivals stay out of it (they are
+/// blended on their own), so no inter-aural delay drags the shape into a
+/// comb. No heap, no lock; `0`/`1` return the measured tap set untouched.
+fn blend_log_spectrum(a: &[f32; HRTF_TAPS], b: &[f32; HRTF_TAPS], t: f32) -> [f32; HRTF_TAPS] {
+    if t <= 0.0 {
+        return *a;
+    }
+    if t >= 1.0 {
+        return *b;
+    }
+    let (ar, ai) = spectrum(a);
+    let (br, bi) = spectrum(b);
+    let mut re = [0.0f32; SPHERE_BINS];
+    let mut im = [0.0f32; SPHERE_BINS];
+    let mut k = 0;
+    while k < SPHERE_BINS {
+        let ma = (ar[k] * ar[k] + ai[k] * ai[k]).sqrt().max(TAP_MAG_FLOOR);
+        let mb = (br[k] * br[k] + bi[k] * bi[k]).sqrt().max(TAP_MAG_FLOOR);
+        let pa = ai[k].atan2(ar[k]);
+        let mut d = bi[k].atan2(br[k]) - pa;
+        while d > std::f32::consts::PI {
+            d -= 2.0 * std::f32::consts::PI;
+        }
+        while d < -std::f32::consts::PI {
+            d += 2.0 * std::f32::consts::PI;
+        }
+        let m = (ma.ln() + (mb.ln() - ma.ln()) * t).exp();
+        let p = pa + d * t;
+        re[k] = m * p.cos();
+        im[k] = m * p.sin();
+        k += 1;
+    }
+    from_spectrum(&re, &im)
+}
+
 /// One measured direction: 16 taps per ear plus the measured ear arrivals.
 #[derive(Clone, Copy)]
 struct Measured {
@@ -1316,21 +1431,16 @@ impl Measured {
         }
     }
 
-    /// Component-wise linear blend of two measured directions. `+ - *` only.
+    /// Blend two measured directions: the taps in the log-magnitude/phase
+    /// domain (see [`blend_log_spectrum`]), the arrivals on their own
+    /// straight line. No heap.
     fn mix(a: &Self, b: &Self, t: f32) -> Self {
-        let mut out = Self {
-            taps_l: [0.0; HRTF_TAPS],
-            taps_r: [0.0; HRTF_TAPS],
+        Self {
+            taps_l: blend_log_spectrum(&a.taps_l, &b.taps_l, t),
+            taps_r: blend_log_spectrum(&a.taps_r, &b.taps_r, t),
             onset_l: a.onset_l + (b.onset_l - a.onset_l) * t,
             onset_r: a.onset_r + (b.onset_r - a.onset_r) * t,
-        };
-        let mut i = 0;
-        while i < HRTF_TAPS {
-            out.taps_l[i] = a.taps_l[i] + (b.taps_l[i] - a.taps_l[i]) * t;
-            out.taps_r[i] = a.taps_r[i] + (b.taps_r[i] - a.taps_r[i]) * t;
-            i += 1;
         }
-        out
     }
 }
 
@@ -1393,10 +1503,12 @@ fn sphere_row(elevation_deg: f32) -> (usize, usize, f32) {
     (row, row + 1, frac)
 }
 
-/// Bilinear measured HRIR for one direction: azimuth wraps, elevation
-/// clamps at the poles, both ears and both measured arrivals blend together.
-/// Returns `(taps_l, taps_r, onset_l, onset_r)` in samples at
-/// [`SPHERE_RATE_HZ`]. Allocation-free; non-finite input reads as 0 degrees.
+/// Measured HRIR for one direction: azimuth wraps, elevation clamps at the
+/// poles, the taps blend in the log-magnitude/phase domain and the measured
+/// arrivals on their own line. Returns `(taps_l, taps_r, onset_l, onset_r)`
+/// in samples at [`SPHERE_RATE_HZ`]. Allocation-free; non-finite input reads
+/// as 0 degrees. A measured direction (both fractions zero) returns that
+/// measurement byte for byte.
 pub fn measured_hrir_at(
     azimuth_deg: f32,
     elevation_deg: f32,
@@ -2111,12 +2223,22 @@ mod tests {
     fn sphere_8k_band_error_on_held_out_directions() {
         // 8 kHz bin of the 16-tap DFT at 44.1 kHz, scored on the same
         // held-out set as the tap error: the dropped direction rebuilt from
-        // its two neighbours. The row's bar is 6 dB off and this does not meet
-        // it: at 8 kHz the pinna response flips phase across a 20-degree
-        // neighbour gap, so a linear tap blend cancels a band the measured
-        // direction carries. A denser grid does not fix it (16, 36 and 72
-        // columns all miss); the number is printed so the gap stays visible.
+        // its two neighbours. The row's bar is 6 dB off and this still does
+        // not meet it, but the log-magnitude/phase blend (0.5 dB RMS better)
+        // moved the band from a 4.42 dB mean to a 2.02 dB one: the linear tap
+        // blend cancelled the band wherever two neighbours arrived nearly out
+        // of phase, and a magnitude blend cannot cancel. What is left is one
+        // measured direction: at azimuth 80, elevation -40 the ipsilateral
+        // (and its mirrored) ear reads -39.9 dB at 8 kHz against neighbours
+        // at -15.6 and -25.8 dB, a pinna null 40 dB deep and narrower than the
+        // 20-degree gap. No blend of those neighbours can reach it (the best
+        // either neighbour alone gives is 24.3 dB off); every other held-out
+        // ear is inside 4.94 dB. The number is printed so the gap stays
+        // visible; the bar is not claimed.
         let mut worst = 0f32;
+        let mut mean = 0f32;
+        let mut n = 0usize;
+        let mut worst_open = 0f32;
         for row in 0..SPHERE_ELEV_ROWS {
             let mut col = 0;
             while col < SPHERE_AZ_COLS {
@@ -2124,18 +2246,31 @@ mod tests {
                 let right = Measured::cell(row, (col + 1) % SPHERE_AZ_COLS);
                 let mid = Measured::mix(&left, &right, 0.5);
                 let meas = Measured::cell(row, col);
+                let null_cell = row == 0 && (col == 8 || col == 28);
                 for (pred, got) in [(&mid.taps_l, &meas.taps_l), (&mid.taps_r, &meas.taps_r)] {
                     let db = 20.0 * ((band_8k(pred).max(1e-6)) / band_8k(got).max(1e-6)).log10();
                     worst = worst.max(db.abs());
+                    mean += db.abs();
+                    n += 1;
+                    if !null_cell {
+                        worst_open = worst_open.max(db.abs());
+                    }
                 }
                 col += 4;
             }
         }
         println!(
-            "AAC7 8 kHz band, held-out directions: worst {worst:.2} dB off (row bar 6 dB, not met)"
+            "AAC7 8 kHz band, held-out directions: worst {worst:.2} dB off, mean {:.2} dB; \
+             worst outside the measured null {worst_open:.2} dB (row bar 6 dB, not met)",
+            mean / n as f32
         );
-        // The bar is not met; this catches a regression past today's 18.13 dB.
-        assert!(worst < 19.0, "8 kHz band worst {worst:.2} dB");
+        // Neither value may regress past today's measurement: the bar is not
+        // met, so these catch drift, they do not pass the row.
+        assert!(worst < 18.0, "8 kHz band worst {worst:.2} dB");
+        assert!(
+            worst_open < 6.0,
+            "8 kHz band worst outside the measured null {worst_open:.2} dB"
+        );
     }
     /// Magnitude of the 8 kHz bin (44.1 kHz, 16 taps) of one ear filter.
     fn band_8k(taps: &[f32; HRTF_TAPS]) -> f32 {
@@ -2150,6 +2285,57 @@ mod tests {
             ph += w;
         }
         (re * re + im * im).sqrt()
+    }
+
+    #[test]
+    fn sphere_dft_kernel_matches_runtime_trig() {
+        // The query carries the transform as a constant table so it needs no
+        // trig; this keeps that table honest against the real functions. The
+        // table holds the exact algebraic values, so the tolerance covers the
+        // few-ulp error of the runtime calls, not a table drift.
+        for k in 0..SPHERE_BINS {
+            for n in 0..HRTF_TAPS {
+                let ph = 2.0 * std::f32::consts::PI * (k * n) as f32 / HRTF_TAPS as f32;
+                assert!(
+                    (DFT_COS[k][n] - ph.cos()).abs() < 1e-5,
+                    "cos {k}/{n}: {} vs {}",
+                    DFT_COS[k][n],
+                    ph.cos()
+                );
+                assert!(
+                    (DFT_SIN[k][n] - ph.sin()).abs() < 1e-5,
+                    "sin {k}/{n}: {} vs {}",
+                    DFT_SIN[k][n],
+                    ph.sin()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sphere_transform_round_trips_and_measured_directions_are_exact() {
+        // The blend must be an identity on the measurement itself: a listener
+        // aimed at a measured direction hears that measurement, not a
+        // reconstruction of it.
+        for (row, &el) in SPHERE_ELEVATIONS_DEG.iter().enumerate() {
+            for (col, &az) in SPHERE_AZIMUTHS_DEG.iter().enumerate() {
+                let (l, r, _, _) = measured_hrir_at(az, el);
+                let (ml, mr, _, _) = measured_cell(row, col);
+                assert_eq!(l, ml, "cell {row}/{col} left taps at a measured direction");
+                assert_eq!(r, mr, "cell {row}/{col} right taps at a measured direction");
+            }
+        }
+        // And a midpoint keeps the measured energy scale: a geometric mean of
+        // two ears of similar level cannot blow up or cancel.
+        let a = measured_cell(1, 4);
+        let b = measured_cell(1, 6);
+        let (l, _, _, _) = measured_hrir_at(50.0, 0.0);
+        let e = 0.5 * (ear_db(&a.0) + ear_db(&b.0));
+        assert!(
+            (ear_db(&l) - e).abs() < 3.0,
+            "midpoint energy {} dB vs neighbour mean {e} dB",
+            ear_db(&l)
+        );
     }
 
     #[test]
