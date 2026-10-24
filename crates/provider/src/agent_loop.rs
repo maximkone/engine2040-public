@@ -2,7 +2,13 @@
 //! Owner: provider harness. Units: steps as counts, tokens as estimates.
 //! Determinism: same goal plus same planner and door answers always yield
 //! the same transcript and checkpoint; no wall clock, no thread order.
-//! Errors: [`LoopError`] names budget, stuck and tool refusals.
+//! Errors: [`LoopError`] names budget, stuck, tool and fold refusals.
+//! Compaction: a loop built with [`AgentLoop::compacting`] folds its oldest
+//! completed steps into one [`SUMMARY_TOOL`] step when a bound would stop it,
+//! keeps the last `keep` steps verbatim, never folds a step whose door write
+//! is still open, and reports each fold in [`LoopOutcome::folds`]. An unfolded
+//! run over the same budget is byte-identical to a run built with
+//! [`AgentLoop::new`].
 //! Status: the consumer is `engine-endpoint::audit::agent_run`: a scripted
 //! task runs read -> preview -> apply over the in-process door and every call
 //! lands in the audit chain with its args, digest and both revisions.
@@ -18,6 +24,10 @@ pub const MAX_TOKENS: u32 = 4096;
 pub const MAX_TOOL_NAME_LEN: usize = 64;
 /// Longest tool input, observation or answer accepted, in bytes.
 pub const MAX_TOOL_TEXT_LEN: usize = 2048;
+/// Most bytes of tool names one fold summary lists.
+pub const MAX_SUMMARY_TOOLS_BYTES: usize = 512;
+/// Tool name on the summary step a fold writes.
+pub const SUMMARY_TOOL: &str = "loop.compact";
 
 /// Bounded budget for one loop run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -103,6 +113,29 @@ pub enum LoopError {
         /// Goal byte length.
         len: usize,
     },
+    /// Compaction would have to fold a step whose door write is still open.
+    CannotFold {
+        /// Index of the step that blocks the fold.
+        step: u32,
+        /// Idempotency key of that write.
+        key: u64,
+    },
+}
+
+impl LoopError {
+    /// Short stable name for logs and receipts, never caller text.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            LoopError::BudgetOverrun { .. } => "budget_overrun",
+            LoopError::Stuck { .. } => "stuck",
+            LoopError::UnknownTool { .. } => "unknown_tool",
+            LoopError::ToolRefused { .. } => "tool_refused",
+            LoopError::EmptyPlan => "empty_plan",
+            LoopError::GoalTooLong { .. } => "goal_too_long",
+            LoopError::CannotFold { .. } => "cannot_fold",
+        }
+    }
 }
 
 impl core::fmt::Display for LoopError {
@@ -127,6 +160,10 @@ impl core::fmt::Display for LoopError {
             LoopError::GoalTooLong { len } => {
                 write!(f, "agent loop goal too long: {len} bytes")
             }
+            LoopError::CannotFold { step, key } => write!(
+                f,
+                "agent loop cannot fold: step {step} is a pending write (key {key})"
+            ),
         }
     }
 }
@@ -169,6 +206,19 @@ pub struct StepRecord {
     pub idempotency_key: u64,
 }
 
+/// One fold the loop made: how much it folded and what it bought back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FoldRecord {
+    /// Steps folded into the summary step.
+    pub folded: u32,
+    /// Steps in the transcript after the fold, the summary included.
+    pub kept: u32,
+    /// Tokens the fold gave back to the budget.
+    pub reclaimed: u32,
+    /// Transcript checkpoint right after the fold.
+    pub checkpoint: u64,
+}
+
 /// Completed loop: final answer plus its replayable transcript.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LoopOutcome {
@@ -178,6 +228,8 @@ pub struct LoopOutcome {
     pub steps: Vec<StepRecord>,
     /// Estimated tokens spent including the goal and answer.
     pub tokens_used: u32,
+    /// Folds made to stay inside the budget, in run order.
+    pub folds: Vec<FoldRecord>,
 }
 
 impl LoopOutcome {
@@ -228,6 +280,14 @@ pub trait Door {
 
     /// Undo the call recorded under `key`; true when something was undone.
     fn undo(&mut self, key: u64) -> bool;
+
+    /// True when `key` is a write this door can still undo, so compaction
+    /// must never fold that step into a summary. Default: the door reports
+    /// no open writes and every step is foldable.
+    fn pending_write(&self, tool: &str, key: u64) -> bool {
+        let _ = (tool, key);
+        false
+    }
 }
 
 /// Offline scripted planner: plays a fixed queue, then reports empty.
@@ -274,6 +334,9 @@ pub struct MemoryDoor {
     table: Vec<(String, String)>,
     /// `(tool, input, key)` calls already served, in order.
     log: Vec<(String, String, u64)>,
+    /// Verbs that write: a logged call to one of them stays undoable, so
+    /// compaction must not fold it.
+    writes: Vec<String>,
 }
 
 impl MemoryDoor {
@@ -283,6 +346,18 @@ impl MemoryDoor {
         Self {
             table: entries,
             log: Vec::new(),
+            writes: Vec::new(),
+        }
+    }
+
+    /// Mark `writes` as verbs that change state: their logged calls report
+    /// [`Door::pending_write`] until [`Door::undo`] removes them.
+    #[must_use]
+    pub fn with_writes(entries: Vec<(String, String)>, writes: Vec<String>) -> Self {
+        Self {
+            table: entries,
+            log: Vec::new(),
+            writes,
         }
     }
 
@@ -364,6 +439,14 @@ impl Door for MemoryDoor {
             None => false,
         }
     }
+
+    fn pending_write(&self, tool: &str, key: u64) -> bool {
+        self.writes.iter().any(|write| write == tool)
+            && self
+                .log
+                .iter()
+                .any(|(logged_tool, _, logged_key)| logged_tool == tool && *logged_key == key)
+    }
 }
 
 /// Rough token estimate for loop budgets: one token per four bytes.
@@ -401,13 +484,36 @@ pub fn transcript_checkpoint(steps: &[StepRecord]) -> u64 {
 pub struct AgentLoop {
     /// Budget this loop enforces.
     pub budget: LoopBudget,
+    /// Steps kept verbatim by compaction, or `None` when the loop never folds.
+    compact_keep: Option<u32>,
 }
 
 impl AgentLoop {
     /// Build a loop enforcing `budget`.
     #[must_use]
     pub fn new(budget: LoopBudget) -> Self {
-        Self { budget }
+        Self {
+            budget,
+            compact_keep: None,
+        }
+    }
+
+    /// Build a loop that folds its oldest steps when a bound would stop it,
+    /// keeping the last `keep` steps verbatim. `keep` is clamped to
+    /// `1..=MAX_STEPS`, and a fold needs at least one more step than `keep`
+    /// to gain anything.
+    #[must_use]
+    pub fn compacting(budget: LoopBudget, keep: u32) -> Self {
+        Self {
+            budget,
+            compact_keep: Some(keep.clamp(1, MAX_STEPS)),
+        }
+    }
+
+    /// Steps kept verbatim by compaction, or `None` when the loop never folds.
+    #[must_use]
+    pub const fn compaction(&self) -> Option<u32> {
+        self.compact_keep
     }
 
     /// Run `goal` to done under the budget.
@@ -434,12 +540,16 @@ impl AgentLoop {
             });
         }
         let mut steps: Vec<StepRecord> = Vec::new();
+        let mut folds: Vec<FoldRecord> = Vec::new();
         let mut last_tool = String::new();
         let mut last_input = String::new();
         let mut repeats: u32 = 0;
         loop {
             let spent = u64::try_from(steps.len()).unwrap_or(u64::MAX);
             if spent >= u64::from(self.budget.max_steps) {
+                if self.fold(&mut steps, door, &mut tokens_used, &mut folds)? {
+                    continue;
+                }
                 let used = u32::try_from(steps.len()).unwrap_or(u32::MAX);
                 return Err(LoopError::BudgetOverrun {
                     kind: BudgetKind::Steps,
@@ -448,6 +558,9 @@ impl AgentLoop {
                 });
             }
             if tokens_used > self.budget.max_tokens {
+                if self.fold(&mut steps, door, &mut tokens_used, &mut folds)? {
+                    continue;
+                }
                 return Err(LoopError::BudgetOverrun {
                     kind: BudgetKind::Tokens,
                     used: tokens_used,
@@ -456,7 +569,7 @@ impl AgentLoop {
             }
             match planner.plan(&steps)? {
                 Plan::Done { answer } => {
-                    return self.finish(goal, &steps, &answer, tokens_used);
+                    return self.finish(goal, &steps, &answer, tokens_used, folds);
                 }
                 Plan::ToolCall {
                     tool,
@@ -474,13 +587,6 @@ impl AgentLoop {
                     }
                     let cost = step_cost(&tool, &input, &observation);
                     tokens_used = tokens_used.saturating_add(cost);
-                    if tokens_used > self.budget.max_tokens {
-                        return Err(LoopError::BudgetOverrun {
-                            kind: BudgetKind::Tokens,
-                            used: tokens_used,
-                            limit: self.budget.max_tokens,
-                        });
-                    }
                     let index = u32::try_from(steps.len()).unwrap_or(u32::MAX);
                     steps.push(StepRecord {
                         step: index,
@@ -495,12 +601,111 @@ impl AgentLoop {
         }
     }
 
+    /// Fold the oldest completed steps into one summary step when a bound has
+    /// been reached. Returns `true` when the transcript changed, so the caller
+    /// can retry the same iteration on the same budget.
+    ///
+    /// A step whose door write is still open is never folded: the fold stops
+    /// before it, and a fold that would have to start at one is refused with
+    /// [`LoopError::CannotFold`].
+    fn fold(
+        &self,
+        steps: &mut Vec<StepRecord>,
+        door: &impl Door,
+        tokens_used: &mut u32,
+        folds: &mut Vec<FoldRecord>,
+    ) -> Result<bool, LoopError> {
+        let Some(keep) = self.compact_keep else {
+            return Ok(false);
+        };
+        let keep = usize::try_from(keep).unwrap_or(usize::MAX);
+        // A fold has to gain a step to be worth doing: keep + 1 is the floor.
+        if steps.len() <= keep.saturating_add(1) {
+            return Ok(false);
+        }
+        let mut cut = steps.len() - keep;
+        let pending = steps
+            .iter()
+            .take(cut)
+            .position(|step| door.pending_write(&step.tool, step.idempotency_key));
+        if let Some(index) = pending {
+            if index == 0 {
+                let first = &steps[0];
+                return Err(LoopError::CannotFold {
+                    step: first.step,
+                    key: first.idempotency_key,
+                });
+            }
+            cut = index;
+        }
+        // A fold must give at least one step back: folding one step into one
+        // summary leaves the length where it was, so it would never end.
+        if cut < 2 {
+            return Ok(false);
+        }
+        let folded = u32::try_from(cut).unwrap_or(u32::MAX);
+        let mut list = String::new();
+        {
+            let mut names: Vec<&str> = Vec::new();
+            for step in &steps[..cut] {
+                if !names.contains(&step.tool.as_str()) {
+                    names.push(&step.tool);
+                }
+            }
+            for name in names {
+                if list.len().saturating_add(name.len()) > MAX_SUMMARY_TOOLS_BYTES {
+                    break;
+                }
+                if !list.is_empty() {
+                    list.push(',');
+                }
+                list.push_str(name);
+            }
+        }
+        let tool = String::from(SUMMARY_TOOL);
+        let observation = format!("{folded} steps folded; tools: {list}");
+        let before: u32 = steps[..cut]
+            .iter()
+            .fold(0u32, |sum, step| sum.saturating_add(step.tokens));
+        // The reclaim number sits in the input at a fixed width, so the input
+        // length does not depend on its value: costs stay exact and the fold
+        // is settled in one pass. Sixteen steps cap `before` far below 1e8.
+        let probe = format!("folded={folded} reclaimed=00000000 keep={keep}");
+        let spent = step_cost(&tool, &probe, &observation);
+        let reclaimed = before.saturating_sub(spent);
+        let input = format!("folded={folded} reclaimed={reclaimed:08} keep={keep}");
+        let summary = StepRecord {
+            step: 0,
+            tool,
+            input,
+            observation,
+            tokens: spent,
+            idempotency_key: 0,
+        };
+        let mut next: Vec<StepRecord> = Vec::with_capacity(steps.len() - cut + 1);
+        next.push(summary);
+        next.extend(steps.drain(cut..));
+        for (index, step) in next.iter_mut().enumerate() {
+            step.step = u32::try_from(index).unwrap_or(u32::MAX);
+        }
+        *steps = next;
+        *tokens_used = tokens_used.saturating_sub(reclaimed);
+        folds.push(FoldRecord {
+            folded,
+            kept: u32::try_from(steps.len()).unwrap_or(u32::MAX),
+            reclaimed,
+            checkpoint: transcript_checkpoint(steps),
+        });
+        Ok(true)
+    }
+
     fn finish(
         &self,
         _goal: &str,
         steps: &[StepRecord],
         answer: &str,
         spent: u32,
+        folds: Vec<FoldRecord>,
     ) -> Result<LoopOutcome, LoopError> {
         if answer.len() > MAX_TOOL_TEXT_LEN {
             return Err(LoopError::ToolRefused {
@@ -520,6 +725,7 @@ impl AgentLoop {
             answer: answer.to_owned(),
             steps: steps.to_vec(),
             tokens_used: total,
+            folds,
         })
     }
 }
@@ -766,5 +972,185 @@ mod tests {
         assert_eq!(LoopBudget::new(u32::MAX, u32::MAX).max_steps, MAX_STEPS);
         assert_eq!(BudgetKind::Tokens.to_string(), "tokens");
         let _: &dyn std::error::Error = &LoopError::EmptyPlan;
+    }
+
+    fn read_plans(count: usize) -> Vec<Plan> {
+        let mut plans: Vec<Plan> = (0..count)
+            .map(|index| Plan::ToolCall {
+                tool: String::from("scene.read"),
+                input: format!("entity {index}"),
+                idempotency_key: u64::try_from(index).unwrap_or(0).saturating_add(1),
+            })
+            .collect();
+        plans.push(Plan::Done {
+            answer: String::from("read all"),
+        });
+        plans
+    }
+
+    fn read_door() -> MemoryDoor {
+        MemoryDoor::new(vec![(
+            String::from("scene.read"),
+            String::from("entity at 10,20"),
+        )])
+    }
+
+    fn write_door() -> MemoryDoor {
+        MemoryDoor::with_writes(
+            vec![
+                (String::from("tx.apply"), String::from("applied wall 3")),
+                (String::from("scene.read"), String::from("entity at 10,20")),
+            ],
+            vec![String::from("tx.apply")],
+        )
+    }
+
+    /// F2P: the same budget that reports `BudgetOverrun` mid-task under
+    /// [`AgentLoop::new`] finishes under [`AgentLoop::compacting`], and the
+    /// fold is recorded with its step count and reclaimed tokens.
+    #[test]
+    fn agent_loop_compaction_finishes_where_the_plain_budget_overruns() {
+        let budget = budget_steps(6);
+        let mut planner = ScriptedPlanner::new(read_plans(7));
+        let mut door = read_door();
+        let plain = AgentLoop::new(budget).run("read seven", &mut planner, &mut door);
+        assert_eq!(
+            plain,
+            Err(LoopError::BudgetOverrun {
+                kind: BudgetKind::Steps,
+                used: 6,
+                limit: 6,
+            }),
+            "the unfolded run stops at the bound"
+        );
+
+        let mut planner = ScriptedPlanner::new(read_plans(7));
+        let mut door = read_door();
+        let folded = AgentLoop::compacting(budget, 3)
+            .run("read seven", &mut planner, &mut door)
+            .expect("the folded run finishes on the same budget");
+        assert_eq!(folded.answer, "read all");
+        assert_eq!(folded.folds.len(), 1, "one fold was enough");
+        assert_eq!(folded.folds[0].folded, 3);
+        assert_eq!(folded.folds[0].kept, 4, "summary plus three kept steps");
+        assert!(folded.folds[0].reclaimed > 0, "the fold gave tokens back");
+        assert_ne!(folded.folds[0].checkpoint, 0, "the fold has a checkpoint");
+        assert_eq!(folded.steps[0].tool, SUMMARY_TOOL);
+        assert_eq!(folded.steps[0].step, 0);
+        assert!(folded.steps[0].input.contains("folded=3"));
+        assert!(folded.steps[0].observation.contains("steps folded"));
+        let indices: Vec<u32> = folded.steps.iter().map(|step| step.step).collect();
+        assert_eq!(
+            indices,
+            vec![0, 1, 2, 3, 4],
+            "steps are renumbered in order"
+        );
+        assert!(folded.steps[1..]
+            .iter()
+            .all(|step| step.tool == "scene.read"));
+        assert_eq!(folded.steps.len(), 5, "the loop kept going to the answer");
+    }
+
+    /// P2P: with room to spare, compaction changes nothing at all.
+    #[test]
+    fn agent_loop_compaction_leaves_a_short_run_unchanged() {
+        let budget = LoopBudget::default_budget();
+        let mut planner = ScriptedPlanner::new(read_plans(3));
+        let mut door = read_door();
+        let plain = AgentLoop::new(budget)
+            .run("read three", &mut planner, &mut door)
+            .expect("plain run finishes");
+
+        let mut planner = ScriptedPlanner::new(read_plans(3));
+        let mut door = read_door();
+        let compacting = AgentLoop::compacting(budget, 2)
+            .run("read three", &mut planner, &mut door)
+            .expect("compacting run finishes");
+        assert!(compacting.folds.is_empty(), "nothing to fold");
+        assert_eq!(compacting, plain, "same answer, steps, tokens and folds");
+        assert_eq!(compacting.checkpoint(), plain.checkpoint());
+    }
+
+    /// A pending write at the head of the transcript stops the fold by name.
+    #[test]
+    fn agent_loop_compaction_refuses_a_pending_write_at_the_head() {
+        let budget = budget_steps(5);
+        let mut plans = vec![Plan::ToolCall {
+            tool: String::from("tx.apply"),
+            input: String::from("wall 3"),
+            idempotency_key: 9,
+        }];
+        plans.extend(read_plans(6));
+        let mut planner = ScriptedPlanner::new(plans);
+        let mut door = write_door();
+        let refused =
+            AgentLoop::compacting(budget, 2).run("apply then read", &mut planner, &mut door);
+        match refused {
+            Err(error) => {
+                assert_eq!(error.code(), "cannot_fold");
+                assert_eq!(
+                    error,
+                    LoopError::CannotFold { step: 0, key: 9 },
+                    "the oldest step is the pending write"
+                );
+                assert!(error.to_string().contains("pending write"), "{error}");
+            }
+            Ok(outcome) => panic!("a pending write must not fold, got {outcome:?}"),
+        }
+    }
+
+    /// A write inside the fold window stays verbatim with its undo key.
+    #[test]
+    fn agent_loop_compaction_keeps_a_write_and_its_undo_verbatim() {
+        let budget = budget_steps(5);
+        let plans = vec![
+            Plan::ToolCall {
+                tool: String::from("scene.read"),
+                input: String::from("entity a"),
+                idempotency_key: 1,
+            },
+            Plan::ToolCall {
+                tool: String::from("scene.read"),
+                input: String::from("entity b"),
+                idempotency_key: 2,
+            },
+            Plan::ToolCall {
+                tool: String::from("tx.apply"),
+                input: String::from("wall 3"),
+                idempotency_key: 7,
+            },
+            Plan::ToolCall {
+                tool: String::from("scene.read"),
+                input: String::from("entity c"),
+                idempotency_key: 4,
+            },
+            Plan::ToolCall {
+                tool: String::from("scene.read"),
+                input: String::from("entity d"),
+                idempotency_key: 5,
+            },
+            Plan::Done {
+                answer: String::from("read all"),
+            },
+        ];
+        let mut planner = ScriptedPlanner::new(plans);
+        let mut door = write_door();
+        let outcome = AgentLoop::compacting(budget, 2)
+            .run("read, write, read", &mut planner, &mut door)
+            .expect("the fold stops before the write and the loop finishes");
+        assert_eq!(outcome.folds[0].folded, 2, "only the two reads folded");
+        let apply = outcome
+            .steps
+            .iter()
+            .find(|step| step.tool == "tx.apply")
+            .expect("the write survives the fold");
+        assert_eq!(apply.idempotency_key, 7);
+        assert_eq!(apply.input, "wall 3");
+        assert!(
+            door.pending_write("tx.apply", 7),
+            "the write is still undoable"
+        );
+        assert!(door.undo(7), "and undo still finds it");
+        assert!(!door.pending_write("tx.apply", 7));
     }
 }

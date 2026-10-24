@@ -93,8 +93,15 @@ impl FighterLook {
     /// per accepted tick after `observe_tick`. Presentation only; the sim
     /// hash never reads it.
     pub fn observe_throws(&mut self, arms: &[ArmState; MAX_LOOK_FIGHTERS]) {
+        let mut moved = false;
         for (slot, arm) in self.slots.iter_mut().zip(arms) {
-            slot.throw = slot.throw.fold(*arm);
+            let next = slot.throw.fold(*arm);
+            moved |= next != slot.throw;
+            slot.throw = next;
+        }
+        // The throw lays over the last pose, behind the clamp's sample of this tick: retake it.
+        if moved {
+            self.resample_limit_positions();
         }
     }
 
