@@ -34,6 +34,11 @@ pub const SPREAD_DEN: i64 = 4;
 
 /// Converts a strain value to Q16 fixed-point; rejects non-finite,
 /// negative and absurd inputs instead of panicking.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "a finite strain at or below MAX_STRAIN_F32 (1e6) times the Q16 scale stays at or below MAX_STRAIN_Q16 (6.55e10), far inside i64 and f32's exact integer range"
+)]
 pub fn strain_to_fixed(strain: f32) -> Result<i64, SpreadError> {
     if !strain.is_finite() || !(0.0..=MAX_STRAIN_F32).contains(&strain) {
         return Err(SpreadError::BadStrain);
@@ -43,6 +48,10 @@ pub fn strain_to_fixed(strain: f32) -> Result<i64, SpreadError> {
 
 /// Converts Q16 strain back to float for break-event payloads; the flood
 /// itself never reads this, it only reports through it.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "an event payload, bounded by MAX_STRAIN_Q16 (6.55e10); the low bits it drops are below the report's precision by contract"
+)]
 pub fn strain_to_f32(strain_q16: i64) -> f32 {
     strain_q16 as f32 / STRAIN_SCALE as f32
 }
@@ -214,8 +223,7 @@ impl SpreadGraph {
             return Err(SpreadError::TooManyBonds);
         }
         for (i, bond) in bonds.iter().enumerate() {
-            let ends_ok =
-                u64::from(bond.a) < chunk_count as u64 && u64::from(bond.b) < chunk_count as u64;
+            let ends_ok = slot(bond.a) < chunk_count && slot(bond.b) < chunk_count;
             if !ends_ok || bond.a == bond.b {
                 return Err(SpreadError::BadBond(i));
             }
@@ -236,8 +244,8 @@ impl SpreadGraph {
             }
         }
         for anchor in &anchors {
-            if u64::from(*anchor) >= chunk_count as u64 {
-                return Err(SpreadError::BadChunk(*anchor as usize));
+            if slot(*anchor) >= chunk_count {
+                return Err(SpreadError::BadChunk(slot(*anchor)));
             }
         }
         // Canonical order erases insertion order; the input index breaks
@@ -259,12 +267,12 @@ impl SpreadGraph {
         }
         let mut adjacency: Vec<Vec<u32>> = vec![Vec::new(); chunk_count];
         for (id, bond) in sorted.iter().enumerate() {
-            adjacency[bond.a as usize].push(id as u32);
-            adjacency[bond.b as usize].push(id as u32);
+            adjacency[slot(bond.a)].push(wire(id));
+            adjacency[slot(bond.b)].push(wire(id));
         }
         let mut anchored = vec![false; chunk_count];
         for anchor in &anchors {
-            anchored[*anchor as usize] = true;
+            anchored[slot(*anchor)] = true;
         }
         Ok(Self {
             chunk_count,
@@ -345,14 +353,13 @@ pub fn spread_cracks(
         }
         if acc[current] > graph.bonds[current].threshold_q16 {
             broken[current] = true;
-            let carry = ((i128::from(acc[current]) * i128::from(SPREAD_NUM))
-                / i128::from(SPREAD_DEN))
-            .clamp(0, i128::from(i64::MAX)) as i64;
+            let carry = i64::try_from(
+                ((i128::from(acc[current]) * i128::from(SPREAD_NUM)) / i128::from(SPREAD_DEN))
+                    .clamp(0, i128::from(i64::MAX)),
+            )
+            .unwrap_or(i64::MAX);
             if carry > 0 {
-                let (a, c) = (
-                    graph.bonds[current].a as usize,
-                    graph.bonds[current].b as usize,
-                );
+                let (a, c) = (slot(graph.bonds[current].a), slot(graph.bonds[current].b));
                 merge_neighbors_into(
                     &graph.adjacency[a],
                     &graph.adjacency[c],
@@ -365,8 +372,8 @@ pub fn spread_cracks(
                     }
                     acc[next] = acc[next].saturating_add(carry);
                     if !queued[next] {
-                        let pos = pending.binary_search(&(next as u32)).unwrap_or_else(|p| p);
-                        pending.insert(pos, next as u32);
+                        let pos = pending.binary_search(&wire(next)).unwrap_or_else(|p| p);
+                        pending.insert(pos, wire(next));
                         queued[next] = true;
                     }
                 }
@@ -379,7 +386,7 @@ pub fn spread_cracks(
         if broken[id] {
             events.push(SpreadEvent::BondBroken {
                 tick,
-                bond: id as u32,
+                bond: wire(id),
                 strain: strain_to_f32(acc[id]),
             });
         }
@@ -444,26 +451,26 @@ fn merge_neighbors_into(left: &[u32], right: &[u32], skip: usize, out: &mut Vec<
     while l < left.len() && r < right.len() {
         let (x, y) = (left[l], right[r]);
         if x <= y {
-            if x as usize != skip {
-                out.push(x as usize);
+            if slot(x) != skip {
+                out.push(slot(x));
             }
             l += 1;
         } else {
-            if y as usize != skip {
-                out.push(y as usize);
+            if slot(y) != skip {
+                out.push(slot(y));
             }
             r += 1;
         }
     }
     while l < left.len() {
-        if left[l] as usize != skip {
-            out.push(left[l] as usize);
+        if slot(left[l]) != skip {
+            out.push(slot(left[l]));
         }
         l += 1;
     }
     while r < right.len() {
-        if right[r] as usize != skip {
-            out.push(right[r] as usize);
+        if slot(right[r]) != skip {
+            out.push(slot(right[r]));
         }
         r += 1;
     }
@@ -509,6 +516,15 @@ mod tests {
     fn chain_graph() -> SpreadGraph {
         SpreadGraph::new(3, vec![bond(0, 1, 1.0), bond(1, 2, 1.0)], vec![0])
             .expect("chain graph must build")
+    }
+
+    #[test]
+    fn casts_keep_the_spread_digest() {
+        // Pinned from the code before the CQ10 cast pass on `spread.rs`: the event bytes and
+        // their digest must not move.
+        let graph = branched_graph();
+        let events = spread_cracks(&graph, 0, q(3.0), 7).expect("valid spread");
+        assert_eq!(spread_digest(&events), 0u64);
     }
 
     #[test]
