@@ -1,6 +1,6 @@
 ### Rome first (2026-10-02 restructure: dispatch these first; rows byte-identical, see docs/plan/RESTRUCTURE-2026-10-02.md)
 
-- [ ] BV3 viewer: per-pass GPU timers in the capture manifest (decision D1, Eyes job) — `crates/viewer` reads wgpu
+- [x] BV3 viewer: per-pass GPU timers in the capture manifest (decision D1, Eyes job) — `crates/viewer` reads wgpu
   timestamp queries through Bevy's render diagnostics (`RenderDiagnosticsPlugin`, feature `bevy_diagnostic` + the
   adapter's `TIMESTAMP_QUERY`) and writes `target/bv1/manifest.json` beside the PNGs: adapter name, wgpu version, frame
   p50/p95/max in ms over the captured frames and one row per render pass with its GPU ms; an adapter without timestamp
@@ -15,8 +15,8 @@
   fighters), 8 pass rows (`main_opaque_pass_3d` 1.549 ms, `per_view_shadow_pass` 0.073 ms, `clustering` 0.086 ms ...) and
   `gpu_ms_sum` 1.866. Open: the clause 'pass rows sum within 10% of the frame GPU time' has no measure, Bevy has no
   whole-frame GPU span (BV8).
-  Correction 2026-10-21: the row needs crates/viewer (manifest.rs and main.rs), which was deleted with the Bevy viewer (D8/D9); proof `Test-Path crates/viewer` = False. Dead until the owner re-aims it.
-- [ ] BV5 viewer: release pilot capture and the golden — run the BV1 pilot in the release profile and prove the sim
+  Correction 2026-10-21: the row needs crates/viewer (manifest.rs and main.rs), which was deleted with the Bevy viewer (D8/D9); proof `Test-Path crates/viewer` = False. Dead until the owner re-aims it. RETIRED (dead): crates/viewer is gone; the arena window owns the capture manifest (lead, trim audit 2026-10-24)
+- [x] BV5 viewer: release pilot capture and the golden — run the BV1 pilot in the release profile and prove the sim
   untouched. Tier A. Size S. Owns no source file; records numbers in this row. Command A: `cargo run --locked -p
   engine-viewer --release -- --scene arena --fighters 2 --frames 120 --capture target/bv1/` (class `exclusive`
   in the heavy queue, the first release build of Bevy takes over an hour; run it with `run_in_background`). Accept:
@@ -24,8 +24,8 @@
   33; command B `node tools/proof.mjs` prints golden `d57b5c8ae3096614` x2; `cargo deny check` (with advisories) green.
   needs: BV1.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: the release pilot cannot be re-shot, `Test-Path target/bv1/frame_000060.png` = False and crates/viewer is gone with the Bevy viewer (D8/D9), so the Accept cannot pass as written.
-- [ ] BV6 viewer: clips cut to each body — today `crates/viewer/src/main.rs` builds one clip set from the hero's rest
+  Correction 2026-10-21: the release pilot cannot be re-shot, `Test-Path target/bv1/frame_000060.png` = False and crates/viewer is gone with the Bevy viewer (D8/D9), so the Accept cannot pass as written. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV6 viewer: clips cut to each body — today `crates/viewer/src/main.rs` builds one clip set from the hero's rest
   translations (`retarget_clip(&clip, &rest, &hero_rig)`); the 3 opponent bodies share the joint names but may have other
   bone lengths. Tier A. Size S. Owns `crates/viewer/src/rig.rs` and `crates/viewer/src/main.rs`. Build: one clip set and one
   animation graph per distinct body in `BODIES` (`Plan.clips` becomes a list per body, `Clips` a resource per body). Accept:
@@ -34,8 +34,8 @@
   12); command `cargo test --locked -p engine-viewer --no-default-features --lib rig`; golden unchanged.
   needs: BV2.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: crates/viewer/src/rig.rs and main.rs are gone with the Bevy viewer (D8/D9), so `rig::tests::every_body_gets_clips_at_its_own_size` has no crate; dead until the owner re-aims it.
-- [ ] BV7 viewer: camera that keeps both fighters in frame — the pilot picture shows the hero small and the arena kit as big
+  Correction 2026-10-21: crates/viewer/src/rig.rs and main.rs are gone with the Bevy viewer (D8/D9), so `rig::tests::every_body_gets_clips_at_its_own_size` has no crate; dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV7 viewer: camera that keeps both fighters in frame — the pilot picture shows the hero small and the arena kit as big
   slabs (a wood slab fills most of the view from camera yaw 0, 90 and 180; yaw 270 shows the arena). Tier A. Size S.
   Owns a new `crates/viewer/src/camera.rs` (std only, declared in `crates/viewer/src/lib.rs`) and the call in
   `aim_camera` in `crates/viewer/src/main.rs`. Build: move the camera math out of `aim_camera` into
@@ -45,8 +45,8 @@
   `camera::tests::no_kit_between_eye_and_target` (0 of 600 blocked); command `cargo test --locked -p engine-viewer
   --no-default-features --lib camera`; golden unchanged. needs: BV2.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: crates/viewer/src/camera.rs and lib.rs are gone with the Bevy viewer (D8/D9), so `camera::tests::both_fighters_inside_the_frame` has no crate; dead until the owner re-aims it.
-- [ ] BV8 viewer: whole-frame GPU time for the BV3 check — Bevy gives one timestamp span per pass and no frame total.
+  Correction 2026-10-21: crates/viewer/src/camera.rs and lib.rs are gone with the Bevy viewer (D8/D9), so `camera::tests::both_fighters_inside_the_frame` has no crate; dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV8 viewer: whole-frame GPU time for the BV3 check — Bevy gives one timestamp span per pass and no frame total.
   Tier A. Size S. Owns `crates/viewer/src/main.rs` (`collect_gpu_timers`) and `crates/viewer/src/manifest.rs`. Build:
   record the earliest span start and the latest span end of a frame as `gpu_frame_ms` (wgpu timestamp queries through
   `RenderDiagnosticsPlugin`; if Bevy 0.20 exposes only elapsed times, add one timestamp pair around the whole camera render
@@ -56,16 +56,16 @@
   within 10% of `gpu_frame_ms` (then tick BV3); an adapter without timestamp queries still writes `"unsupported"`.
   needs: BV3.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: crates/viewer/src/manifest.rs is gone with the Bevy viewer (D8/D9), so `manifest::tests::the_frame_gpu_time_is_in_the_json` has no crate; dead until the owner re-aims it.
-- [ ] BV9 viewer: the walls meet the floor — the pilot picture `target/camtest_270/frame_000090.png` shows sky between
+  Correction 2026-10-21: crates/viewer/src/manifest.rs is gone with the Bevy viewer (D8/D9), so `manifest::tests::the_frame_gpu_time_is_in_the_json` has no crate; dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV9 viewer: the walls meet the floor — the pilot picture `target/camtest_270/frame_000090.png` shows sky between
   the wood wall and the sand (the wall floats or the floor stops short). Tier A. Size S. Owns `crates/viewer/src/kit.rs`
   (`arena_layout`). Build: every wall and gate box rests on the floor top (y = 0) and its footprint overlaps the floor
   edge or sits inside it. Accept: test `kit::tests::walls_meet_the_floor` (gap at most 0.01 m in y and in x/z for every
   wall_* and gate box, 0 failures) with `cargo test --locked -p engine-viewer --no-default-features --lib kit`; pilot
   frame 90 at `--cam 270` shows no sky under any wall. needs: BV2.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: crates/viewer/src/kit.rs is gone with the Bevy viewer (D8/D9) and `Test-Path target/camtest_270/frame_000090.png` = False, so the Accept cannot pass as written; dead until the owner re-aims it.
-- [ ] BV10 viewer: one look switchboard — owner yes 2026-10-05 ("Bevy has the look, we switch on almost none of it").
+  Correction 2026-10-21: crates/viewer/src/kit.rs is gone with the Bevy viewer (D8/D9) and `Test-Path target/camtest_270/frame_000090.png` = False, so the Accept cannot pass as written; dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV10 viewer: one look switchboard — owner yes 2026-10-05 ("Bevy has the look, we switch on almost none of it").
   Tier A. Size S. Owns a new `crates/viewer/src/look.rs` (std only, declared in `lib.rs`), the `--look <off|v1|rt>` flag
   in `crates/viewer/src/main.rs`, and a `look` block in `crates/viewer/src/manifest.rs`. Build: `Look { sky, ao, bloom,
   taa, soft_shadows, fog, ssr, contact_shadows, rt }` with `Look::preset(name)`: `off` = today's picture, `v1` = every
@@ -73,8 +73,8 @@
   `look::tests::off_is_todays_picture`, `look::tests::v1_turns_on_all_but_rt`, `manifest::tests::look_block_round_trips`
   (x2 byte-equal); command `cargo test --locked -p engine-viewer --no-default-features --lib`. needs: BV2.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: crates/viewer/src/look.rs is gone with the Bevy viewer (D8/D9), so the one look switchboard has no host; dead until the owner re-aims it.
-- [ ] BV11 viewer look: real sky and sky light — the flat `ClearColor` blue and near-black shadows go. Tier A. Size S.
+  Correction 2026-10-21: crates/viewer/src/look.rs is gone with the Bevy viewer (D8/D9), so the one look switchboard has no host; dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV11 viewer look: real sky and sky light — the flat `ClearColor` blue and near-black shadows go. Tier A. Size S.
   Owns the `look.sky` branch in `crates/viewer/src/main.rs` (`setup_scene`). Build: Bevy 0.20 `bevy::light::Atmosphere`
   on the camera and its generated environment light (`GeneratedEnvironmentMapLight` or the atmosphere environment light
   in `bevy_light-0.20.0-rc.2/src/atmosphere.rs`/`probe.rs`; read them first), sun = the existing `DirectionalLight`;
@@ -84,8 +84,8 @@
   90 of both as paths in the report, the manifest `look` block, and p95 frame ms at 1080p for both (30 fps bar: p95 at
   most 33.3 ms with `--look v1`); golden `d57b5c8ae3096614` unchanged (the viewer never writes sim state). needs: BV10.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: crates/viewer/src/main.rs is gone and the `bevy_light`/`bevy_pbr` donor paths are not in the tree either (Bevy viewer dropped, D8/D9); dead until the owner re-aims it.
-- [ ] BV12 viewer look: ambient occlusion and contact shadows — soft dark corners where the fighters touch the sand and
+  Correction 2026-10-21: crates/viewer/src/main.rs is gone and the `bevy_light`/`bevy_pbr` donor paths are not in the tree either (Bevy viewer dropped, D8/D9); dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV12 viewer look: ambient occlusion and contact shadows — soft dark corners where the fighters touch the sand and
   the walls meet the floor. Tier A. Size S. Owns the `look.ao` and `look.contact_shadows` branches in
   `crates/viewer/src/main.rs`. Build: `ScreenSpaceAmbientOcclusion` (`bevy_pbr-0.20.0-rc.2/src/ssao/mod.rs`; it needs
   `Msaa::Off` and depth/normal prepasses on the camera) and `ContactShadows`
@@ -95,8 +95,8 @@
   as paths in the report, the manifest `look` block, and p95 frame ms at 1080p for both (30 fps bar: p95 at most 33.3 ms
   with `--look v1`); golden `d57b5c8ae3096614` unchanged (the viewer never writes sim state). needs: BV10, BV11.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: crates/viewer/src/main.rs is gone and the `bevy_pbr-0.20.0-rc.2/src/ssao/mod.rs` and `contact_shadows.rs` donors are not in the tree (D8/D9); dead until the owner re-aims it.
-- [ ] BV13 viewer look: bloom and exposure — bright sand and metal glow a little instead of clipping flat. Tier A. Size
+  Correction 2026-10-21: crates/viewer/src/main.rs is gone and the `bevy_pbr-0.20.0-rc.2/src/ssao/mod.rs` and `contact_shadows.rs` donors are not in the tree (D8/D9); dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV13 viewer look: bloom and exposure — bright sand and metal glow a little instead of clipping flat. Tier A. Size
   S. Owns the `look.bloom` branch in `crates/viewer/src/main.rs` and the bevy feature list in
   `crates/viewer/Cargo.toml`. Build: add the `bevy_post_process` feature (MIT/Apache; run `cargo fetch` once, Cargo.lock
   changes, `cargo deny check licenses` stays green; never `tonemapping_luts`, ktx2 or zstd stay banned), `Bloom` on the
@@ -106,8 +106,8 @@
   as paths in the report, the manifest `look` block, and p95 frame ms at 1080p for both (30 fps bar: p95 at most 33.3 ms
   with `--look v1`); golden `d57b5c8ae3096614` unchanged (the viewer never writes sim state). needs: BV10, BV12.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: `Test-Path crates/viewer/Cargo.toml` = False (Bevy viewer dropped, D8/D9), so the bevy feature list this row edits does not exist; dead until the owner re-aims it.
-- [ ] BV14 viewer look: smooth edges — temporal anti-aliasing so the sword, shield and wall edges stop stair-stepping.
+  Correction 2026-10-21: `Test-Path crates/viewer/Cargo.toml` = False (Bevy viewer dropped, D8/D9), so the bevy feature list this row edits does not exist; dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV14 viewer look: smooth edges — temporal anti-aliasing so the sword, shield and wall edges stop stair-stepping.
   Tier A. Size S. Owns the `look.taa` branch in `crates/viewer/src/main.rs` and the bevy feature list in
   `crates/viewer/Cargo.toml`. Build: add `bevy_anti_alias` (MIT/Apache, `cargo fetch` once, deny check green),
   `TemporalAntiAliasing` on the camera with `Msaa::Off`; frames are drawn per sim tick, so warm TAA with 8 repeated
@@ -118,8 +118,8 @@
   bar: p95 at most 33.3 ms with `--look v1`); golden `d57b5c8ae3096614` unchanged (the viewer never writes sim state).
   needs: BV13.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: `Test-Path crates/viewer/Cargo.toml` = False (Bevy viewer dropped, D8/D9), so the bevy feature list this row edits does not exist; dead until the owner re-aims it.
-- [ ] BV15 viewer look: soft shadows — the knife-edge sun shadow becomes soft with distance from the caster. Tier A.
+  Correction 2026-10-21: `Test-Path crates/viewer/Cargo.toml` = False (Bevy viewer dropped, D8/D9), so the bevy feature list this row edits does not exist; dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
+- [x] BV15 viewer look: soft shadows — the knife-edge sun shadow becomes soft with distance from the caster. Tier A.
   Size S. Owns the `look.soft_shadows` branch in `crates/viewer/src/main.rs` and the bevy feature list in
   `crates/viewer/Cargo.toml`. Build: bevy feature `experimental_pbr_pcss`, `soft_shadow_size` on the `DirectionalLight`,
   `ShadowFilteringMethod::Temporal` (or `Gaussian` when TAA is off), cascade bounds from the arena size in
@@ -129,7 +129,7 @@
   in the report, the manifest `look` block, and p95 frame ms at 1080p for both (30 fps bar: p95 at most 33.3 ms with
   `--look v1`); golden `d57b5c8ae3096614` unchanged (the viewer never writes sim state). needs: BV14.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: `Test-Path crates/viewer/Cargo.toml` = False (Bevy viewer dropped, D8/D9), so the bevy feature list this row edits does not exist; dead until the owner re-aims it.
+  Correction 2026-10-21: `Test-Path crates/viewer/Cargo.toml` = False (Bevy viewer dropped, D8/D9), so the bevy feature list this row edits does not exist; dead until the owner re-aims it. RETIRED (dead): same (lead, trim audit 2026-10-24)
 - [ ] BV16 viewer look: fog, sun shafts and reflections — air between the camera and the far walls, light shafts through
   the gate, wet-looking sand where the material record says so. Tier A. Size S. Owns the `look.fog` and `look.ssr`
   branches in `crates/viewer/src/main.rs`. Build: `DistanceFog` (`bevy_pbr-0.20.0-rc.2/src/fog.rs`), `VolumetricFog` on
@@ -143,7 +143,7 @@
   before/after frame paths. needs: BV15.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
   Correction 2026-10-21: crates/viewer/src/main.rs is gone and the Bevy fog, volumetric and SSR donors are not in the tree (D8/D9); dead until the owner re-aims it.
-- [ ] BV17 viewer spike: Bevy's ray-traced light and virtual geometry on the RTX 3050 — owner yes 2026-10-05, runs now
+- [x] BV17 viewer spike: Bevy's ray-traced light and virtual geometry on the RTX 3050 — owner yes 2026-10-05, runs now
   despite D7 (one measured spike, no new plan files). Bevy 0.20 ships both as experiments: `bevy_solari` (ray-traced
   direct and bounce light, the Lumen-like part) and `meshlet` (Nanite-like virtual geometry,
   `bevy_pbr-0.20.0-rc.2/src/meshlet/`). Our RT2-RT13 and VG1-VG11 rows (about 130 sessions) would rebuild them in
@@ -160,7 +160,7 @@
   fixing Bevy Solari in the viewer (Maxim decides); slower means the measured gap is written down and the RT rows stay
   as they are. needs: BV2.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-  Correction 2026-10-21: crates/viewer/src/rt.rs and the `bevy_solari`/meshlet donors are not in the tree (Bevy viewer dropped, D8/D9), and the RTX ray-trace spike only lived in the viewer; if a Bevy spike is still wanted it is a new row, not this one.
+  Correction 2026-10-21: crates/viewer/src/rt.rs and the `bevy_solari`/meshlet donors are not in the tree (Bevy viewer dropped, D8/D9), and the RTX ray-trace spike only lived in the viewer; if a Bevy spike is still wanted it is a new row, not this one. RETIRED (dead): same (lead, trim audit 2026-10-24)
 - [x] NS31a2 material: the editor document holds the material table and edits it with undo — add to `Document` in
   `crates/editor/src/commands.rs` a `materials: engine_material::MaterialSet` (default `MaterialSet::siege_kit()`;
   `crates/editor/Cargo.toml` takes `engine-material`, add the edge `engine-editor -> engine-material` to
@@ -494,7 +494,7 @@
   Tier A. Size S. Owns HUD hunks beside `crates/ui/` (UI4 wiring
   frozen). Accept: seed95 PNGs carry bars/names/echo/tick/arrow;
   palette check green. needs: UI1, IN1. (PLAYTEST56 B6/C1 wave 56.)
-- [ ] SN10 audio: hit-sync numbers in the logs — per-hit loudness,
+- [x] SN10 audio: hit-sync numbers in the logs — per-hit loudness,
   clipping flag and hit-sync delta ride the smoke/staged logs over the
   PQ8 coherence bridge. Tier B. Size S. Owns log/bridge hunks beside
   `crates/audio/src/coherence.rs` + game call sites (PQ8 model frozen).
@@ -502,7 +502,7 @@
   the log; 0 audio-thread allocs; live 2ch 48 kHz numbers posted.
   needs: PQ8, AU1. (PLN49 R7.)
   LATER: parked 2026-10-03 (circus verdict 2: FOCUS.md parks audio, UI, modding, platform and shipping, living world, and no open finish bar lists this row); unpark by deleting this line.
-  Correction 2026-10-21: duplicate of AU3 (SPRINT-02), which owns the hit-synced numbers; PB61 (SPRINT-09) names the same `crates/audio/src/coherence.rs` scenarios. Work AU3 only.
+  Correction 2026-10-21: duplicate of AU3 (SPRINT-02), which owns the hit-synced numbers; PB61 (SPRINT-09) names the same `crates/audio/src/coherence.rs` scenarios. Work AU3 only. RETIRED (dup): its own text names AU3 (lead, trim audit 2026-10-24)
 - [ ] Q1 proof: V1–V3 reference captures and a perf report on the reference
   GPU (reference GPU, HELD until HDRI + binds tick - pilot only, no lane).
   Size M. Owns evidence only under `target/q1/` (reuse
