@@ -10,10 +10,11 @@
 //! never hashed. Units: meters, seconds.
 
 use super::super::PresentError;
-use super::frame::particle_err;
+use super::frame::{particle_err, trail_err};
 use super::presenter::Presenter;
 use super::submit::FrameCamera;
 use crate::particles_gpu::{EmitterKind, ParticlePool};
+use crate::vfx_soft::{vfx_light, vfx_zparams};
 
 /// Seed of the fight pool: one stream for the run, so the same events give the
 /// same particles.
@@ -104,6 +105,7 @@ impl Presenter {
     /// a batch to draw. A calm pool stages nothing and the frame's pixels stay
     /// a pure function of its list.
     pub(super) fn stage_fight_fx(&mut self, frame: &FrameCamera) -> Result<bool, PresentError> {
+        self.set_vfx_camera(frame);
         let Some(pool) = self.fight_fx.as_ref().filter(|pool| pool.alive() > 0) else {
             return Ok(false);
         };
@@ -119,5 +121,55 @@ impl Presenter {
             )
             .map_err(particle_err)?;
         Ok(receipt.staged > 0)
+    }
+
+    /// Hand the sprite and ribbon passes the frame camera's view-depth
+    /// constants (they turn the stored depth back into metres for the soft
+    /// contact). Called before either stages, every frame that stages.
+    pub(super) fn set_vfx_camera(&mut self, frame: &FrameCamera) {
+        let mut vfx = self.particle_sub.vfx();
+        vfx.zparams = vfx_zparams(frame.near, frame.far);
+        self.particle_sub.set_vfx(&self.queue, vfx);
+        self.trail_sub.set_vfx(&self.queue, vfx);
+    }
+
+    /// Hand the sprite and ribbon passes the light of this frame: the sun's
+    /// radiance from the frame's light uniform bytes (`LightU`: direction, pad,
+    /// `light_color`, intensity) plus the sky's mean radiance, so dust and blood
+    /// take the arena's light and the streak its cast. A short or non-finite
+    /// image keeps the last light.
+    pub(super) fn set_vfx_light(&mut self, light_bytes: &[u8]) {
+        let word = |at: usize| {
+            light_bytes
+                .get(at..at + 4)
+                .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                .map(f32::from_le_bytes)
+        };
+        let (Some(r), Some(g), Some(b)) = (word(16), word(20), word(24)) else {
+            return;
+        };
+        let mut vfx = self.particle_sub.vfx();
+        vfx.light = vfx_light([r, g, b], self.ibl_ambient());
+        if self.particle_sub.set_vfx(&self.queue, vfx) {
+            self.trail_sub.set_vfx(&self.queue, vfx);
+        }
+    }
+
+    /// Stage the sword ribbon under this frame's camera. The probe and capture
+    /// frames stage it with the look passes; the live frame has no look pass, so
+    /// it stages here. An empty list clears the last strip.
+    pub(super) fn stage_fight_trail(&mut self, frame: &FrameCamera) -> Result<(), PresentError> {
+        self.trail_sub
+            .stage(
+                &self.device,
+                &self.queue,
+                &self.trail_verts,
+                &self.trail_lens,
+                frame.built_view_proj.to_cols_array_2d(),
+                frame.camera_right(),
+                frame.camera_up(),
+            )
+            .map(|_| ())
+            .map_err(trail_err)
     }
 }
