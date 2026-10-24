@@ -5,10 +5,10 @@
     "anim-combat": 10976,
     "assets-content": 16805,
     "commit-and-board": 8556,
-    "debug-triage": 4483,
+    "debug-triage": 4262,
     "design-and-playtest": 5486,
     "determinism-debug": 8215,
-    "door-and-headless-runbook": 13785,
+    "door-and-headless-runbook": 7562,
     "game-shell-audio-ui": 7227,
     "github-check": 10435,
     "net-rollback": 6049,
@@ -22,10 +22,10 @@
     "rust-quality-ratchet": 5244,
     "rust-safety": 6701,
     "spatial-perception": 8276,
-    "test-and-proof": 6794,
+    "test-and-proof": 6761,
     "tick-and-runtime": 6018,
     "web-wasm": 12100,
-    "wgpu-render": 14774,
+    "wgpu-render": 6143,
     "wiring-a-feature": 5216
   }
 }
