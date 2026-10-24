@@ -589,6 +589,21 @@ impl Reverb {
         }
         Ok(())
     }
+
+    /// Render the wet tail of `input` into `out`, then sum the room's early
+    /// reflections from `early` into the same bus, so a blow off a wall
+    /// arrives ahead of the late bloom. Same lengths rule as [`Self::process`];
+    /// allocates nothing.
+    pub fn process_with_early(
+        &mut self,
+        input: &[f32],
+        out: &mut [f32],
+        early: &mut crate::early_reflections::EarlyLines,
+    ) -> Result<(), ReverbError> {
+        self.process(input, out)?;
+        early.add(input, out);
+        Ok(())
+    }
 }
 
 /// Stereo tail: two detuned [`Reverb`] lines so one mono hit blooms wide.

@@ -8,7 +8,7 @@
 //! street level with the blade through the building bases and the sidewalk, swings on webs,
 //! then drives. Presentation only. Units: meters, seconds, radians.
 
-use engine_physfx::Tier;
+use engine_physfx::{Tier, Transform};
 use engine_render::particles_gpu::EmitterKind;
 use engine_render::present::{DrawList, Presenter, MAX_DRAWS_PER_FRAME};
 use engine_render::v1::PbrMaterial;
@@ -19,6 +19,7 @@ use super::collide::{push_out, slide};
 use super::crowd::{Crowd, SHIRTS, WAKE_MPS};
 use super::cut::{box_shell, cut_tower, Slide};
 use super::draw::{bar_mesh, blade_mesh, flat_mesh, flat_mesh_rot, item, key, Soup};
+use super::fall::{Falls, Half};
 use super::flight::{speed_feel, Flight, FlightInput};
 use super::hero::{hero_meshes, HeroPose, Pose};
 use super::num::{add, centroid, len, rotate, scale, sub, unit_or};
@@ -55,6 +56,10 @@ const TURN_RAD_S: f32 = 1.6;
 const PITCH_RAD_S: f32 = 1.0;
 /// The dune autopilot swings when the target tower is this close, meters.
 const AUTO_SWING_M: f32 = 40.0;
+/// The dune autopilot's drive leg (SD11): it starts at this second and runs this long, so a
+/// 900-frame capture shows the car on the same terrain the flyer cut.
+const AUTO_DRIVE_AT_S: f32 = 5.0;
+const AUTO_DRIVE_FOR_S: f32 = 7.0;
 /// Walkers and buildings around a hit are searched within this reach, meters.
 const BODY_REACH_M: f32 = 2.5;
 const WALL_REACH_M: f32 = 40.0;
@@ -152,6 +157,11 @@ struct Piece {
     shell: engine_destruction::csg::PropMesh,
     pivot: [f32; 3],
     slide: Slide,
+    /// Set once the slide leaves the cut face: the float world owns the top from then on
+    /// (SD9). `None` keeps the kinematic slide, which is also the path a refused spawn takes.
+    half: Option<Half>,
+    /// The slide's offset at the hand-off, added to the float pose.
+    hand_off: [f32; 3],
     age_s: f32,
     look: Look,
 }
@@ -169,6 +179,8 @@ struct Auto {
 pub(crate) struct SpeedDemo {
     stage: Stage,
     pieces: Vec<Piece>,
+    /// The float world the cut tops fall in (SD9), built on the first cut.
+    falls: Option<Falls>,
     flight: Flight,
     swing: Swing,
     car: Car,
@@ -194,6 +206,10 @@ pub(crate) struct SpeedDemo {
     t_s: f32,
     cuts: u32,
     top_mps: f32,
+    /// Seconds the dune autopilot spent driving and the legs it took (SD11): the capture's
+    /// proof that the car ran, not only that it exists.
+    drove_s: f32,
+    drive_legs: u32,
 }
 
 impl SpeedDemo {
@@ -243,6 +259,7 @@ impl SpeedDemo {
             car,
             stage,
             pieces: Vec::new(),
+            falls: None,
             sword: Sword::default(),
             crowd,
             traffic,
@@ -263,6 +280,8 @@ impl SpeedDemo {
             t_s: 0.0,
             cuts: 0,
             top_mps: 0.0,
+            drove_s: 0.0,
+            drive_legs: 0,
         })
     }
 
@@ -351,7 +370,7 @@ impl SpeedDemo {
             if self.stage.is_nyc() {
                 self.nyc_autopilot(dt);
             } else {
-                self.autopilot();
+                self.dunes_autopilot(dt);
             }
         }
         let before = self.body().0;
@@ -361,10 +380,33 @@ impl SpeedDemo {
         self.top_mps = self.top_mps.max(self.speed());
         self.cut_what_the_blade_meets();
         self.knock_the_crowd(dt);
+        let mut falls = self.falls.take();
         for piece in &mut self.pieces {
-            piece.slide.step(dt);
+            if piece.half.is_none() {
+                piece.slide.step(dt);
+                // SD9: once the top has slid off the face the float world owns it: it falls
+                // under gravity, lands on the sand and is stopped by the towers around it.
+                if !piece.slide.sliding {
+                    if let Some(world) = falls.as_mut() {
+                        let at = Transform {
+                            pos: add(piece.pivot, piece.slide.offset),
+                            rot: [0.0, 0.0, 0.0, 1.0],
+                        };
+                        if let Some(half) =
+                            world.spawn(at, shell_half(&piece.shell), piece.slide.vel)
+                        {
+                            piece.half = Some(half);
+                            piece.hand_off = piece.slide.offset;
+                        }
+                    }
+                }
+            }
             piece.age_s += dt;
         }
+        if let Some(world) = falls.as_mut() {
+            world.step(dt);
+        }
+        self.falls = falls;
         self.pieces.retain(|p| p.age_s < PIECE_LIFE_S);
     }
 
@@ -506,10 +548,33 @@ impl SpeedDemo {
                 continue;
             };
             let pivot = centroid(&cut.falls.positions);
+            // SD9: the float world takes the top once it leaves the cut face. The tower it
+            // came from joins it as a static box, so a falling half is stopped by the stack
+            // instead of passing through it.
+            if self.falls.is_none() {
+                self.falls = Some(Falls::new(Tier::Comfort));
+            }
+            if let Some(world) = self.falls.as_mut() {
+                let (min, max) = self.stage.standing[i].bounds;
+                world.add_tower(
+                    [
+                        (max[0] - min[0]) * 0.5,
+                        (max[1] - min[1]) * 0.5,
+                        (max[2] - min[2]) * 0.5,
+                    ],
+                    [
+                        (min[0] + max[0]) * 0.5,
+                        (min[1] + max[1]) * 0.5,
+                        (min[2] + max[2]) * 0.5,
+                    ],
+                );
+            }
             self.pieces.push(Piece {
                 slide: Slide::start(&cut, scale(vel, 0.25)),
                 shell: cut.falls,
                 pivot,
+                half: None,
+                hand_off: [0.0; 3],
                 age_s: 0.0,
                 look: self.stage.standing[i].look,
             });
@@ -556,6 +621,24 @@ impl SpeedDemo {
                 crowd.hit(at, BODY_REACH_M, v, &walls);
             }
         }
+    }
+
+    /// Dunes, no keys yet: fly and cut, then one drive leg so a capture proves the car
+    /// (SD11), then fly again. The leg is the same autopilot steering with the throttle
+    /// held; the blade rides the car's side, so it keeps cutting while it drives.
+    fn dunes_autopilot(&mut self, dt: f32) {
+        let want_drive = (AUTO_DRIVE_AT_S..AUTO_DRIVE_AT_S + AUTO_DRIVE_FOR_S).contains(&self.t_s);
+        if want_drive && self.mode != Mode::Drive {
+            // Fly -> Drive on the dunes: the car takes the flyer's place and speed.
+            self.next_mode();
+            self.drive_legs += 1;
+        } else if !want_drive && self.mode == Mode::Drive {
+            self.next_mode();
+        }
+        if self.mode == Mode::Drive {
+            self.drove_s += dt;
+        }
+        self.autopilot();
     }
 
     /// Dunes, no keys yet: fly at the nearest standing tower so its middle passes the blade,
@@ -724,14 +807,23 @@ impl SpeedDemo {
         let eye: [f32; 3] = list.camera.eye.into();
         self.push_crowd(presenter, list, eye)?;
         self.push_traffic(presenter, list)?;
+        // SD9: a handed-off top draws where the float world put it; the rest keep the slide.
+        // Poses are read before the loop so the world and the piece list borrow apart.
+        let poses: Vec<Option<super::fall::Pose>> =
+            self.pieces
+                .iter()
+                .map(|piece| {
+                    piece.half.as_ref().and_then(|half| {
+                        self.falls.as_ref().and_then(|world| world.pose(half, 1.0))
+                    })
+                })
+                .collect();
         for (i, piece) in self.pieces.iter().enumerate() {
-            let mesh = flat_mesh(
-                &piece.shell,
-                piece.slide.offset,
-                piece.slide.axis,
-                piece.slide.angle,
-                piece.pivot,
-            )?;
+            let (offset, axis, angle) = match poses[i] {
+                Some(pose) => (add(piece.hand_off, pose.offset), pose.axis, pose.angle),
+                None => (piece.slide.offset, piece.slide.axis, piece.slide.angle),
+            };
+            let mesh = flat_mesh(&piece.shell, offset, axis, angle, piece.pivot)?;
             presenter
                 .upload_mesh(key(PIECE_KEY, i), &mesh)
                 .map_err(|e| format!("piece: {e}"))?;
@@ -923,6 +1015,30 @@ impl SpeedDemo {
         camera.far = FAR_M;
     }
 
+    /// The demo's own HUD (SD10): the speed line and the keys, in the place the fight's
+    /// health bars would take.
+    pub(crate) fn hud(&self) -> [String; super::hud::ROWS] {
+        let mode = match self.mode {
+            Mode::Fly => "fly",
+            Mode::Swing => "swing",
+            Mode::Drive => "car",
+        };
+        let faster = if self.flight.always_faster {
+            "on"
+        } else {
+            "off"
+        };
+        [
+            format!(
+                "SPEED {:.0} m/s  TOP {:.0} m/s  MODE {mode}  CUTS {}",
+                self.speed(),
+                self.top_mps,
+                self.cuts
+            ),
+            format!("ALWAYS FASTER {faster}  |  F toggles  Tab fly/drive  E swings"),
+        ]
+    }
+
     /// The exit receipt line.
     pub(crate) fn line(&self) -> String {
         let mode = match self.mode {
@@ -937,7 +1053,7 @@ impl SpeedDemo {
             .as_ref()
             .map_or((0, 0), |c| (c.woken, c.walking()));
         format!(
-            "arena speed demo: world={world} top_mps={:.0} cuts={} swings={} pieces={} buildings={buildings} groups={groups} ragdolls={ragdolls} walking={walking} cabs_hit={} bumps={} mode={mode} autopilot={}",
+            "arena speed demo: world={world} top_mps={:.0} cuts={} swings={} pieces={} buildings={buildings} groups={groups} ragdolls={ragdolls} walking={walking} cabs_hit={} bumps={} mode={mode} autopilot={} drove_s={:.1} drive_legs={}",
             self.top_mps,
             self.cuts,
             self.sword.swings,
@@ -945,6 +1061,8 @@ impl SpeedDemo {
             self.cabs_hit,
             self.bumps,
             !self.touched,
+            self.drove_s,
+            self.drive_legs,
         )
     }
 }
@@ -979,6 +1097,24 @@ fn car_heading(yaw: f32) -> f32 {
 fn wrap(a: f32) -> f32 {
     let tau = std::f32::consts::TAU;
     (a + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI
+}
+
+/// Half-extents of a cut piece's shell, meters: the box the float world gets for it (SD9).
+/// A floor of 5 cm keeps a thin cap from being a zero-extent collider.
+fn shell_half(shell: &engine_destruction::csg::PropMesh) -> [f32; 3] {
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for p in &shell.positions {
+        for k in 0..3 {
+            min[k] = min[k].min(p[k]);
+            max[k] = max[k].max(p[k]);
+        }
+    }
+    [
+        ((max[0] - min[0]) * 0.5).max(0.05),
+        ((max[1] - min[1]) * 0.5).max(0.05),
+        ((max[2] - min[2]) * 0.5).max(0.05),
+    ]
 }
 
 #[cfg(test)]
@@ -1023,6 +1159,37 @@ mod tests {
         assert!(demo.cuts > 0, "a tower is cut within 60 s: {}", demo.line());
         assert!(!demo.pieces.is_empty(), "the cut top is falling");
         assert!(demo.top_mps > 30.0, "always-faster is on: {}", demo.top_mps);
+    }
+
+    /// The dune autopilot takes one drive leg (SD11): the car runs under throttle and the
+    /// receipt names the seconds it drove, so a capture proves the drive and not only the code.
+    #[test]
+    fn the_autopilot_drives_a_leg_and_the_receipt_names_it() {
+        let mut demo = SpeedDemo::new(false).expect("the world builds");
+        let mut fastest_car = 0.0_f32;
+        for _ in 0..60 * 15 {
+            demo.step(DT);
+            if demo.mode == Mode::Drive {
+                fastest_car = fastest_car.max(demo.car.speed_mps());
+            }
+        }
+        assert_eq!(demo.drive_legs, 1, "one drive leg: {}", demo.line());
+        assert!(
+            demo.drove_s > AUTO_DRIVE_FOR_S - 0.5,
+            "the leg ran its length: {}",
+            demo.line()
+        );
+        assert!(
+            fastest_car > 5.0,
+            "the car drove under throttle: {fastest_car}"
+        );
+        assert!(demo.line().contains("drove_s="), "{}", demo.line());
+        assert_eq!(
+            demo.mode,
+            Mode::Fly,
+            "flying again after it: {}",
+            demo.line()
+        );
     }
 
     /// Always-faster: after 20 s of flight the speed has grown; with it off it holds.

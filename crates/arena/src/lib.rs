@@ -81,6 +81,10 @@ pub mod parity;
 mod pilum;
 pub mod probe;
 pub mod recorder;
+/// SW27: rules v3 plays and hashes exactly like v2 at this step.
+#[cfg(test)]
+#[path = "rules_v3_tests.rs"]
+mod rules_v3_tests;
 pub mod seed;
 pub mod spear;
 pub mod spec;
@@ -100,7 +104,7 @@ static TEST_ALLOCATOR: engine_core::alloc_probe::CountingAlloc =
 pub use authority::{fall_damage_permille, FallLanding, FALL_DAMAGE_TABLE};
 pub use collide::{Pillar, COLLIDE_RADIUS_MM, MAX_PILLARS};
 pub use controller::{ControlView, ScriptEffect, SlotController, SlotView};
-pub use engine_combat::fight::{FIGHT_RULES_V1, FIGHT_RULES_V2};
+pub use engine_combat::fight::{geometry_rules, FIGHT_RULES_V1, FIGHT_RULES_V2, FIGHT_RULES_V3};
 pub use engine_input::{BoutTape, FighterId, FighterInput, FighterTape, MAX_PARTICIPANTS};
 /// Neutral body names for below-arena ledgers: aliases of the input types.
 pub use engine_input::{FighterId as BodyId, FighterInput as BodyInput, FighterTape as BodyTape};
@@ -127,7 +131,7 @@ use engine_combat::depth::{DepthSet, PoiseMeter};
 use engine_combat::exchange::PhasedFighter;
 use engine_combat::fight::TABLES_V2;
 use engine_combat::fight::{
-    try_step_v2_with_cues_into, AttackStarted, StrikePose, MAX_ATTACK_STARTED_PER_TICK,
+    try_step_rules_with_cues_into, AttackStarted, StrikePose, MAX_ATTACK_STARTED_PER_TICK,
 };
 use engine_combat::sweep::WeaponSweep;
 use engine_combat::tables::{TABLES_VERSION_V1, TABLES_VERSION_V2};
@@ -232,10 +236,13 @@ pub const MAX_TICKS: u32 = 100_000;
 /// teammates are not struck, and a block or parry needs the shield cone to
 /// face the attacker. V2 checkpoints fold the version plus the team ids
 /// after the v1 bytes, so v1 and v2 hashes never compare equal and v1 hashes
-/// stay byte-frozen.
+/// stay byte-frozen. Rules v3 ([`FIGHT_RULES_V3`]) is the append-only
+/// successor: it takes every v2 gate ([`geometry_rules`]), so at this step it
+/// plays and hashes exactly like v2, and a v3-only rule lands behind
+/// `version >= FIGHT_RULES_V3`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ArenaRules {
-    /// [`FIGHT_RULES_V1`] or [`FIGHT_RULES_V2`].
+    /// [`FIGHT_RULES_V1`], [`FIGHT_RULES_V2`] or [`FIGHT_RULES_V3`].
     pub version: u32,
     /// Team id per slot; equal ids never strike each other (v2 only).
     pub teams: [u8; MAX_SLOTS],
@@ -292,10 +299,12 @@ impl ArenaRules {
         Some(self)
     }
 
-    /// True for a known version (v1 or v2).
+    /// True for a known version (v1, v2 or v3).
     #[must_use]
     pub const fn is_known(&self) -> bool {
-        self.version == FIGHT_RULES_V1 || self.version == FIGHT_RULES_V2
+        self.version == FIGHT_RULES_V1
+            || self.version == FIGHT_RULES_V2
+            || self.version == FIGHT_RULES_V3
     }
 
     /// True when the default-leg collision pass runs (never under `sim`).
@@ -1167,7 +1176,7 @@ impl Sim {
             return false;
         }
         self.rules = rules;
-        if rules.version == FIGHT_RULES_V2 {
+        if geometry_rules(rules.version) {
             // Identical brains close in lockstep under the symmetric v2 hit
             // rule: each slot gets a temperament drawn from the match seed.
             for (slot, brain) in self.brains.iter_mut().enumerate() {
@@ -1178,6 +1187,15 @@ impl Sim {
         true
     }
 
+    /// The move tables this match's config selects.
+    fn tables(&self) -> &'static engine_combat::fight::Tables {
+        if self.config.table_version == TABLES_VERSION_V2 {
+            &TABLES_V2
+        } else {
+            &TABLES_V1
+        }
+    }
+
     /// Arm the spear grapple (`docs/plan/spear-grapple.md`) before the first
     /// tick. Refuses (`false`) past tick 0 and on the Rapier `sim` leg, whose
     /// controllers own the poses the tether would have to move.
@@ -1185,7 +1203,7 @@ impl Sim {
         if cfg!(feature = "sim") || self.tick != 0 {
             return false;
         }
-        self.spear = Some(spear::SpearState::new(self.fighters));
+        self.spear = Some(spear::SpearState::with_spear(self.spear.take(), self.fighters));
         true
     }
 
@@ -1226,7 +1244,7 @@ impl Sim {
     /// rows. It also refuses (`false`) past tick 0, and on the Rapier
     /// `sim` leg, where the arena's own throw channels stay off.
     pub fn set_bolt(&mut self) -> bool {
-        if cfg!(feature = "sim") || self.tick != 0 || self.rules.version != FIGHT_RULES_V2 {
+        if cfg!(feature = "sim") || self.tick != 0 || !geometry_rules(self.rules.version) {
             return false;
         }
         self.bolt = Some(bolt::BoltState::new(self.fighters));
@@ -1307,7 +1325,7 @@ impl Sim {
         }
         // AI fills the slots without tape inputs, one fresh percept each.
         // Rules v2 plans the tick's fights first: attack tokens and views.
-        let plan = (self.rules.version == FIGHT_RULES_V2).then(|| {
+        let plan = geometry_rules(self.rules.version).then(|| {
             #[cfg(test)]
             if self.pairwise_plan {
                 return engage::Plan::build_pairwise(
@@ -1335,7 +1353,7 @@ impl Sim {
                 let decided = self.brains[slot].decide(&percept);
                 // Rules v2: the brain's intent wish is facing-relative
                 // (forward, side); v1 keeps the frozen world-axis reading.
-                *cell = Some(if self.rules.version == FIGHT_RULES_V2 {
+                *cell = Some(if geometry_rules(self.rules.version) {
                     brain_wish_to_world(decided, self.brains[slot].intent(), &percept)
                 } else {
                     decided
@@ -1390,6 +1408,9 @@ impl Sim {
                 *cell = Some(*input);
             }
         }
+        if let Some(spear) = self.spear.as_mut() {
+            spear.prepare(&mut row[..self.fighters], &self.fight);
+        }
         let inputs = &row[..self.fighters];
         // Latch the merged inputs for the DT1 recorder (tape plus brain
         // decisions); authority reads `inputs` below, never this copy. The
@@ -1409,7 +1430,7 @@ impl Sim {
         // exact-size into the owned tick log and clear; the step clears the
         // scratch first each tick, so the clone keeps every byte and the
         // scratch keeps its reservation. Quiet ticks move an empty Vec.
-        if self.rules.version == FIGHT_RULES_V2 {
+        if geometry_rules(self.rules.version) {
             // Rules v2: pre-move poses in integer mm, fixed-point facing
             // from the absolute IN1 facing, one blade per slot along it.
             let mut poses = [strike_pose(0, &self.states[0], &row[0], 0); MAX_SLOTS];
@@ -1421,18 +1442,16 @@ impl Sim {
             // strict combat leg; the live duel passes table version 2
             // (`ArenaConfig::rules`). Default v1 keeps every checkpoint
             // byte frozen.
-            let tables = if self.config.table_version == TABLES_VERSION_V2 {
-                &TABLES_V2
-            } else {
-                &TABLES_V1
-            };
-            // Caller: the cues entry shares the v2 core bit for bit (the
-            // combat parity test pins the event stream); the game maps each
-            // cue into an audio `FightCue` next slice (EG19c reads them for
-            // the swing start). V1 rows cue nothing, so old tapes replay.
-            try_step_v2_with_cues_into(
+            let tables = self.tables();
+            // Caller: the rules entry shares the v2 core bit for bit under
+            // rules v2 (the combat parity test pins the event stream) and adds
+            // only rules v3's press edge; the game maps each cue into an audio
+            // `FightCue` next slice (EG19c reads them for the swing start). V1
+            // rows cue nothing, so old tapes replay.
+            try_step_rules_with_cues_into(
                 inputs,
                 &poses[..self.fighters],
+                self.rules.version,
                 &mut self.fight,
                 tables,
                 &mut self.combat_scratch,
@@ -1442,7 +1461,7 @@ impl Sim {
         } else {
             try_step_into(inputs, &mut self.fight, &mut self.combat_scratch).ok()?;
         }
-        let tick_events = if self.combat_scratch.is_empty() {
+        let mut tick_events = if self.combat_scratch.is_empty() {
             Vec::new()
         } else {
             let logged = self.combat_scratch.clone();
@@ -1510,11 +1529,7 @@ impl Sim {
         // everything else while hit-stop holds.
         if self.fight.hitstop == 0 {
             if let Some(mut spear) = self.spear.take() {
-                let tables = if self.config.table_version == TABLES_VERSION_V2 {
-                    &TABLES_V2
-                } else {
-                    &TABLES_V1
-                };
+                let tables = self.tables();
                 spear.step(&mut spear::Env {
                     inputs,
                     states: &mut self.states,
@@ -1525,6 +1540,10 @@ impl Sim {
                     half_extent_m: self.config.half_extent_m,
                     rise: &mut self.rise,
                 });
+                // A man the shield push toppled falls like any knockdown.
+                let first = tick_events.len();
+                spear.topple_events(&mut tick_events);
+                self.feed_balance(&tick_events[first..])?;
                 self.spear = Some(spear);
             }
             // The pilum volley rides the arena's press-tick call cue: a cue
@@ -1532,18 +1551,14 @@ impl Sim {
             // pila. The cue exists under the rules v2 rows only, so a v1
             // match never sounds the horn.
             if let Some(mut pilum) = self.pilum.take() {
-                let horn = if self.rules.version == FIGHT_RULES_V2 {
+                let horn = if geometry_rules(self.rules.version) {
                     self.last_cues
                         .first()
                         .map(|cue| self.rules.teams[usize::from(cue.attacker)])
                 } else {
                     None
                 };
-                let tables = if self.config.table_version == TABLES_VERSION_V2 {
-                    &TABLES_V2
-                } else {
-                    &TABLES_V1
-                };
+                let tables = self.tables();
                 pilum.step(&mut pilum::Env {
                     inputs,
                     states: &self.states,
@@ -1561,11 +1576,7 @@ impl Sim {
             // bolt and looses it. The channel is armed per match, so a match
             // without one never reaches this step.
             if let Some(mut bolt) = self.bolt.take() {
-                let tables = if self.config.table_version == TABLES_VERSION_V2 {
-                    &TABLES_V2
-                } else {
-                    &TABLES_V1
-                };
+                let tables = self.tables();
                 bolt.step(&mut bolt::Env {
                     inputs,
                     states: &self.states,
@@ -1584,7 +1595,7 @@ impl Sim {
         }
         // RZ3w: v2 landed hits resolve to cuts before the limb pool steps, so
         // a limb loses its first tick immediately. V1 never enters this path.
-        let tick_cuts = if self.rules.version == FIGHT_RULES_V2 {
+        let tick_cuts = if geometry_rules(self.rules.version) {
             self.resolve_cuts(&tick_events)
         } else {
             Vec::new()
@@ -3198,7 +3209,7 @@ mod tests {
             ..base
         };
         assert_eq!(config.validate(), Ok(()));
-        assert!(TABLES_V2.attack_startup_ticks >= 30);
+        const { assert!(TABLES_V2.attack_startup_ticks >= 30) };
         assert_eq!(TABLES_V2.attack_startup_ticks, 30);
         assert!((6..=8).contains(&TABLES_V2.parry_window_ticks));
         assert_eq!(TABLES_V2.parry_window_ticks, 7);
@@ -3241,7 +3252,7 @@ mod tests {
                 first_hit = Some(row.tick);
             }
         }
-        assert_eq!(first_hit, Some(15), "tables v2 startup, not v1's 4");
+        assert_eq!(first_hit, Some(30), "tables v2 startup, not v1's 4");
         assert_ne!(run(&v1, &tape), run(&v2, &tape), "v1 and v2 hashes differ");
     }
 
@@ -4981,8 +4992,9 @@ mod tests {
     fn live_cut_spawns_a_limb_and_repeats() {
         use engine_combat::Cut;
         let base = short_config();
+        // The v2 tell is 30 ticks: the tape runs 10 past the blow.
         let config = ArenaConfig {
-            ticks: 20,
+            ticks: 40,
             table_version: TABLES_VERSION_V2,
             ..base
         };
