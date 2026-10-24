@@ -7,7 +7,8 @@
 //! script. `rules.set` also names the fighter slots the script drives; every later `play.run`
 //! of the session then plays those slots from the script (tape inputs still win), and the same
 //! seed twice gives the same checkpoints. Units: ticks, millimetres, centidegrees, permille.
-//! Errors: `rules_refused` (typed text, last good kept), `bad_slots`, `no_script`,
+//! Errors: `needs_approval`, `approval_mismatch`, `stale_hash`, `no_effect`,
+//! `rules_refused` (typed text, last good kept), `bad_slots`, `no_script`,
 //! `bad_ticks`, `bad_fighters`, `bad_extent`, `rules_worker_down`.
 
 use rmcp::schemars::JsonSchema;
@@ -17,6 +18,9 @@ use rmcp::serde_json::json;
 use engine_arena::controller::SlotTape;
 use engine_arena::world::MatchWorld;
 use engine_arena::{ArenaConfig, Checkpoint, MAX_PARTICIPANTS};
+use engine_core::hash::hex16;
+use engine_core::Fnv64;
+use engine_rules::RulesError;
 
 use super::worker::{explanation, Worker};
 use crate::mcp::{McpServer, McpToolError};
@@ -109,6 +113,36 @@ pub struct RulesSetArgs {
     pub source: String,
     /// Slots the script drives in `play.run` (default `[0]`, empty drives none).
     pub slots: Option<Vec<u8>>,
+    /// Commit-class consent (AD13): the script hash a human saw and the rules
+    /// revision they decided against. Absent refuses `needs_approval`.
+    pub approval: Option<RulesApproval>,
+    /// Current installed script hash the caller expects; a stale value refuses
+    /// `stale_hash` and names the current one, so two writers cannot race.
+    pub expected_hash: Option<String>,
+    /// True for a deliberate no-op script (a probe): without it a script that
+    /// fires no action in any smoke world refuses `no_effect`.
+    pub no_op: Option<bool>,
+}
+
+/// One `rules.set` approval: the script hash and rules revision a human said
+/// yes to. `script_hash` is [`set_approval_hash`] of the exact source text;
+/// `rules_revision` is the `rev` the previous `rules.set` or `rules.get`
+/// answered, 0 before the first install.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RulesApproval {
+    pub script_hash: String,
+    pub rules_revision: u32,
+}
+
+/// The script hash a `rules.set` approval binds: FNV-1a64 of the exact source
+/// text, 16 lowercase hex digits. Pure and stable, so a human approves the
+/// bytes the door installs (AD13).
+pub fn set_approval_hash(source: &str) -> String {
+    let mut lane = Fnv64::new();
+    lane.write_str(source);
+    hex16(lane.finish())
 }
 
 /// Result of `rules.set`.
@@ -140,10 +174,60 @@ fn rules_set(server: &McpServer, args: &RulesSetArgs) -> Result<RulesSetOutput, 
     }
     slots.sort_unstable();
     slots.dedup();
+    // AD13: an install is Commit class. Consent rides the exact text hash and
+    // the rules revision the human saw; without it nothing runs at all.
+    let wanted_hash = set_approval_hash(&args.source);
+    let Some(approval) = args.approval.as_ref() else {
+        return Err(McpToolError::new(
+            "needs_approval",
+            format!(
+                "rules.set installs a rule script and needs a Commit approval; inspect the text, \
+                 then re-run with approval {{script_hash: \"{wanted_hash}\", rules_revision: <rev>}} \
+                 and a human yes"
+            ),
+        ));
+    };
+    if approval.script_hash != wanted_hash {
+        return Err(McpToolError::new(
+            "approval_mismatch",
+            format!(
+                "the approval names script hash `{}` but this text hashes to `{wanted_hash}`; \
+                 re-run with the hash of the exact text",
+                approval.script_hash
+            ),
+        ));
+    }
+    let no_op = args.no_op.unwrap_or(false);
     server.dispatch(TOOL_RULES_SET, |state| {
+        let (rev, current) = match state.rules.worker_mut()?.get() {
+            Ok(info) => (info.rev, Some(format!("{:016x}", info.hash))),
+            Err(_) => (0, None),
+        };
+        if approval.rules_revision != rev {
+            return Err(McpToolError::new(
+                "approval_mismatch",
+                format!(
+                    "the approval was taken against rules revision {}, but revision {rev} is \
+                     installed now; re-run against the current revision",
+                    approval.rules_revision
+                ),
+            ));
+        }
+        if let Some(expected) = args.expected_hash.as_deref() {
+            let installed = current.as_deref().unwrap_or("none");
+            if expected != installed {
+                return Err(McpToolError::new(
+                    "stale_hash",
+                    format!(
+                        "expected_hash `{expected}` is not the installed script `{installed}`; \
+                         re-run with the current hash"
+                    ),
+                ));
+            }
+        }
         let worker = state.rules.worker_mut()?;
         let kept = worker.installed().map(|(hash, _)| *hash);
-        match worker.set(&args.source, slots.clone())? {
+        match worker.set(&args.source, slots.clone(), no_op)? {
             Ok(receipt) => Ok(RulesSetOutput {
                 rev: receipt.rev,
                 hash: format!("{:016x}", receipt.hash),
@@ -157,13 +241,15 @@ fn rules_set(server: &McpServer, args: &RulesSetArgs) -> Result<RulesSetOutput, 
                     || "no script was installed".to_owned(),
                     |hash| format!("last good script {hash:016x} kept"),
                 );
+                let code = match error {
+                    RulesError::NoEffect { .. } => "no_effect",
+                    _ => "rules_refused",
+                };
                 Err(
-                    McpToolError::new("rules_refused", format!("{error}; {kept_text}")).with_data(
-                        json!({
-                            "error": error.to_string(),
-                            "kept": kept.map(|hash| format!("{hash:016x}")),
-                        }),
-                    ),
+                    McpToolError::new(code, format!("{error}; {kept_text}")).with_data(json!({
+                        "error": error.to_string(),
+                        "kept": kept.map(|hash| format!("{hash:016x}")),
+                    })),
                 )
             }
         }
@@ -174,7 +260,7 @@ crate::e2_tool!(
     /// `rules.set`: install a rule script that drives fighter slots.
     RulesSetTool,
     name = TOOL_RULES_SET,
-    description = "Install a rule script (Rhai over integers) that drives the fighter slots it names in later play.run calls. Vetted and smoke-run first; a refusal keeps the last good script. Host calls: tick, nearest_foe, dist, hp_of, stamina_of, x_of, z_of, roll, clamp, mem_get, mem_set; input calls walk(mx,mz), face(cdeg), press(bits 1 attack 2 block 4 dodge).",
+    description = "Install a rule script (Rhai over integers) that drives the fighter slots it names in later play.run calls. Commit class: it needs approval {script_hash, rules_revision}, the hash of the exact text and the installed revision (0 before the first install); without it the call refuses needs_approval. expected_hash refuses a stale install and names the current one; a script that fires no action in any smoke world refuses no_effect unless no_op is true. Vetted and smoke-run first; a refusal keeps the last good script. Host calls: tick, nearest_foe, dist, hp_of, stamina_of, x_of, z_of, roll, clamp, mem_get, mem_set; input calls walk(mx,mz), face(cdeg), press(bits 1 attack 2 block 4 dodge).",
     readonly = false,
     args = RulesSetArgs,
     output = RulesSetOutput,
@@ -514,3 +600,137 @@ crate::e2_tool!(
     output = RulesScriptOutput,
     invoke = rules_undo
 );
+
+#[cfg(test)]
+mod rules_commit_tests {
+    //! AD13: `rules.set` is Commit class. No approval refuses and installs
+    //! nothing; a stale `expected_hash` names the current one; a script that
+    //! fires no action refuses `no_effect` unless it declares `no_op`.
+    use super::*;
+    use engine_editor::capability::Capability;
+    use rmcp::handler::server::router::tool::SyncTool;
+
+    /// A script that presses attack every tick: it fires an action in the
+    /// smoke worlds, so it installs.
+    const ACTING: &str = "press(1);";
+
+    fn server() -> McpServer {
+        McpServer::new(7, Capability::unrestricted(7))
+    }
+
+    fn args(source: &str, revision: u32) -> RulesSetArgs {
+        RulesSetArgs {
+            source: source.to_owned(),
+            slots: None,
+            approval: Some(RulesApproval {
+                script_hash: set_approval_hash(source),
+                rules_revision: revision,
+            }),
+            expected_hash: None,
+            no_op: None,
+        }
+    }
+
+    #[test]
+    fn rules_commit_set_without_approval_refuses_and_changes_nothing() {
+        let server = server();
+        let bare = RulesSetTool::invoke(
+            &server,
+            RulesSetArgs {
+                source: ACTING.to_owned(),
+                ..RulesSetArgs::default()
+            },
+        )
+        .expect_err("no approval refuses");
+        assert_eq!(bare.code, "needs_approval");
+        assert!(
+            bare.message.contains(&set_approval_hash(ACTING)),
+            "the refusal names the hash to approve: {}",
+            bare.message
+        );
+        assert!(bare.message.contains("re-run"));
+        // Nothing ran: no script is installed.
+        let got = RulesGetTool::invoke(&server, RulesGetArgs::default())
+            .expect_err("nothing is installed");
+        assert_eq!(got.code, "no_script");
+
+        // An approval for different bytes refuses and still installs nothing.
+        let wrong = RulesSetTool::invoke(
+            &server,
+            RulesSetArgs {
+                approval: Some(RulesApproval {
+                    script_hash: set_approval_hash("walk(100, 0);"),
+                    rules_revision: 0,
+                }),
+                ..RulesSetArgs {
+                    source: ACTING.to_owned(),
+                    ..RulesSetArgs::default()
+                }
+            },
+        )
+        .expect_err("a mismatched hash refuses");
+        assert_eq!(wrong.code, "approval_mismatch");
+        assert!(wrong.message.contains("re-run"));
+        assert!(RulesGetTool::invoke(&server, RulesGetArgs::default()).is_err());
+
+        // The approved install lands, and answers the hash a human approved.
+        let out = RulesSetTool::invoke(&server, args(ACTING, 0)).expect("approved install lands");
+        assert_eq!(out.rev, 1);
+        assert_eq!(out.hash.len(), 16);
+    }
+
+    #[test]
+    fn rules_commit_stale_expected_hash_names_the_current_one_and_no_effect_refuses() {
+        let server = server();
+        let first = RulesSetTool::invoke(&server, args(ACTING, 0)).expect("first install");
+        // A stale expected_hash refuses and names the installed hash.
+        let stale = RulesSetTool::invoke(
+            &server,
+            RulesSetArgs {
+                expected_hash: Some("0000000000000000".to_owned()),
+                ..args(ACTING, first.rev)
+            },
+        )
+        .expect_err("a stale hash refuses");
+        assert_eq!(stale.code, "stale_hash");
+        assert!(
+            stale.message.contains(&first.hash),
+            "the refusal names the current hash: {}",
+            stale.message
+        );
+        // The current expected_hash admits a second install.
+        let second = RulesSetTool::invoke(
+            &server,
+            RulesSetArgs {
+                expected_hash: Some(first.hash.clone()),
+                ..args(ACTING, first.rev)
+            },
+        )
+        .expect("an up-to-date hash installs");
+        assert_eq!(second.rev, 2);
+        // A script that fires nothing refuses no_effect and keeps the last good one.
+        let idle = RulesSetTool::invoke(
+            &server,
+            RulesSetArgs {
+                expected_hash: Some(second.hash.clone()),
+                ..args("let x = 1;", second.rev)
+            },
+        )
+        .expect_err("a no-effect script refuses");
+        assert_eq!(idle.code, "no_effect");
+        assert!(idle.message.contains("no_op"), "{}", idle.message);
+        let kept =
+            RulesGetTool::invoke(&server, RulesGetArgs::default()).expect("a script is installed");
+        assert_eq!(kept.hash, second.hash, "the last good script stays");
+        // Declared a no-op, the same text installs.
+        let declared = RulesSetTool::invoke(
+            &server,
+            RulesSetArgs {
+                no_op: Some(true),
+                ..args("let x = 1;", second.rev)
+            },
+        )
+        .expect("a declared no-op installs");
+        assert_eq!(declared.rev, 3);
+    }
+}

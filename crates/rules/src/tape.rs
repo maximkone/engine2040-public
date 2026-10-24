@@ -474,7 +474,10 @@ pub fn record(
     let mut cursor = 0;
     for tick in 0..ticks {
         for (at, source) in installs.iter().filter(|(at, _)| *at == tick) {
-            let receipt = rules.set(source, *at)?;
+            // A recording names its own script (including a deliberate
+            // comment-only one), so the recorder declares the no-op instead of
+            // letting the vet refuse a tape the caller asked for (AD13).
+            let receipt = rules.set_allowing_no_op(source, *at, true)?;
             library.add(source);
             scripts.push(ScriptSwap {
                 tick: *at,
