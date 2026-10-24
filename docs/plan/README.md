@@ -49,6 +49,7 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `landscape-ideas.md` — LATER — none — the idea backlog from 74 scouts (not rows yet); a planner run promotes one cluster at a time
 - `frontier.md` — NEXT — Look, AI door — every research idea earns a spike (one test, one baseline, a kill rule) before it becomes a row
 - `spear-grapple.md` — NOW — Multiplayer — a throwable spear tethers to an enemy or a wall and drags the fighters with integer physics; opt-in `MatchSpec::spear`, old digests unchanged
+- `showcase.md` — NOW — all four — one scripted tour (`play-showcase.bat`) of every system we built; SHOW1 (the five-station tour) landed, the other stations are open
 - `2026-10-17-obsolete-rows.md` — LATER — none — seven board rows (E4 E6 E12 E17 E21 E22 E26) that no longer match the tree, listed for the owner to close
 - `gameplay.md` — NOW — AI door — the duel feels right and AI fills empty slots fairly
 - `living-world.md` — NOW — AI door — NPC minds and live AI lines run off-tick; only validated, tick-stamped actions enter the tick
