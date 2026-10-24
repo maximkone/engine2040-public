@@ -33,6 +33,10 @@ pub mod decode;
 pub mod device;
 pub mod director;
 pub mod dsp;
+/// Early reflections sized from the room: four tap delays from the wall
+/// distance, each gained by the wall's absorption, summed into the wet bus
+/// with no audio-thread allocation. Std-only.
+pub mod early_reflections;
 pub mod engine;
 pub mod feed;
 /// Gunshot, crack and shout acoustics: distance filter, delay, zone tail,
@@ -42,6 +46,8 @@ pub mod heal;
 /// Headphone 3D ears over mono sources: HRIR-sphere FIR pair plus
 /// ITD/ILD per octant, speakers passthrough unchanged. Std-only.
 pub mod hrtf;
+/// Lookahead peak limiter and the soft ceiling the master stage rides.
+pub mod limiter;
 /// Combat mix over shared clips: 1/r distance gain, priority stealing.
 pub mod mix;
 pub mod music;
@@ -49,6 +55,8 @@ pub mod music;
 /// Std-only.
 pub mod occlude;
 pub mod playlist;
+/// Named mixer settings as data: bus gains in permille, applied to a [`dsp::BusMixer`].
+pub mod preset;
 /// Parametric reverb tails with tunnel preset: delay-line pure fns,
 /// zero audio-thread allocs. Std-only.
 pub mod reverb;
@@ -57,6 +65,10 @@ pub mod spatial;
 pub mod strike_sound;
 pub mod trace;
 pub mod voice;
+/// Tunnel-to-street zone blend: two live tails over a 200 cm feather with a
+/// 60 cm hysteresis band, equal-power weights over one RT60/4 crossfade so
+/// the wet holds while the room changes. Std-only.
+pub mod zone_blend;
 
 /// Test-binary allocator: lets `engine_core::alloc_probe::measure` count heap
 /// calls on the measuring thread only, so parallel tests never interfere.
