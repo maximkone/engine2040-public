@@ -11,6 +11,7 @@ Scope: the content directories under `content/`, the asset kinds the `engine-ass
 5. game.toml
 6. Skills
 7. Not documented
+8. Authored generators: rewrite rules and Rome service walkers
 
 ## 1. Content roots
 
@@ -54,7 +55,7 @@ The code has no single enum for content kinds. The table lists each kind the cod
 | Ogg Vorbis audio | `.ogg` | `audio::decode_vorbis` (lewton). No non-test caller found | `crates/audio/src/decode.rs:158` |
 | Design tables | `.rows` (text) | `include_str!` in `crates/ai`, `crates/arena/src/zones.rs`; runtime parse `combat::tables_text` for `content/design/combat.rows` | `crates/combat/src/tables_text.rs`; `crates/game/src/practice.rs:109` |
 | Arena kit placement | `.json` | `include_str!` as `KIT_JSON` | `crates/arena/src/kit.rs:17` |
-| Schema-gated JSON | `.json` | `validate::Schema` (std-only schema gate: compile once, refuse with key paths) | `crates/assets/src/validate.rs` |
+| Schema-gated JSON | `.json` | `schema::Schema` (std-only schema gate: compile once, refuse with key paths) | `crates/assets/src/schema.rs` |
 | Indent-tree text | no extension fixed | `datanode::parse` (indent is hierarchy, whitespace split tokens) | `crates/assets/src/datanode.rs` |
 | Environment map | `.hdr` | `include_bytes!` in render and tests; the decoder was not traced | `content/arena/hdri/polyhaven-studio-small-09-1k.hdr` |
 | Collider blob | `.e2cc` | `physics::collider::decode` (reader); `collider_cook::encode` (writer) | `crates/physics/src/collider.rs:262`; `crates/assets/src/collider_cook.rs:550` |
@@ -258,3 +259,66 @@ Suspicious items:
 - `lib.rs` marks `archive`, `archived_cook`, `stream` and `uv2_chart` as "planned, no caller yet (verified 2026-10-16)".
 
 Checks run for this doc (read-only): `node tools/cook-char.mjs --check` (exit 0), `--help` for cook-char, gltf-intake and fetch-content, and `node --check tools/ship.mjs`. No cook, fetch, cargo or Blender run was made. No test file was run.
+
+## 8. Authored generators: rewrite rules and Rome service walkers
+
+These two systems take authored text and turn it into a result. Both are new on 2026-10-24, and neither is wired into a door or a map yet.
+
+### 8.1 Rewrite rules (MJ1)
+
+`crates/world/src/rewrite.rs` is a seeded grid rewrite generator. The idea comes from MarkovJunior. The text format is ours, and it is 2D. It is bake-time only and never touches the tick or the sim hash (module doc). Its tests live in `crates/world/src/rewrite/tests.rs`.
+
+**Rule file format.** The example files are `content/maps/rewrite/maze_streets.rules`, `insula_block.rules` and `ruined_wall.rules`. The format is set out in the module doc at `rewrite.rs:21-64`.
+
+- One statement per line. `#` starts a comment. Blank lines are ignored. `{` and `}` are separate words.
+- `size W H` must come first. W and H are each 1 to 128.
+- `alphabet ABC` lists the symbols. Each symbol is one ASCII character other than `# / * = { }`. The first symbol fills the grid at the start.
+- `put X Y SYM` sets one cell. `rect X Y W H SYM` fills a rectangle.
+- `one { ... }` takes one match per step, chosen uniformly. `all { ... }` takes one round per step, with matches that do not overlap. `prl { ... }` applies every match of the round at once. `sequence { ... }` runs its children in order. `markov { ... }` takes one step of the first child that can step, then starts again.
+- `steps=N` caps a `one`, `all` or `prl` node. Without it the node runs until nothing matches.
+- `rule IN = OUT [p=N] [sym=S]` is one rule. Rows are joined by `/`. `*` matches any symbol in IN and leaves the cell alone in OUT. A match must change at least one cell.
+- `p=N` (1 to 100, default 100) is the percent chance that a drawn match is applied. `sym=` picks the orientations: `none`, `flip`, `rot` or `all` (the default, all eight).
+- The whole file is one `sequence`.
+
+**Use.** There is no CLI and no door yet. From Rust, `Program::parse(text)` (`rewrite.rs:897`) reads the rules and `Program::run(seed)` (`rewrite.rs:957`) returns a `Grid`. `Grid::render()` (`rewrite.rs:383`) returns the grid as text. `Grid::hash()` (`rewrite.rs:397`) is its digest. The same text and seed always give the same grid.
+
+**Types.** `RulesError` (`rewrite.rs:112`) carries the 1-based line and a `RulesErrorKind`. `RunError` (`rewrite.rs:199`) is `StepCap` or `WorkCap`. `Program` is at `rewrite.rs:312`, and `Grid` at `rewrite.rs:324`.
+
+**Limits.** The caps are constants at `rewrite.rs:87-105`. They are `MAX_SIDE` 128, `MAX_SYMBOLS` 62, `MAX_PATTERN_SIDE` 16, `MAX_RULES` 256, `MAX_NODES` 256, `MAX_DEPTH` 16, `MAX_STEPS` 200 000, `MAX_WORK` 400 000 000 cell comparisons and `MAX_NODE_STEPS` 1 000 000. A run past the step cap or the work cap returns a `RunError` and no partial grid.
+
+- Not wired yet: the `world.rewrite` door and the first map that uses it (MJ2 row, open).
+- Nothing in the tree calls `engine_world::rewrite` yet. The module doc names arena and street bakes, and the UW12 and UW20 insula floor plans, as future consumers.
+
+**Tests.** `node tools/gh-check.mjs cargo test -p engine-world --lib rewrite` runs 18 tests. They include `every_example_terminates_and_reproduces_byte_identically`, `a_known_rule_pair_gives_an_exact_grid_whatever_the_seed`, `markov_restarts_at_the_first_child_after_every_step`, `a_rule_set_that_never_settles_is_refused_not_cut_short`, `bad_rules_are_refused_with_their_line_number`, `maze_streets_are_one_connected_walled_block`, `insula_has_a_courtyard_and_doors_onto_the_street`, `ruined_wall_has_gaps_and_rubble` and `the_maze_hash_is_pinned`.
+
+### 8.2 Service walkers (CITY1)
+
+Caesar III's core city mechanic. A service building with workers spawns a walker. The walker roams the roads, and it sets the coverage of the houses near each road tile it reaches. The rules are read from Julius and Augustus, the open re-implementations (module doc, `crates/rome/src/city.rs:1-19`). Everything is integer. All storage is sized when the city is made, and `City::tick` never allocates (`crates/rome/src/city.rs:527`).
+
+**The table.** `content/rome/service.toml` is embedded at build time. `ServiceRules::shipped()` (`crates/rome/src/service.rs:215`) loads it, and `ServiceRules::parse(text)` (`service.rs:227`) reads any text in the same shape. The sections are:
+
+- `[clock]`: 50 ticks a day, and the tick of each daily chore.
+- `[walk]`: 15 ticks a tile, a service radius of 2 tiles, a maximum coverage of 96, a decay of 1 a day, and a covered cap of 300.
+- `[walker]`: a cap of 64 live walkers.
+- `[service.prefect]`, `[service.temple]`, `[service.market]`, `[service.bathhouse]` and `[service.well]`: each sets its size, its labour count, its roam length and its spawn delays.
+- `[labour]`: 60 percent of the people of working age work, and each category has a quantum.
+- `[house.l0]` to `[house.l5]`: the house ladder.
+- `[growth]`: one person a day, and two grace days before a house devolves.
+
+Every section has a `ref` (its source) and a `certainty` (`reconstructed` or `invented`). The house ladder, the walker cap and the growth rule are ours, because the original data file is not in either source tree (the file header).
+
+**Use.** `City::shipped(width, height, seed)` (`city.rs:258`) makes a city on the shipped table. `City::new(rules, width, height, seed)` (`city.rs:266`) takes any table. Sides are up to `MAX_SIDE` 64. `MAX_BUILDINGS` is 512, and `MAX_WALKERS` is 64 (`city.rs:25-31`).
+
+- Lay out the city with `add_road` (`city.rs:373`), `add_roadblock` (`:384`), `set_roadblock_pass` (`:397`), `add_house` (`:426`) and `add_service(Service, x, y)` (`:435`).
+- Run it with `run_ticks(n)` (`city.rs:514`), `run_days(n)` (`:521`) or `tick()` (`:527`).
+- Read it with `building(at)` (`city.rs:326`), `walkers_alive()` (`:332`), `walker_at(slot)` (`:338`) and `tile(x, y)` (`:367`). `hash()` (`:984`) is the digest.
+
+**Types.** `Service` (`service.rs:35`) is `Prefect`, `Temple`, `Market`, `Bathhouse` or `Well`. The well has no walker. The houses next to it simply have water. `City`, `Building`, `Tile`, `Kind`, `Labour` and `Stats` live in `city.rs`.
+
+**Limits.**
+
+- Not wired yet: nothing outside `crates/rome` calls `city` or `service`. The game has no city view (SHOW9 row, open).
+- Open: the rest of the service loop, CITY2 row. It covers desirability, the market lady's goods, the prefect and engineer risk resets, fountains, the full house ladder, and the Latin names of walkers.
+- `service.rs` has no tests of its own. The shipped table is tested through `city.rs`.
+
+**Tests.** `node tools/gh-check.mjs cargo test -p engine-rome --lib city` runs 11 tests. They include `the_shipped_table_loads_with_julius_numbers`, `a_prefect_covers_the_houses_by_the_road_and_the_cover_decays`, `a_roadblock_stops_a_roaming_walker`, `a_roadblock_does_not_stop_a_walker_going_home`, `an_unstaffed_building_spawns_nothing`, `houses_evolve_by_coverage_and_devolve_without_it`, `a_short_labour_pool_is_shared_out_by_the_round_robin`, `the_walker_cap_holds`, `the_same_seed_gives_the_same_city` and `the_tick_never_grows_a_buffer`.
