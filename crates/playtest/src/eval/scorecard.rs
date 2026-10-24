@@ -275,6 +275,10 @@ fn read_row(row: &str) -> Option<CardLine> {
 }
 
 /// `unknown` or a plain number; `None` when the cell is neither.
+#[expect(
+    clippy::option_option,
+    reason = "the outer None rejects a malformed cell; Some(None) is the cell's explicit unknown"
+)]
 fn optional_count(cell: &str) -> Option<Option<u64>> {
     if cell == "unknown" {
         Some(None)

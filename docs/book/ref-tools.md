@@ -88,6 +88,7 @@ The 49 rows below are live `tools/*.mjs` files the first pass did not list. Purp
 
 | Tool | Purpose | Test file | Exit codes |
 |---|---|---|---|
+| `agent-ladder.mjs` | Run the six-rung door ladder twice and compare its tapes; it never builds | `agent-ladder.test.mjs` | 0 every rung passes and the tapes agree, 1 a rung failed or a column moved, 2 no ladder binary or bad usage |
 | `api-break.mjs` | Gate the public API of every engine crate against a committed rustdoc-JSON baseline; `--write` blesses a break | `api-break.test.mjs` | 0 pass, 1 a removed or changed public item, 2 could not run |
 | `arena-net.mjs` | Two-process loopback proof of `arena --host` / `--join`: four scenarios twice, one final hash | `arena-net.test.mjs` | 0 all hold, 1 a check failed, 2 could not run |
 | `arena-report.mjs` | Gate the arena manifest, PBR/HDRI VRAM caps, crate+torch receipt and soak baseline | `arena-report.test.mjs` | 0 check, 1 a gate or generated block is stale |

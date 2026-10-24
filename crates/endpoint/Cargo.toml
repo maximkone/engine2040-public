@@ -38,6 +38,12 @@ name = "e2040-mcp"
 path = "src/bin/e2040-mcp.rs"
 required-features = ["mcp"]
 
+# DOOR7: the six-rung end-to-end ladder report. Same gate as the door itself.
+[[bin]]
+name = "e2040-ladder"
+path = "src/bin/e2040-ladder.rs"
+required-features = ["mcp"]
+
 [dependencies]
 # Shared hash/stream primitives (Fnv64, hash_bytes, SplitMix): engine-core is
 # the one owner, so endpoint imports instead of re-deriving them.

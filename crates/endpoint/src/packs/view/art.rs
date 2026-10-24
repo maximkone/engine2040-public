@@ -691,6 +691,11 @@ fn mean_rgb(frame: &Frame) -> [u8; 3] {
     sums.map(|sum| u8::try_from(sum / pixels).unwrap_or(0))
 }
 
+/// Exposure knob gain: `2^0.5` at the exact f32 the view compare has always
+/// used. The decimal literal rounds one ULP above `f32::SQRT_2`; the compare
+/// pins pixels, so the bits stay.
+const EXPOSURE_GAIN: f32 = f32::from_bits(0x3FB5_04F4);
+
 /// Re-grade one frame with one knob, on the CPU and with integer channels.
 ///
 /// `exposure_ev` scales linear light by 2^0.5, `key_fill` lifts only the
@@ -702,7 +707,7 @@ fn regrade(capture: &Frame, reference: &Frame, knob: &str) -> Frame {
     for at in 0..capture.pixels() {
         let rgb = capture.rgb_at(at);
         let out = match knob {
-            "exposure_ev" => rgb.map(|c| to_srgb(to_linear(c) * 1.414_213_6)),
+            "exposure_ev" => rgb.map(|c| to_srgb(to_linear(c) * EXPOSURE_GAIN)),
             "key_fill" if metric::luma_of(rgb) < 128 => rgb.map(|c| to_srgb(to_linear(c) * 1.25)),
             "palette_shift" => {
                 let mut mixed = rgb;
@@ -836,6 +841,447 @@ impl ToolBase for LookProposeTool {
 impl SyncTool<McpServer> for LookProposeTool {
     fn invoke(_service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
         run_propose(&crate::packs::codex::project_root(None), &param)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// view.frame: a picture as a framing score
+// ---------------------------------------------------------------------------
+
+/// Verb: one PNG scored as a framing composition.
+pub const TOOL_VIEW_FRAME: &str = "view.frame";
+
+/// Luma gap from the border ring's tone that marks a pixel as subject, of 255.
+pub const SUBJECT_LUMA_GAP: u32 = 24;
+
+/// Horizontal plus vertical neighbour step that marks a pixel as subject, of 255.
+pub const SUBJECT_EDGE: u32 = 48;
+
+/// Ideal subject share of the frame, in permille, inclusive.
+pub const COVERAGE_BAND: (u32, u32) = (120, 600);
+
+/// Ideal top margin of the subject mass, in permille, inclusive.
+pub const HEADROOM_BAND: (u32, u32) = (50, 150);
+
+/// The four framing parts and their weights; the weights sum to 100.
+pub const FRAMING_WEIGHTS: [(&str, u32); 4] = [
+    ("coverage", 30),
+    ("headroom", 20),
+    ("thirds", 30),
+    ("horizon", 20),
+];
+
+/// Args for `view.frame`: one PNG already on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewFrameArgs {
+    pub image: String,
+}
+
+/// `view.frame` result: one integer-permille reading per part plus the total.
+///
+/// The subject mask: a pixel is subject when its luma differs from the border
+/// ring's median luma by more than [`SUBJECT_LUMA_GAP`], or when its horizontal
+/// plus vertical neighbour step exceeds [`SUBJECT_EDGE`]. Weights are
+/// [`FRAMING_WEIGHTS`]; each part scores 0..=1000 and `total_permille` is their
+/// weighted mean. `coverage_permille` wants [`COVERAGE_BAND`] (penalty 2 per
+/// permille outside), `headroom_permille` is the top row of the subject mass and
+/// wants [`HEADROOM_BAND`] (penalty 3), `thirds_permille` is the subject
+/// centroid's distance from the nearest third intersection in permille of each
+/// axis, combined by the norm (lower is better, penalty 2), and
+/// `horizon_permille` is the strongest near-horizontal row as a share of the
+/// height with `horizon_tilt_mrad` from the left and right subject masses (it
+/// wants a third line, within 333 or 667, penalty 3, plus half the tilt).
+/// `worst_part` names the part with the lowest score.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewFrameOutput {
+    pub width: u32,
+    pub height: u32,
+    pub subject_pixels: u32,
+    pub coverage_permille: u32,
+    pub headroom_permille: u32,
+    pub thirds_permille: u32,
+    pub horizon_permille: u32,
+    pub horizon_tilt_mrad: i32,
+    pub total_permille: u32,
+    pub worst_part: String,
+}
+
+/// Integer square root of a `u64`.
+fn isqrt(value: u64) -> u64 {
+    let mut root = 0u64;
+    let mut bit = 1u64 << 62;
+    let mut rest = value;
+    while bit > rest {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if rest >= root + bit {
+            rest -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    root
+}
+
+/// One luma sample, clamped to the frame.
+fn luma_at(luma: &[u8], width: usize, height: usize, x: usize, y: usize) -> u32 {
+    let px = x.min(width.saturating_sub(1));
+    let py = y.min(height.saturating_sub(1));
+    luma.get(py * width + px).copied().map_or(0, u32::from)
+}
+
+/// Horizontal plus vertical neighbour step at one pixel.
+fn edge_at(luma: &[u8], width: usize, height: usize, x: usize, y: usize) -> u32 {
+    let dx = luma_at(luma, width, height, x.saturating_add(1), y).abs_diff(luma_at(
+        luma,
+        width,
+        height,
+        x.saturating_sub(1),
+        y,
+    ));
+    let dy = luma_at(luma, width, height, x, y.saturating_add(1)).abs_diff(luma_at(
+        luma,
+        width,
+        height,
+        x,
+        y.saturating_sub(1),
+    ));
+    dx.saturating_add(dy)
+}
+
+/// Median luma of the frame's border ring: the background tone.
+fn border_median(luma: &[u8], width: usize, height: usize) -> u8 {
+    let mut hist = [0u32; 256];
+    let mut total = 0u32;
+    let mut push = |x: usize, y: usize, hist: &mut [u32; 256], total: &mut u32| {
+        let value = luma_at(luma, width, height, x, y);
+        if let Some(slot) = hist.get_mut(usize::try_from(value).unwrap_or(0)) {
+            *slot += 1;
+            *total += 1;
+        }
+    };
+    for x in 0..width {
+        for y in [0, height.saturating_sub(1)] {
+            push(x, y, &mut hist, &mut total);
+        }
+    }
+    for y in 1..height.saturating_sub(1) {
+        for x in [0, width.saturating_sub(1)] {
+            push(x, y, &mut hist, &mut total);
+        }
+    }
+    let half = total / 2;
+    let mut seen = 0u32;
+    for (value, count) in hist.iter().enumerate() {
+        seen = seen.saturating_add(*count);
+        if seen > half {
+            return u8::try_from(value).unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// The documented subject mask: tone gap from the border ring or a strong step.
+fn subject_mask(frame: &Frame) -> Vec<bool> {
+    let luma = frame.luma_plane();
+    let width = usize::try_from(frame.width()).unwrap_or(0);
+    let height = usize::try_from(frame.height()).unwrap_or(0);
+    let tone = u32::from(border_median(&luma, width, height));
+    let mut mask = vec![false; width.saturating_mul(height)];
+    for y in 0..height {
+        for x in 0..width {
+            let value = luma_at(&luma, width, height, x, y);
+            let gap = value.abs_diff(tone);
+            let subject =
+                gap > SUBJECT_LUMA_GAP || edge_at(&luma, width, height, x, y) > SUBJECT_EDGE;
+            if let Some(slot) = mask.get_mut(y * width + x) {
+                *slot = subject;
+            }
+        }
+    }
+    mask
+}
+
+/// Per-row edge energy from luma: the horizontal step over the full row.
+fn luma_row_energy(luma: &[u8], width: usize, height: usize) -> Vec<u32> {
+    let mut energy = vec![0u32; height];
+    for (y, slot) in energy.iter_mut().enumerate() {
+        if y == 0 || y + 1 >= height {
+            continue;
+        }
+        let mut sum = 0u32;
+        for x in 0..width {
+            sum = sum.saturating_add(luma_at(luma, width, height, x, y + 1).abs_diff(luma_at(
+                luma,
+                width,
+                height,
+                x,
+                y.saturating_sub(1),
+            )));
+        }
+        *slot = sum;
+    }
+    energy
+}
+
+/// Subject pixels per row.
+fn row_mass(mask: &[bool], width: usize, height: usize) -> Vec<u32> {
+    let mut mass = vec![0u32; height];
+    for (y, slot) in mass.iter_mut().enumerate() {
+        let mut count = 0u32;
+        for x in 0..width {
+            if mask.get(y * width + x).copied().unwrap_or(false) {
+                count = count.saturating_add(1);
+            }
+        }
+        *slot = count;
+    }
+    mass
+}
+
+/// Per-row edge energy from the mask mass: the step of the subject count.
+fn mass_row_energy(mass: &[u32]) -> Vec<u32> {
+    let mut energy = vec![0u32; mass.len()];
+    for (y, slot) in energy.iter_mut().enumerate() {
+        let above = y.checked_sub(1).and_then(|at| mass.get(at)).copied();
+        let below = mass.get(y + 1).copied();
+        if let (Some(above), Some(below)) = (above, below) {
+            *slot = above.abs_diff(below);
+        }
+    }
+    energy
+}
+
+/// The strongest near-horizontal row (permille of the height) and the tilt in
+/// milliradians between the left and right subject masses.
+fn horizon_of(mask: &[bool], width: usize, height: usize, row_energy: &[u32]) -> (u32, i32) {
+    let mut best = (0usize, 0u32);
+    for y in 1..height.saturating_sub(1) {
+        let energy = row_energy.get(y).copied().unwrap_or(0);
+        if energy > best.1 {
+            best = (y, energy);
+        }
+    }
+    let horizon = if best.1 == 0 {
+        500
+    } else {
+        u32::try_from(best.0).unwrap_or(0).saturating_mul(1000)
+            / u32::try_from(height).unwrap_or(1).max(1)
+    };
+    let rows = |from: usize, to: usize| -> Option<u32> {
+        let (mut sum, mut count) = (0u64, 0u64);
+        for y in 0..height {
+            for x in from..to.min(width) {
+                if mask.get(y * width + x).copied().unwrap_or(false) {
+                    sum += u64::try_from(y).unwrap_or(0);
+                    count += 1;
+                }
+            }
+        }
+        (count > 0).then(|| u32::try_from(sum.saturating_mul(1000) / count).unwrap_or(0))
+    };
+    let half = width / 2;
+    let tilt = match (rows(0, half), rows(half, width)) {
+        (Some(left), Some(right)) => {
+            i32::try_from(right).unwrap_or(0) - i32::try_from(left).unwrap_or(0)
+        }
+        _ => 0,
+    };
+    (horizon, tilt.saturating_mul(2))
+}
+
+/// A band score: 1000 inside the band, minus `penalty` per permille outside.
+fn band_score(value: u32, band: (u32, u32), penalty: u32) -> u32 {
+    let outside = band.0.saturating_sub(value) + value.saturating_sub(band.1);
+    1000u32.saturating_sub(outside.saturating_mul(penalty))
+}
+
+/// Score one subject mask: the four parts, the weighted total, the worst part.
+pub(crate) fn framing_of(
+    mask: &[bool],
+    width: u32,
+    height: u32,
+    row_energy: &[u32],
+) -> ViewFrameOutput {
+    let (w, h) = (
+        usize::try_from(width).unwrap_or(0),
+        usize::try_from(height).unwrap_or(0),
+    );
+    let subject = mask.iter().filter(|pixel| **pixel).count();
+    if subject == 0 || w == 0 || h == 0 {
+        return ViewFrameOutput {
+            width,
+            height,
+            subject_pixels: 0,
+            coverage_permille: 0,
+            headroom_permille: 0,
+            thirds_permille: 0,
+            horizon_permille: 0,
+            horizon_tilt_mrad: 0,
+            total_permille: 0,
+            worst_part: FRAMING_WEIGHTS[0].0.to_owned(),
+        };
+    }
+    let total_pixels = w.saturating_mul(h).max(1);
+    let coverage = u32::try_from(
+        u64::try_from(subject).unwrap_or(0).saturating_mul(1000)
+            / u64::try_from(total_pixels).unwrap_or(1),
+    )
+    .unwrap_or(0);
+    let first_row = mask.iter().position(|pixel| *pixel).unwrap_or(0) / w.max(1);
+    let headroom = u32::try_from(first_row).unwrap_or(0).saturating_mul(1000) / height.max(1);
+    let mut sum_x = 0u64;
+    let mut sum_y = 0u64;
+    for y in 0..h {
+        for x in 0..w {
+            if !mask.get(y * w + x).copied().unwrap_or(false) {
+                continue;
+            }
+            sum_x += u64::try_from(x).unwrap_or(0);
+            sum_y += u64::try_from(y).unwrap_or(0);
+        }
+    }
+    let count = u64::try_from(subject).unwrap_or(1).max(1);
+    let span_x = u64::try_from(w).unwrap_or(1).max(1);
+    let span_y = u64::try_from(h).unwrap_or(1).max(1);
+    let center_x =
+        u32::try_from(sum_x.saturating_mul(1000) / count.saturating_mul(span_x)).unwrap_or(0);
+    let center_y =
+        u32::try_from(sum_y.saturating_mul(1000) / count.saturating_mul(span_y)).unwrap_or(0);
+    let dx = i64::from(center_x)
+        .saturating_sub(333)
+        .abs()
+        .min(i64::from(center_x).saturating_sub(667).abs());
+    let dy = i64::from(center_y)
+        .saturating_sub(333)
+        .abs()
+        .min(i64::from(center_y).saturating_sub(667).abs());
+    let thirds = u32::try_from(isqrt(
+        u64::try_from(dx.saturating_mul(dx) + dy.saturating_mul(dy)).unwrap_or(0),
+    ))
+    .unwrap_or(0);
+    let (horizon, tilt) = horizon_of(mask, w, h, row_energy);
+    let coverage_score = band_score(coverage, COVERAGE_BAND, 2);
+    let headroom_score = band_score(headroom, HEADROOM_BAND, 3);
+    let thirds_score = 1000u32.saturating_sub(thirds.saturating_mul(2));
+    let horizon_gap = u32::try_from(
+        i64::from(horizon)
+            .saturating_sub(333)
+            .abs()
+            .min(i64::from(horizon).saturating_sub(667).abs()),
+    )
+    .unwrap_or(0);
+    let horizon_score = 1000u32
+        .saturating_sub(horizon_gap.saturating_mul(3))
+        .saturating_sub(u32::try_from(tilt.unsigned_abs()).unwrap_or(0) / 2);
+    let scores = [coverage_score, headroom_score, thirds_score, horizon_score];
+    let mut total = 0u32;
+    let mut worst = (scores[0], FRAMING_WEIGHTS[0].0);
+    for (at, (name, weight)) in FRAMING_WEIGHTS.iter().enumerate() {
+        total = total.saturating_add(scores[at].saturating_mul(*weight) / 100);
+        if scores[at] < worst.0 {
+            worst = (scores[at], name);
+        }
+    }
+    ViewFrameOutput {
+        width,
+        height,
+        subject_pixels: u32::try_from(subject).unwrap_or(0),
+        coverage_permille: coverage,
+        headroom_permille: headroom,
+        thirds_permille: thirds,
+        horizon_permille: horizon,
+        horizon_tilt_mrad: tilt,
+        total_permille: total.min(1000),
+        worst_part: worst.1.to_owned(),
+    }
+}
+
+/// A subject mask holding one box, clamped to the frame: the camera frame
+/// self-check's stand-in for a picture.
+pub(crate) fn box_mask(width: u32, height: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> Vec<bool> {
+    let w = usize::try_from(width).unwrap_or(0);
+    let h = usize::try_from(height).unwrap_or(0);
+    let mut mask = vec![false; w.saturating_mul(h)];
+    let last_x = width.saturating_sub(1);
+    let last_y = height.saturating_sub(1);
+    for y in y0.min(last_y)..=y1.min(last_y) {
+        for x in x0.min(last_x)..=x1.min(last_x) {
+            let at = usize::try_from(y).unwrap_or(0) * w + usize::try_from(x).unwrap_or(0);
+            if let Some(slot) = mask.get_mut(at) {
+                *slot = true;
+            }
+        }
+    }
+    mask
+}
+
+/// Row energy from the mask's own mass, for a mask-shaped subject.
+pub(crate) fn box_row_energy(mask: &[bool], width: u32, height: u32) -> Vec<u32> {
+    let w = usize::try_from(width).unwrap_or(0);
+    let h = usize::try_from(height).unwrap_or(0);
+    mass_row_energy(&row_mass(mask, w, h))
+}
+
+/// Read one PNG and score its framing.
+fn run_view_frame(root: &Path, args: &ViewFrameArgs) -> Result<ViewFrameOutput, McpToolError> {
+    check_png("image", &args.image)?;
+    let frame = read_frame("image", root, &args.image).map_err(|error| {
+        McpToolError::new(
+            error.code,
+            format!(
+                "{}; re-run with a capture PNG under the project root",
+                error.message
+            ),
+        )
+    })?;
+    let mask = subject_mask(&frame);
+    let width = usize::try_from(frame.width()).unwrap_or(0);
+    let height = usize::try_from(frame.height()).unwrap_or(0);
+    let luma = frame.luma_plane();
+    let energy = luma_row_energy(&luma, width, height);
+    Ok(framing_of(&mask, frame.width(), frame.height(), &energy))
+}
+
+/// `view.frame` tool: one PNG scored as a framing composition.
+pub struct ViewFrameTool;
+
+impl ToolBase for ViewFrameTool {
+    type Parameter = ViewFrameArgs;
+    type Output = ViewFrameOutput;
+    type Error = McpToolError;
+
+    fn name() -> std::borrow::Cow<'static, str> {
+        TOOL_VIEW_FRAME.into()
+    }
+
+    fn description() -> Option<std::borrow::Cow<'static, str>> {
+        Some(
+            "Score one capture PNG's composition in integer permille: coverage (subject share), \
+             headroom (top row of the subject mass), thirds (centroid distance from the nearest \
+             third intersection, lower is better) and horizon (strongest near-horizontal row and \
+             its tilt), plus a weighted total and the worst part. The subject mask and the weight \
+             table are documented on the output; the same file twice gives the same numbers. \
+             Read-only."
+                .into(),
+        )
+    }
+
+    fn annotations() -> Option<rmcp::model::ToolAnnotations> {
+        crate::mcp::read_only_annotations()
+    }
+}
+
+impl SyncTool<McpServer> for ViewFrameTool {
+    fn invoke(_service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
+        run_view_frame(&crate::packs::codex::project_root(None), &param)
     }
 }
 
@@ -1058,6 +1504,99 @@ mod tests {
         let out = super::super::run_view_compare(&dir, &plain).expect("plain compare");
         assert_eq!(out.score_x10000, None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn frame_prefers_a_third_over_the_centre() {
+        let dir = scratch("frame-thirds");
+        write_png(&dir, "centre.png", &square_frame(18, 18));
+        write_png(&dir, "third.png", &square_frame(10, 10));
+        let read = |name: &str| {
+            run_view_frame(
+                &dir,
+                &ViewFrameArgs {
+                    image: name.to_owned(),
+                },
+            )
+            .expect("frame scores")
+        };
+        let centre = read("centre.png");
+        let third = read("third.png");
+        assert!(
+            third.thirds_permille < centre.thirds_permille,
+            "third {} vs centre {}",
+            third.thirds_permille,
+            centre.thirds_permille
+        );
+        assert!(
+            third.total_permille > centre.total_permille,
+            "third {third:?} vs centre {centre:?}"
+        );
+        assert_eq!(read("centre.png"), centre);
+        assert_eq!(read("third.png"), third);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn frame_loses_headroom_when_the_subject_touches_the_top() {
+        let dir = scratch("frame-headroom");
+        write_png(&dir, "touching.png", &square_frame(18, 0));
+        write_png(&dir, "inside.png", &square_frame(18, 6));
+        let touching = run_view_frame(
+            &dir,
+            &ViewFrameArgs {
+                image: "touching.png".to_owned(),
+            },
+        )
+        .expect("touching frame");
+        let inside = run_view_frame(
+            &dir,
+            &ViewFrameArgs {
+                image: "inside.png".to_owned(),
+            },
+        )
+        .expect("inside frame");
+        assert_eq!(touching.headroom_permille, 0);
+        assert!(inside.headroom_permille <= HEADROOM_BAND.1, "{inside:?}");
+        assert_eq!(touching.worst_part, "headroom");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn frame_refuses_a_missing_or_non_png_file() {
+        let dir = scratch("frame-missing");
+        let missing = run_view_frame(
+            &dir,
+            &ViewFrameArgs {
+                image: "gone.png".to_owned(),
+            },
+        )
+        .expect_err("missing file");
+        assert_eq!(missing.code, "bad_args");
+        assert!(missing.message.contains("gone.png"), "{}", missing.message);
+        assert!(missing.message.contains("re-run"), "{}", missing.message);
+        let not_png = run_view_frame(
+            &dir,
+            &ViewFrameArgs {
+                image: "frame.jpg".to_owned(),
+            },
+        )
+        .expect_err("not a png");
+        assert_eq!(not_png.code, "bad_args");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 48x48 frame: a 12x12 light square at `(x0, y0)` on a 40-grey field.
+    fn square_frame(x0: u32, y0: u32) -> Frame {
+        let mut rgba = Vec::with_capacity(48 * 48 * 4);
+        for y in 0..48u32 {
+            for x in 0..48u32 {
+                let inside = x >= x0 && x < x0 + 12 && y >= y0 && y < y0 + 12;
+                let value = if inside { 220 } else { 40 };
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        Frame::from_rgba(48, 48, rgba).expect("48x48 frame")
     }
 
     #[test]

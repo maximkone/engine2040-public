@@ -27,6 +27,9 @@ pub mod discover;
 /// Audited dispatch seam: one audit record per door call, pinned by holders.
 #[cfg(feature = "mcp")]
 pub mod door_dispatch;
+/// DOOR7: six fixed prompts over the real door verbs, with a deterministic tape.
+#[cfg(feature = "mcp")]
+pub mod e2e_ladder;
 #[cfg(feature = "mcp")]
 pub mod explain;
 /// DOOR1: play the level a session built and read a win or a loss. The objective runs on

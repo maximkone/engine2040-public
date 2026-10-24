@@ -15,6 +15,7 @@ Keep scripts small and portable; docs stay in `docs/`. The full per-tool referen
 Short lines; the script header is the full doc. Keep one line here per live `tools/*.mjs`.
 
 - `tools/affected.mjs` (+ `tools/affected.test.mjs`): node script; see its header.
+- `tools/agent-ladder.mjs` (+ `tools/agent-ladder.test.mjs`): run the six-rung door ladder twice and compare its tapes.
 - `tools/api-break.mjs` (+ `tools/api-break.test.mjs`): gate the public API of every engine crate against a committed baseline (rustdoc JSON); `--write` blesses a break.
 - `tools/arch-fitness.mjs` (+ `tools/arch-fitness.test.mjs`): check the crate graph stays acyclic.
 - `tools/arena-net.mjs` (+ `tools/arena-net.test.mjs`): two-process loopback proof of `arena --host`/`--join`: four scenarios twice, one final hash.
