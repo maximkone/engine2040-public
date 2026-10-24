@@ -208,6 +208,33 @@ pub fn has_stuck(actions: &[u8]) -> bool {
 /// saturates at the cap; a zero count records an empty tape. Same
 /// inputs give the same tape. Units: bouts, ticks, seeds.
 pub fn run_bout(a: &BtTree, b: &BtTree, bout: u64, ticks: u32, seed: u64) -> BoutTape {
+    run_bout_with(a, b, bout, ticks, seed, None)
+}
+
+/// [`run_bout`] with the decision debugger on: every visited node of both
+/// trees lands in `trace` (side A under slot 0, side B under slot 1). The
+/// tape, its digest and every action match the untraced run bit for bit; the
+/// trace only reads. Units: bouts, ticks, seeds.
+pub fn run_bout_traced(
+    a: &BtTree,
+    b: &BtTree,
+    bout: u64,
+    ticks: u32,
+    seed: u64,
+    trace: &mut crate::bt_trace::BtTrace,
+) -> BoutTape {
+    run_bout_with(a, b, bout, ticks, seed, Some(trace))
+}
+
+/// The one bout loop behind [`run_bout`] and [`run_bout_traced`].
+fn run_bout_with(
+    a: &BtTree,
+    b: &BtTree,
+    bout: u64,
+    ticks: u32,
+    seed: u64,
+    mut trace: Option<&mut crate::bt_trace::BtTrace>,
+) -> BoutTape {
     let capped = ticks.min(MAX_TICKS);
     let mut bb_a = BtBlackboard::new();
     let mut bb_b = BtBlackboard::new();
@@ -225,8 +252,8 @@ pub fn run_bout(a: &BtTree, b: &BtTree, bout: u64, ticks: u32, seed: u64) -> Bou
     for tick in 0..capped {
         let state_a = bout_state(bout, tick, seed, foe_a);
         let state_b = bout_state(bout, tick, seed, foe_b);
-        let status_a = a.tick(&state_a, &mut bb_a, &mut out_a);
-        let status_b = b.tick(&state_b, &mut bb_b, &mut out_b);
+        let status_a = a.tick_with(&state_a, &mut bb_a, &mut out_a, 0, trace.as_deref_mut());
+        let status_b = b.tick_with(&state_b, &mut bb_b, &mut out_b, 1, trace.as_deref_mut());
         actions_a.push(out_a);
         actions_b.push(out_b);
         chain.write_u64(state_a.state_hash());
