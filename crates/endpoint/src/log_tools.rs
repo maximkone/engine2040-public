@@ -10,7 +10,9 @@
 //! numbers ascend), and the digest sorts by (count desc, code asc), so any
 //! input permutation gives the same digest string. Errors are typed
 //! [`LogError`]: a bad cursor names the live window so the client refreshes,
-//! never an empty page that looks like an empty log.
+//! never an empty page that looks like an empty log. A ring nothing has ever
+//! written answers [`LOG_STATUS_NOT_WIRED`] in its page, so "no rows" is never
+//! read as "no problems" on a session whose writer has not run.
 
 use std::borrow::Cow;
 
@@ -21,6 +23,7 @@ use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
 use super::mcp::{McpServer, McpToolError, ServerState};
+use super::play::JobStatus;
 
 /// Tool: stable digest of the observe ring.
 pub const TOOL_LOG_DIGEST: &str = "log.digest";
@@ -38,6 +41,11 @@ pub const LOG_QUERY_MAX_ROWS: u32 = 128;
 /// Bounded session ring: at most this many events are retained; older ones
 /// evict and count as overflow, never as silence.
 pub const LOG_RING_CAP: usize = 256;
+/// `log.query` `status` word for a ring a writer has fed.
+pub const LOG_STATUS_LIVE: &str = "live";
+/// `log.query` `status` word for a ring nothing has ever written: the page is
+/// empty because the session has no writer yet, not because the door is clean.
+pub const LOG_STATUS_NOT_WIRED: &str = "not_wired";
 
 // ---------------------------------------------------------------------------
 // Errors: typed, with the legal values attached. A stale or past-end cursor
@@ -243,7 +251,8 @@ pub struct LogEventDto {
 
 /// Query answer: one cursor page in stable sequence order.
 /// Units are sequence numbers, counts and bytes. No errors once paged;
-/// stale cursors fail at the request. Budget is 128 rows a page.
+/// stale cursors fail at the request. Budget is 128 rows a page. `status` is
+/// `live` once a writer fed the ring, `not_wired` before the first event.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -254,6 +263,7 @@ pub struct LogQueryOutput {
     pub returned: u64,
     pub truncated: bool,
     pub overflow: u64,
+    pub status: String,
     pub events: Vec<LogEventDto>,
 }
 
@@ -261,6 +271,32 @@ impl ServerState {
     /// Record one observe event in the session ring.
     pub fn push_log(&mut self, event: Event) {
         self.logs.push(event);
+    }
+
+    /// AD9: one ring row per finished play job, so a client reading
+    /// `log.query` learns a job's end state without polling its handle.
+    ///
+    /// A terminal handle replays its answer, and a poll of a running job is not
+    /// an end, so the row is written once per job end: the same row is never
+    /// appended twice, and the tick is the document revision the end landed at.
+    pub(crate) fn note_play_end(&mut self, job_id: u64, status: &str) {
+        let Some(status) = JobStatus::parse(status).filter(|status| status.is_terminal()) else {
+            return;
+        };
+        let message = format!("job {job_id} {}", status.as_str());
+        let already = self
+            .logs
+            .snapshot()
+            .iter()
+            .any(|event| event.code == EventCode::PLAY_JOB_ENDED && event.message == message);
+        if already {
+            return;
+        }
+        self.push_log(Event::new(
+            EventCode::PLAY_JOB_ENDED,
+            self.doc.revision,
+            &message,
+        ));
     }
 
     /// Stable digest of the retained ring, bounded by `budget_bytes`.
@@ -362,6 +398,14 @@ impl ServerState {
             });
         }
         let next_cursor = rows.last().map_or(cursor, |row| row.seq + 1);
+        // AD9: the ring's writer is the door itself. Nothing pushed yet means
+        // no writer has run in this session, so the page says so instead of
+        // printing a clean-looking zero.
+        let status = if newest == 0 {
+            LOG_STATUS_NOT_WIRED
+        } else {
+            LOG_STATUS_LIVE
+        };
         Ok(LogQueryOutput {
             cursor,
             next_cursor,
@@ -369,6 +413,7 @@ impl ServerState {
             returned: rows.len() as u64,
             truncated: end < matching.len(),
             overflow: self.logs.overflow_count(),
+            status: status.to_owned(),
             events: rows,
         })
     }
@@ -773,14 +818,21 @@ mod tests {
 
     /// AD9: the ring has a real production writer. A refusal through the
     /// audited dispatch seam leaves one typed `door.refused` row naming the
-    /// tool and its machine code, so `log.query` answers what went wrong
-    /// instead of an empty page that reads as "no problems".
+    /// tool and its machine code plus the tick it ran at, so `log.query`
+    /// answers what went wrong instead of an empty page that reads as
+    /// "no problems".
     #[test]
-    fn door_refusal_writes_one_typed_row_and_query_finds_it() {
+    fn door_ring_refusal_answers_its_code_and_tick() {
         let server = server();
+        // Fresh session: the page says the ring has no writer, so a zero is
+        // not read as a clean door.
         let empty = query(&server, None, None);
         assert_eq!(empty.total, 0, "a fresh session has no refusals");
+        assert_eq!(empty.status, LOG_STATUS_NOT_WIRED);
 
+        // The row's tick is the document revision the refused call ran at, so
+        // set a revision a zero could not be mistaken for.
+        server.lock().expect("lock holds").doc.revision = 5;
         // A refusal, through the same seam every tool call uses.
         let audit_before = server.lock().expect("lock holds").audit_total_appended();
         let refused = server.dispatch_with_payload("tx.apply", "", |_state| {
@@ -805,6 +857,9 @@ mod tests {
         )
         .expect("log.query reads the refusal");
         assert_eq!(page.total, 1, "exactly one row for one refusal");
+        assert_eq!(page.status, LOG_STATUS_LIVE, "one writer makes it live");
+        assert_eq!(page.events[0].code, EventCode::DOOR_REFUSED.raw());
+        assert_eq!(page.events[0].tick, 5, "the row carries its revision");
         assert_eq!(page.events[0].message, "tx.apply refused stale_revision");
         assert!(
             page.events[0].message.len() <= engine_observe::MAX_MESSAGE_LEN,
@@ -841,6 +896,91 @@ mod tests {
             query(&server, None, None).total,
             1,
             "the reader moves nothing"
+        );
+    }
+
+    /// AD9: a second session with no writer keeps answering `not_wired`, and
+    /// the first write (not the page read) is what turns it `live`.
+    #[test]
+    fn door_ring_not_wired_turns_live_on_the_first_write() {
+        let server = server();
+        // Reading the page twice never wires the ring: a reader is not a writer.
+        for _ in 0..2 {
+            let page = query(&server, None, None);
+            assert_eq!(page.status, LOG_STATUS_NOT_WIRED);
+            assert_eq!(page.total, 0);
+            assert_eq!(page.returned, 0);
+            assert_eq!(page.overflow, 0);
+            assert!(!page.truncated);
+        }
+        assert_eq!(
+            digest(&server, None).events,
+            0,
+            "a digest of nothing is still zero events"
+        );
+        push(&server, EventCode::SIM_TICK, 0, "tick");
+        let live = query(&server, None, None);
+        assert_eq!(live.status, LOG_STATUS_LIVE);
+        assert_eq!(live.total, 1);
+    }
+
+    /// AD9: a finished play job leaves one typed `play.job.ended` row, a
+    /// running one none, and a replayed terminal handle never appends a second
+    /// row for the same end.
+    #[test]
+    fn door_ring_play_end_leaves_one_row_per_job() {
+        let server = server();
+        {
+            let mut state = server.lock().expect("lock holds");
+            assert!(state.logs.is_empty(), "a fresh session starts unwritten");
+            state.note_play_end(3, "running");
+            assert!(state.logs.is_empty(), "a running job writes no end row");
+            state.note_play_end(3, "pending");
+            assert!(state.logs.is_empty(), "a pending job writes no end row");
+            // The row's tick is the revision the end landed at.
+            state.doc.revision = 2;
+            state.note_play_end(3, "completed");
+            state.note_play_end(3, "completed");
+        }
+        let page = LogQueryTool::invoke(
+            &server,
+            LogQueryArgs {
+                cursor: None,
+                limit: None,
+                code: Some(EventCode::PLAY_JOB_ENDED.raw()),
+            },
+        )
+        .expect("the ring reads the end");
+        assert_eq!(page.total, 1, "a replayed end writes one row");
+        assert_eq!(page.status, LOG_STATUS_LIVE, "the end row wires the ring");
+        assert_eq!(page.events[0].message, "job 3 completed");
+        assert_eq!(page.events[0].tick, 2);
+        server
+            .lock()
+            .expect("lock holds")
+            .note_play_end(4, "cancelled");
+        let all = query(&server, None, None);
+        assert_eq!(all.total, 2, "each job end is its own row");
+        assert_eq!(all.events[1].message, "job 4 cancelled");
+    }
+
+    /// AD9: the ring's codes live in the one observe registry, so a client can
+    /// decode every row of a page; a code outside it fails loudly.
+    #[test]
+    fn door_ring_codes_are_registered_and_an_unknown_one_fails() {
+        let code = EventCode::DOOR_REFUSED;
+        assert_eq!(
+            code.name(),
+            Some("door.refused"),
+            "the row the door writes is a registry name"
+        );
+        assert_eq!(
+            EventCode::from_raw(code.raw()).map(EventCode::raw),
+            Ok(code.raw())
+        );
+        assert!(
+            EventCode::from_raw(u32::MAX).is_err(),
+            "an unregistered code can never enter the ring or a page"
         );
     }
 
