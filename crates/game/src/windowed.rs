@@ -26,8 +26,8 @@ use engine_render::{
     window::{WindowShell, FIXED_DT},
 };
 use engine_ui::{
-    text::{emit_quads, feed_lines, hp_text, layout, Align, Atlas},
-    DuelOverlay, Hud, OverlayError,
+    text::{emit_quads, layout, Align, Atlas},
+    DuelOverlay, OverlayError,
 };
 
 use self::windowed_captions::{caption_strip, push_caption_tick};
@@ -46,6 +46,9 @@ use super::pad::{
 use super::window_audio_space::AudioSpace;
 use super::{App, Checkpoint, FighterView, GameConfig, GameError, TickOutcome, HUMAN_SLOT};
 
+#[path = "windowed_hud_text.rs"]
+mod windowed_hud_text;
+pub use windowed_hud_text::{hud_cells_quads, stage_hud_text};
 #[path = "windowed_captions.rs"]
 mod windowed_captions;
 #[path = "windowed_smoke.rs"]
@@ -1007,23 +1010,6 @@ pub fn feed_tick_audio(
     space.feed(tx, tick, outcome, views);
 }
 
-/// HUD text cells plus quads for one snapshot (hp line plus kill-feed lines
-/// through the UI text path: layout cells, then one quad per cell). Pure.
-pub fn hud_cells_quads(hud: &Hud) -> (usize, usize) {
-    let mut lines = vec![hp_text(hud)];
-    lines.extend(feed_lines(&hud.feed));
-    let atlas = Atlas::new();
-    let mut cells = 0usize;
-    let mut quads = 0usize;
-    for line in &lines {
-        let laid = layout(line, 32, Align::Left);
-        let (_, _, indices) = emit_quads(&laid, atlas, 1.0);
-        cells += laid.len();
-        quads += indices.len() / 6;
-    }
-    (cells, quads)
-}
-
 /// HUD text cells plus quads for the live balance verdicts (EG45): one
 /// `slot {slot}: {label}` line per slot through
 /// [`super::balance_verdict::push_verdict_line`] plus one `down {n}` summary
@@ -1796,6 +1782,7 @@ fn smoke_present_once(
         .map_err(|err| WinError::Render(cap_message(&format!("{err}"))))?;
     let _ = overlay.to_bytes();
     stage_hp_bars(presenter, &overlay);
+    let _ = stage_hud_text(presenter, app.hud());
     let out = presenter.render_offscreen(&list)?;
     Ok(u32::from(out.receipt.presented))
 }
@@ -3028,13 +3015,17 @@ mod tests {
         let actors = dressing_actors().expect("dressing parses");
         assert_eq!(actors.len(), DRESSING_ACTOR_COUNT);
         let ids: Vec<u32> = actors.iter().map(|actor| actor.id).collect();
-        assert_eq!(ids, vec![101, 102, 103, 104, 105, 106]);
+        assert_eq!(ids, vec![101, 102, 103, 104, 105, 106, 107, 108]);
         assert_eq!(actors[0].asset, DressingAsset::Torch);
         assert_eq!(actors[2].asset, DressingAsset::Banner);
         // Torches flank the approach, banners pair the court and far end.
         assert_eq!(actors[0].pos_m, [5.5, 1.0, -2.0]);
         assert_eq!(actors[3].pos_m, [17.0, 1.5, 2.0]);
         assert_eq!(actors[5].size_m, [1.6, 3.0, 0.6]);
+        // SW121: the two wall niches carry the scanned marble bust.
+        assert_eq!(actors[6].asset, DressingAsset::Bust);
+        assert_eq!(actors[7].asset, DressingAsset::Bust);
+        assert_eq!(actors[6].size_m, [1.0, 2.2, 1.0]);
         // Keys never collide with the central cube or each other.
         let cube = MeshKey::new(1, [0xA1; 32]);
         let mut keys = Vec::with_capacity(actors.len());
@@ -3043,8 +3034,15 @@ mod tests {
             assert_ne!(key, cube);
             assert!(!keys.contains(&key));
             keys.push(key);
-            // Meshes validate and keep the staged extents.
+            // Meshes validate and keep the staged extents. A bust is the
+            // scanned glb (thousands of vertices), a box actor the 24-vertex
+            // cube scaled to its footprint.
             let mesh = dressing_mesh(actor).expect("dressing mesh builds");
+            if actor.asset == DressingAsset::Bust {
+                assert!(mesh.positions.len() > 1_000, "bust imports its glb");
+                dressing_material(actor.asset).validate().expect("material");
+                continue;
+            }
             assert_eq!(mesh.positions.len(), 24);
             assert_eq!(mesh.indices.len(), 36);
             let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -3083,8 +3081,14 @@ mod tests {
             ]
         };
         let actors = dressing_actors().expect("dressing parses");
-        // Every actor center plus the central cube land inside the frustum.
-        let mut points: Vec<[f32; 3]> = actors.iter().map(|a| a.pos_m).collect();
+        // Every court actor center plus the central cube land inside the
+        // frustum. The two wall-niche busts look down the side walls, off this
+        // establishing axis, so the twins stage them without framing them here.
+        let mut points: Vec<[f32; 3]> = actors
+            .iter()
+            .filter(|actor| actor.asset != DressingAsset::Bust)
+            .map(|a| a.pos_m)
+            .collect();
         points.push([0.0, 0.0, 0.0]);
         for point in &points {
             let clip = project(point);
@@ -3158,33 +3162,52 @@ mod tests {
 
     #[test]
     fn dressing_lod_bands_and_order() {
-        // Establishing eye (-14, 5, 0): torches at ~20 m read LOD1, court
-        // and far banners at ~31-40 m read LOD2, through the asset bands.
+        // Establishing eye (-14, 5, 0): torches at ~20 m read LOD1, the two
+        // wall-niche busts at ~16 m read LOD1 too, court and far banners at
+        // ~31-40 m read LOD2, through the asset bands.
         let actors = dressing_actors().expect("dressing parses");
         let lods: Vec<usize> = actors
             .iter()
             .map(|actor| dressing_lod(actor, DRESSING_EYE_M))
             .collect();
-        assert_eq!(lods, vec![1, 1, 2, 2, 2, 2]);
+        assert_eq!(lods, vec![1, 1, 2, 2, 2, 2, 1, 1]);
         // A far eye pushes every actor past the last band: LOD3, no refusal.
         for actor in &actors {
             assert_eq!(dressing_lod(actor, [200.0, 5.0, 0.0]), 3);
         }
-        // Full-resident frame under the establishing camera pushes all six,
-        // nearer band first (torches, then court banners, then far banners:
-        // file order here).
+        // Full-resident frame under the establishing camera pushes all eight,
+        // nearer band first: the busts (16 m) and torches (20 m) before the
+        // banners (31-40 m), never a different neighbour within a band.
         let mut list = hud_draw_list(128, 96).expect("hud builds");
         list.camera = dressing_camera(128, 96).expect("camera builds");
         let resident: Vec<MeshKey> = actors.iter().map(dressing_mesh_key).collect();
         let pushed = push_dressing_draws(&mut list, &resident).expect("draws push");
-        assert_eq!(pushed, 6);
+        assert_eq!(pushed, 8);
         let order: Vec<MeshKey> = list
             .items
             .iter()
             .map(|item| item.mesh)
             .filter(|key| resident.contains(key))
             .collect();
-        assert_eq!(order, resident);
+        // Sorted by (band, distance): the same rule `push_dressing_draws` ranks by.
+        let mut expected: Vec<(usize, u32, MeshKey)> = actors
+            .iter()
+            .zip(&resident)
+            .map(|(actor, key)| {
+                let d = ((actor.pos_m[0] - DRESSING_EYE_M[0]).powi(2)
+                    + (actor.pos_m[1] - DRESSING_EYE_M[1]).powi(2)
+                    + (actor.pos_m[2] - DRESSING_EYE_M[2]).powi(2))
+                .sqrt();
+                (
+                    dressing_lod(actor, DRESSING_EYE_M),
+                    (d * 1000.0) as u32,
+                    *key,
+                )
+            })
+            .collect();
+        expected.sort_by_key(|(lod, mm, _)| (*lod, *mm));
+        let expected: Vec<MeshKey> = expected.into_iter().map(|(_, _, key)| key).collect();
+        assert_eq!(order, expected, "nearer band first, distance within");
     }
 
     /// EG47: the smoke twin as a routed skip. [`smoke_presenter`] keeps its

@@ -102,6 +102,38 @@
       "vx": 0,
       "vz": 0,
       "yaw": 0
+    },
+    {
+      "id": 107,
+      "name": "bust_niche_w",
+      "asset": "bust",
+      "x": -2.0,
+      "y": 1.1,
+      "z": -9.3,
+      "sx": 1.0,
+      "sy": 2.2,
+      "sz": 1.0,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 108,
+      "name": "bust_niche_e",
+      "asset": "bust",
+      "x": -2.0,
+      "y": 1.1,
+      "z": 9.3,
+      "sx": 1.0,
+      "sy": 2.2,
+      "sz": 1.0,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 3.1415927
     }
   ]
 }
