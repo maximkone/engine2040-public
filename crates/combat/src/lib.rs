@@ -34,6 +34,9 @@ pub mod depth;
 /// Duel timing patterns as data: hit-stop, cancel and reaction windows.
 /// Integer ticks at sixty hertz, no heap, never tick-coupled. Std-only.
 pub mod design;
+/// Did the defence hold? One resolver for perilous, unparryable and
+/// hyper-armour blows, in integer ticks (SW82, rules v3). Std-only.
+pub mod defence;
 /// Parry/riposte + clash over the base fight table core: timed answers,
 /// integer ticks, versioned data. Std-only.
 pub mod exchange;
@@ -65,6 +68,13 @@ pub mod hitstop_kind;
 pub mod limbloss;
 /// Nerve meter beside the feel survey: u8 resolve/break/dread/anchor levels.
 pub mod nerve;
+
+/// The look layers' numbers in one validated row (SW24: `PresentationFeel`).
+pub mod presentation;
+/// Retiarius net and wrist cord (SG12): a 3 m cast in an arc, the entangle
+/// stagger with no attack, the 30-tick haul and the recovery. Pure integers,
+/// no heap, never wired into the tick from here.
+pub mod net;
 pub mod projectile;
 /// One round against the bodies it can meet: the tick it is hit on, as an
 /// event the render thread only reads (RY3, beside the flight module).
@@ -92,8 +102,8 @@ pub use anatomy::{
 };
 
 pub use combo::{
-    combo_table_for_version, ComboCursor, ComboError, ComboTable, Stance, COMBO_V1,
-    COMBO_VERSION_V1, MAX_STRING, STANCE_COUNT,
+    combo_table_for_version, ComboCursor, ComboError, ComboReq, ComboStep, ComboTable, Stance,
+    COMBO_V1, COMBO_VERSION_V1, MAX_STRING, STANCE_COUNT,
 };
 pub use cut::{
     chance_q16, cut_for_version, cut_one, digest_cuts, edge_reaches, effective_q16, plate_struck,

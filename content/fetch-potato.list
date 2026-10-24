@@ -1,0 +1,33 @@
+# GS2 potato tier content (2026-10-24). Every page was opened live and the
+# md5 below is of the bytes that URL served on that date (measured, then the
+# fetch below re-checks it). Licences: CC0 only, no account, no token.
+#
+# Format: <source> <id> <url> [md5] [license] [author] [attribution]
+# (tools/fetch-content.mjs). Entries land in content/_incoming/<source>/<id>/.
+#
+# --- 3 Poly Haven 1K HDRs: the potato variant of the three 4K skies we ship ---
+# content/arena/hdri/PROVENANCE.md holds the 4K rows: goegap (day, 22.4 MB),
+# venice_sunset (sunset, 22.8 MB), moonlit_golf (night, 28.0 MB) at 4096x2048.
+# The 1K files are 1024x512 and 1.3-1.7 MB, the same sky at a sixteenth of the
+# texels, so the potato tier can keep three skies in VRAM at 1/16 the bytes.
+# Direct-download pattern from that PROVENANCE file:
+#   https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/<res>/<id>_<res>.hdr
+# License read live: https://polyhaven.com/license - all assets CC0-1.0.
+# Pages: https://polyhaven.com/a/goegap - /a/venice_sunset - /a/moonlit_golf
+url ph_goegap_1k https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/goegap_1k.hdr 136ccde9732506fad64b090cdb535601 CC0 Greg_Zaal
+url ph_venice_sunset_1k https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/venice_sunset_1k.hdr a5ec4d30fc3421c214a17b208fb66d5f CC0 Greg_Zaal
+url ph_moonlit_golf_1k https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/moonlit_golf_1k.hdr 279ddcae48123036c79e2fe075b09d2a CC0 Greg_Zaal
+#
+# --- Kenney Impact Sounds: the wood/shield thud the arena lacks ---
+# Page https://kenney.nl/assets/impact-sounds states "Files 130x", "License
+# Creative Commons CC0" and links the zip below behind its download dialog.
+# One material set: 10 surfaces (carpet, glass, metal, wood, ...) x 13 sizes.
+# The arena wants the wood sizes for scutum thuds and the metal sizes for a
+# clash layer. 0.80 MB, OGG, no account.
+url kenney_impact_sounds https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip 064214e0544b18af545f9c2964d04f0c CC0 Kenney
+#
+# --- One CC0 blood decal for the sand ---
+# Page https://opengameart.org/content/blood-splatter: Author ExileGL, "License(s):
+# CC0", "File(s): blood.png 2.6 Mb". The served file is blood_0.png (2,625,982 B,
+# the 2.6 MB the page names); blood.png on that host is a 43 KB older upload.
+url oga_blood_splatter https://opengameart.org/sites/default/files/blood_0.png 90e858f396e5b327ce7623ff0c888dc6 CC0 ExileGL
