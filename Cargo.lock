@@ -3120,6 +3120,7 @@ dependencies = [
  "engine-core",
  "engine-destruction",
  "engine-ecs",
+ "engine-editor-derive",
  "engine-material",
  "engine-render",
  "engine-scene",
@@ -3128,6 +3129,15 @@ dependencies = [
  "transform-gizmo",
  "transform-gizmo-egui",
  "winit",
+]
+
+[[package]]
+name = "engine-editor-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3156,6 +3166,7 @@ dependencies = [
  "engine-playtest",
  "engine-proof",
  "engine-provider",
+ "engine-rome",
  "engine-rules",
  "engine-scene",
  "engine-spatial",
@@ -3180,6 +3191,7 @@ dependencies = [
  "engine-core",
  "engine-destruction",
  "engine-input",
+ "engine-live",
  "engine-material",
  "engine-net",
  "engine-perf",
@@ -3215,6 +3227,13 @@ name = "engine-input"
 version = "0.1.0"
 dependencies = [
  "engine-core",
+]
+
+[[package]]
+name = "engine-live"
+version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -3388,6 +3407,7 @@ dependencies = [
  "image",
  "pollster",
  "serde_json",
+ "sha2 0.10.9",
  "wgpu 30.0.1",
  "windows",
  "winit",
