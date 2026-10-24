@@ -424,6 +424,104 @@ fn check_latency_ms(latency_ms: u32) -> Result<(), FeelError> {
 /// The shipped feel rows as one versioned row.
 pub const FEEL_V1: FeelPreset = FeelPreset::v1();
 
+/// Presentation feel table (SW24): every number the look layers ride - the
+/// impact camera rails, the hit flash, the knockdown slow-mo factor and the
+/// play-time pitch spread - in one validated row, integer permille/ticks so the
+/// sim crate holds no floats. The game crate reads it
+/// (`camera_feed`, `fighter_look_flash`); nothing on the tick path does, so the
+/// golden `d57b5c8ae3096614` never reads a byte of it. Units: milli-degrees,
+/// permille, ticks at 60 Hz. Same row, same presentation twice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PresentationFeel {
+    /// Impact camera tilt budget for yaw and pitch, milli-degrees.
+    pub shake_tilt_milli_deg: u16,
+    /// Impact camera roll budget, milli-degrees.
+    pub shake_roll_milli_deg: u16,
+    /// QL8 shared rotation cap the split budgets sit inside, milli-degrees.
+    pub shake_cap_milli_deg: u16,
+    /// Blinks a landed hit spends over its flash window.
+    pub flash_blinks: u8,
+    /// Each later blink as a share of the one before, permille.
+    pub flash_decay_permille: u16,
+    /// Overbright exposure gain at the flash peak, permille (`2000` = 2.0x).
+    pub flash_boost_permille: u16,
+    /// Knockdown slow-mo factor, permille of real time (`300` = a third speed).
+    pub slowmo_permille: u16,
+    /// Play-time pitch spread either side of unity, permille (`80` = +-8%).
+    pub pitch_variation_permille: u16,
+}
+
+/// Largest milli-degree budget a rotation rail may carry (60 deg): a feel shake
+/// past a sixth of a turn would read as the camera losing the bout.
+pub const PRESENTATION_MAX_MILLI_DEG: u16 = 60_000;
+
+impl PresentationFeel {
+    /// The shipped presentation row: the numbers the look layers ship today.
+    #[must_use]
+    pub const fn v1() -> Self {
+        Self {
+            shake_tilt_milli_deg: 1_600,
+            shake_roll_milli_deg: 900,
+            shake_cap_milli_deg: 5_729,
+            flash_blinks: 2,
+            flash_decay_permille: 250,
+            flash_boost_permille: 2_000,
+            slowmo_permille: 300,
+            pitch_variation_permille: 80,
+        }
+    }
+
+    /// Range-check this row; first failure wins, deterministically.
+    ///
+    /// # Errors
+    ///
+    /// [`FeelError::BadValue`] naming the first field outside its fence.
+    pub fn validate(&self) -> Result<(), FeelError> {
+        range(
+            "shake_tilt_milli_deg",
+            u32::from(self.shake_tilt_milli_deg),
+            1,
+            u32::from(PRESENTATION_MAX_MILLI_DEG),
+        )?;
+        range(
+            "shake_roll_milli_deg",
+            u32::from(self.shake_roll_milli_deg),
+            1,
+            u32::from(self.shake_tilt_milli_deg),
+        )?;
+        range(
+            "shake_cap_milli_deg",
+            u32::from(self.shake_cap_milli_deg),
+            u32::from(self.shake_tilt_milli_deg),
+            u32::from(PRESENTATION_MAX_MILLI_DEG),
+        )?;
+        range("flash_blinks", u32::from(self.flash_blinks), 1, 4)?;
+        range(
+            "flash_decay_permille",
+            u32::from(self.flash_decay_permille),
+            1,
+            1_000,
+        )?;
+        range(
+            "flash_boost_permille",
+            u32::from(self.flash_boost_permille),
+            1_000,
+            4_000,
+        )?;
+        range("slowmo_permille", u32::from(self.slowmo_permille), 1, 1_000)?;
+        range(
+            "pitch_variation_permille",
+            u32::from(self.pitch_variation_permille),
+            0,
+            200,
+        )?;
+        Ok(())
+    }
+}
+
+/// The shipped presentation row.
+pub const PRESENTATION_V1: PresentationFeel = PresentationFeel::v1();
+
 /// Presentation-side amplification for one tick: frozen ticks past the sim
 /// row, trauma and flash in permille/ticks. Integer only; the sim never
 /// reads this back, so replays cannot fork on juice.
