@@ -800,7 +800,7 @@ mod tests {
     /// A weapon row for the victim, which never swings: the gladius numbers
     /// under another name, so the row arms.
     const BARE_ROW: &str =
-        "mass_g=1000 damage_permille=120 speed_ticks=15 recovery_ticks=8 stagger_permille=400";
+        "mass_g=1000 damage_permille=120 speed_ticks=30 recovery_ticks=6 stagger_permille=400";
 
     /// The duel's tape: slot 0 swings on tick 0 and faces `facing`, every
     /// fighter holds still.
