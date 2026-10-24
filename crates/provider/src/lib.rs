@@ -26,6 +26,10 @@
 //! applies that decision on its request path. [`pressure`] is the live feed
 //! that hands the arbiter a running window's frame-time p95 and VRAM
 //! reading.
+//!
+//! [`guard`] screens the text a door returns before the loop puts it back in
+//! the prompt: instruction-like lines are dropped and the rest arrives inside
+//! a fence the tool cannot close.
 
 #![warn(missing_docs)]
 
@@ -38,6 +42,7 @@ pub mod config;
 pub mod core;
 pub mod fallback;
 pub mod gemini;
+pub mod guard;
 pub mod image;
 pub mod ladder;
 pub mod local;
@@ -104,6 +109,9 @@ pub use transport::{is_loopback, parse_endpoint, Endpoint, EndpointError, Transp
 pub use fallback::{
     fallback_for, FallbackCause, FallbackErr, FallbackNotice, ScriptedFallback, MAX_NOTICE_LEN,
 };
+pub use guard::{
+    screen_tool_output, ScreenReport, ScreenedDoor, FENCE_CLOSE, FENCE_OPEN, MAX_SCREENED_BYTES,
+};
 pub use policy::{AiSessionPolicy, CancelReason, Fallback, JobState, ProviderCapabilities};
 pub use pressure::{FrameWindow, PressureError, PressureFeed, FRAME_WINDOW, MAX_FRAME_WINDOW};
 pub use prompt::{
@@ -119,8 +127,9 @@ pub use quota::{
     resolve_key, scan_package, KeyFinding, KeyKind, KeyRoute, KeySafetyError, KeyScanReport,
     KeyStoreError, KeyUse, MemoryKeyStore, OsKeyStore, PlayerId, QuotaBook, QuotaCharge,
     QuotaConfigError, QuotaLimit, QuotaLimits, QuotaPlan, QuotaReceipt, QuotaRefusal, QuotaScope,
-    QuotaUsage, RateLimit, ScanError, ScanLimits, SecretToken, SessionId, MAX_ACCOUNT_LEN,
-    MAX_TOKEN_BYTES, MAX_TRACKED_PLAYERS, MAX_TRACKED_SESSIONS, MIN_TOKEN_BYTES,
+    QuotaStateError, QuotaUsage, RateLimit, ScanError, ScanLimits, SecretToken, SessionId,
+    MAX_ACCOUNT_LEN, MAX_STATE_BYTES, MAX_TOKEN_BYTES, MAX_TRACKED_PLAYERS, MAX_TRACKED_SESSIONS,
+    MIN_TOKEN_BYTES, QUOTA_STATE_HEADER,
 };
 pub use reader::{
     ReaderAdapter, ReaderAnswer, ReaderError, ReaderLabel, ReaderReceipt, ReaderRelation,
