@@ -435,4 +435,23 @@ mod tests {
         assert_eq!(n.calls, 0);
         assert_eq!(n.bytes, 0);
     }
+
+    /// `sat_i128` pins both ends: a value past i64 saturates to the matching
+    /// limit, and a value that fits comes back unchanged.
+    #[test]
+    fn sat_i128_saturates_both_ends() {
+        assert_eq!(sat_i128(0), 0);
+        assert_eq!(sat_i128(-1), -1);
+        assert_eq!(sat_i128(i128::from(i64::MAX) + 1), i64::MAX);
+        assert_eq!(sat_i128(i128::from(i64::MIN) - 1), i64::MIN);
+    }
+
+    /// The sqrt of a Q56 value rounds half up on the raw unit: an exact square
+    /// stays, one unit over stays down, two units over rounds up.
+    #[test]
+    fn sqrt_series_rounds_to_the_nearest_unit() {
+        assert_eq!(sqrt_series(ONE), ONE);
+        assert_eq!(sqrt_series(ONE + 1), ONE);
+        assert_eq!(sqrt_series(ONE + 2), ONE + 1);
+    }
 }
