@@ -35,7 +35,7 @@ pub fn is_identifier(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::clip_bytes;
+    use super::{clip_bytes, is_identifier};
 
     #[test]
     fn short_and_exact_strings_come_back_whole() {
@@ -56,6 +56,26 @@ mod tests {
         assert_eq!(clip_bytes("é", 1), "");
         assert_eq!(clip_bytes("aé", 2), "a");
         assert_eq!(clip_bytes("aé", 3), "aé");
+    }
+
+    #[test]
+    fn is_identifier_takes_lowercase_letters_digits_and_underscore_only() {
+        for (text, want) in [
+            ("a", true),
+            ("_", true),
+            ("a1", true),
+            ("a_b", true),
+            ("man_01", true),
+            ("", false),
+            ("9", false),
+            ("A", false),
+            ("aB", false),
+            ("a-b", false),
+            ("a b", false),
+            ("é", false),
+        ] {
+            assert_eq!(is_identifier(text), want, "{text:?}");
+        }
     }
 
     #[test]
