@@ -279,7 +279,7 @@ mod tests {
 
     /// The gladius numbers under another id: the victim swings the table.
     fn bare_row() -> &'static str {
-        "mass_g=1000 damage_permille=120 speed_ticks=15 recovery_ticks=8 stagger_permille=400"
+        "mass_g=1000 damage_permille=120 speed_ticks=30 recovery_ticks=6 stagger_permille=400"
     }
 
     #[test]
@@ -400,7 +400,9 @@ mod tests {
     fn bg15_a_five_round_headless_duel_prints_a_non_zero_mean_edge_wear() {
         use engine_combat::{effective_q16, BladeSwing, MAX_ENERGY_Q16, MAX_SHARPNESS_Q16};
         let round = config(TABLES_VERSION_V2);
-        let tape = assault_tape(&round, 20);
+        // One press per swing: the 30-tick tell and 6-tick recovery fit inside 40
+        // (a press every 20 ticks lands inside the feint window and restarts it).
+        let tape = assault_tape(&round, 40);
         let gladius = Heft::from_rows(WEAPONS_ROWS, "gladius").expect("the shipped row");
         // The energy the arena hands the resolver: its full-force blade, the
         // kit row's wear. Geometry is irrelevant to `effective_q16`.
@@ -497,6 +499,168 @@ mod tests {
             sim.edge_wear_q16(9),
             0,
             "a slot out of the match carries none"
+        );
+    }
+
+    /// The duel tape with an extra attack tap from slot 0 on each tick of
+    /// `presses`: the button is down that tick only, so it is a fresh press and
+    /// not a hold. Slot 1 never presses, and slot 0 carries a row on every tick
+    /// so a brain never decides a slot the test presses.
+    fn tap_tape(config: &ArenaConfig, presses: &[u32]) -> FighterTape {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            for fighter in 0..config.fighters {
+                let down = tick == 0 || presses.contains(&tick);
+                inputs.push(FighterInput {
+                    tick,
+                    fighter: FighterId::new(fighter).expect("slots 0..2 are legal"),
+                    mx: 0,
+                    mz: 0,
+                    facing: 0,
+                    buttons: if down && fighter == 0 {
+                        Buttons(ATTACK)
+                    } else {
+                        Buttons::NONE
+                    },
+                });
+            }
+        }
+        FighterTape(inputs)
+    }
+
+    /// What one duel did: one line per tick from `from` on (the hit-stop left,
+    /// the swinger's swing, its intake queue, the victim's react) and the tick a
+    /// second swing started on, past `after`.
+    fn duel_trace(
+        config: &ArenaConfig,
+        presses: &[u32],
+        from: u32,
+        after: u32,
+    ) -> (Vec<String>, Option<u32>) {
+        let tape = tap_tape(config, presses);
+        let mut sim = duel(&tape);
+        sim.arm_weapons(&["gladius", "gladius"])
+            .expect("the kit gladii arm");
+        let mut trace = Vec::new();
+        let mut second = None;
+        let mut prev_age = 0;
+        for _ in 0..config.ticks {
+            let tick = sim.tick;
+            sim.step(&tape).expect("the duel steps");
+            let (swinger, victim) = (sim.fight.fighters[0], sim.fight.fighters[1]);
+            // A restart is the swing clock dropping back: a continuing swing only
+            // ever ages up, so a lower age past `after` is a fresh start.
+            if second.is_none()
+                && tick > after
+                && swinger.is_attacking
+                && swinger.attack_age < prev_age
+            {
+                second = Some(tick);
+            }
+            prev_age = swinger.attack_age;
+            if tick >= from {
+                trace.push(format!(
+                    "tick {tick} hitstop={} age={} attacking={} buffer={} react={}",
+                    sim.fight.hitstop,
+                    swinger.attack_age,
+                    swinger.is_attacking,
+                    swinger.attack_buffer.len(),
+                    victim.react
+                ));
+            }
+        }
+        (trace, second)
+    }
+
+    /// The first tick whose step runs with the clock frozen. The blow lands on
+    /// the tick before, so `sim.tick` after that step names the freeze's first
+    /// tick.
+    fn first_frozen_tick(config: &ArenaConfig) -> u32 {
+        let tape = tap_tape(config, &[]);
+        let mut sim = duel(&tape);
+        sim.arm_weapons(&["gladius", "gladius"])
+            .expect("the kit gladii arm");
+        for _ in 0..config.ticks {
+            sim.step(&tape).expect("the duel steps");
+            if sim.fight.hitstop > 0 {
+                return sim.tick;
+            }
+        }
+        panic!("the gladius never landed inside {} ticks", config.ticks);
+    }
+
+    /// STEAL 5: a press made on a tick the hit-stop freezes is dropped, not
+    /// kept. `core_step_into` (`crates/combat/src/fight.rs:864`) counts the
+    /// freeze down and returns before `start_actions`, so the tick's press
+    /// never reaches the intake queue (`fight.rs:1170`) and the frozen clock
+    /// never ages what is already queued. The control proves the queue itself
+    /// works: the same one-tick tap one tick earlier is buffered and fires a
+    /// second swing after the freeze.
+    #[test]
+    #[ignore = "BUG: a press inside hit-stop is dropped (see report)"]
+    fn a_press_inside_hitstop_is_kept_and_fires_after_the_freeze() {
+        let config = config(TABLES_VERSION_V2);
+        let frozen = first_frozen_tick(&config);
+        let from = frozen.saturating_sub(2);
+        let baseline = duel_trace(&config, &[], from, frozen);
+        let inside = duel_trace(&config, &[frozen], from, frozen);
+        let before = duel_trace(&config, &[frozen - 1], from, frozen);
+        let runs = [
+            ("baseline    press=none", &baseline),
+            ("frozen tap  press=freeze tick", &inside),
+            ("earlier tap press=freeze tick -1", &before),
+        ];
+        for (name, (trace, second)) in runs {
+            println!("--- {name} second_swing={second:?}");
+            for line in trace.iter() {
+                println!("{line}");
+            }
+        }
+        for (name, (trace, second)) in [("frozen tap  ", &inside), ("earlier tap ", &before)] {
+            let line = trace
+                .iter()
+                .find(|line| line.starts_with(&format!("tick {frozen} hitstop=")))
+                .expect("the freeze tick is in the trace");
+            assert!(
+                !line.contains("hitstop=0 "),
+                "{name}: tick {frozen} must step with the clock frozen: {line}"
+            );
+            println!("{name} frozen tick {frozen}: {line} second_swing={second:?}");
+        }
+        // The queue is the evidence: the frozen tick's tap never enters it, the
+        // same tap one tick earlier does.
+        let frozen_line = |trace: &(Vec<String>, Option<u32>)| {
+            trace
+                .0
+                .iter()
+                .find(|line| line.starts_with(&format!("tick {frozen} hitstop=")))
+                .expect("the freeze tick is in the trace")
+                .clone()
+        };
+        assert!(
+            frozen_line(&inside).contains("buffer=0"),
+            "a tap on frozen tick {frozen} must show an empty intake queue on that tick"
+        );
+        assert!(
+            frozen_line(&before).contains("buffer=1"),
+            "the control tap one tick earlier must sit in the intake queue on tick {frozen}"
+        );
+        assert_eq!(
+            baseline.0, inside.0,
+            "a tap on frozen tick {frozen} left the duel tick-for-tick identical: the press was dropped, not buffered"
+        );
+        assert_eq!(
+            inside.1, None,
+            "a tap on frozen tick {frozen} started no second swing: the press was dropped"
+        );
+        assert!(
+            before.1.is_some_and(|tick| tick > frozen && tick <= frozen + 8),
+            "the control tap one tick earlier must be buffered and start a second swing inside the 8-tick window: {:?}",
+            before.1
+        );
+        assert_ne!(
+            baseline.0, before.0,
+            "the control tap must change the duel, or the queue under test never worked"
         );
     }
 }

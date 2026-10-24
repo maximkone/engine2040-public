@@ -389,8 +389,10 @@ test("module reachability: an include!() names the file it pulls in (E51)", () =
   const names = parseIncludedFiles([
     'include!("editor/commands_coalesce.rs");',
     'include!("plain.rs");',
+    '#[path = "presenter_skin_window_tests.rs"]',
+    'mod skin_window_tests;',
   ].join("\n"));
-  assert.deepEqual([...names].sort(), ["commands_coalesce", "plain"]);
+  assert.deepEqual([...names].sort(), ["commands_coalesce", "plain", "presenter_skin_window_tests"]);
 });
 
 test("the shared source list is the wiring file set: tests directories stay out (E51)", () => {
