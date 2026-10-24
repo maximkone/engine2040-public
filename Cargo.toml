@@ -185,6 +185,7 @@ burn = "0.21"
 engine-save = { version = "0.1.0", path = "crates/save" }
 engine-ui = { version = "0.1.0", path = "crates/ui" }
 engine-editor = { version = "0.1.0", path = "crates/editor" }
+engine-editor-derive = { version = "0.1.0", path = "crates/editor-derive" }
 engine-spatial = { version = "0.1.0", path = "crates/spatial" }
 engine-provider = { version = "0.1.0", path = "crates/provider" }
 glam = "0.33"

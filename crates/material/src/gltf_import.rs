@@ -10,8 +10,8 @@
 //! named in [`Import::warnings`] as [`WarningKind::Unsupported`] (dropped) or
 //! [`WarningKind::Approximated`] (mapped onto the nearest lobe), and a value
 //! pulled into range is [`WarningKind::Clamped`]. Nothing is dropped
-//! silently. Draw-state fields that are not look (`doubleSided`) are listed in
-//! [`Import::ignored`].
+//! silently. Draw state that is not look (`doubleSided`) is carried beside the
+//! records in [`Import::double_sided`], so the mesh draw can keep both faces.
 //!
 //! Spec meaning (formulas are math, read from the Khronos extension texts):
 //! `ior` stays `specular_ior`; `attenuationColor` at `attenuationDistance`
@@ -80,8 +80,12 @@ pub struct Import {
     pub records: Vec<MaterialRecord>,
     /// Every unsupported, approximated or clamped field, in file order.
     pub warnings: Vec<Warning>,
-    /// Draw-state fields noticed and left to the mesh draw (`doubleSided`).
+    /// Draw-state fields noticed and left to the mesh draw. No field is left
+    /// there today: `doubleSided` has its own list below.
     pub ignored: Vec<String>,
+    /// Record names whose glTF `doubleSided` is true, in file order. The mesh
+    /// draw keeps back faces for these; every other material culls them.
+    pub double_sided: Vec<String>,
 }
 
 impl Import {
@@ -627,7 +631,7 @@ fn import_material(
         Some(_) => cx.warn("alphaMode", WarningKind::Unsupported),
     }
     if material.get("doubleSided").and_then(Value::as_bool) == Some(true) {
-        out.ignored.push(format!("{name}: doubleSided"));
+        out.double_sided.push(name.clone());
     }
 
     look.textures = textures;
@@ -669,10 +673,24 @@ mod tests {
         assert_eq!(r.look.textures.base_color.as_deref(), Some("tex:albedo"));
         assert_eq!(r.look.textures.orm.as_deref(), Some("tex:rough_a"));
         assert!(imp.is_exact("Steel_Plate"));
-        assert_eq!(imp.ignored, vec!["Steel_Plate: doubleSided".to_string()]);
+        assert_eq!(imp.double_sided, vec!["Steel_Plate".to_string()]);
+        assert!(imp.ignored.is_empty());
         // Round-trips through the canonical text.
         let again = MaterialRecord::parse(&r.to_text()).expect("canonical");
         assert_eq!(&again, r);
+    }
+
+    #[test]
+    fn double_sided_flag_survives_and_default_culls() {
+        let imp = import(
+            r#"{"name":"Cape","pbrMetallicRoughness":{},"doubleSided":true},
+            {"name":"Wall","pbrMetallicRoughness":{},"doubleSided":false},
+            {"name":"Tile","pbrMetallicRoughness":{}}"#,
+        );
+        assert_eq!(imp.records.len(), 3);
+        // Only the material that asked for both faces keeps them.
+        assert_eq!(imp.double_sided, vec!["Cape".to_string()]);
+        assert!(imp.ignored.is_empty());
     }
 
     #[test]
