@@ -47,6 +47,9 @@ pub struct TierFacts {
     pub physfx_bodies: u32,
     pub physfx_ragdolls: u32,
     pub physfx_contacts: u32,
+    /// Largest texture edge the uploads keep resident, already cut to the adapter's
+    /// `maxTextureDimension2D` (`engine_render::quality::texture_edge_px`, QT9); the tier line
+    /// prints it as `tex_max=`.
     pub texture_px: u32,
     /// The knobs the page really applies (the rest are printed so the table is visible, but
     /// nothing draws with them), comma separated. See [`WIRED`].
@@ -78,7 +81,7 @@ impl TierFacts {
     #[must_use]
     pub fn line(&self) -> String {
         format!(
-            "tier={} why={} fallback={} adapter={} late_compile={} probe_ms={} scale={} dpr={:.2} shadow={}x{} gtao={} taa={} particles={} decals={} physfx={}/{}/{} tex={} wired={}",
+            "tier={} why={} fallback={} adapter={} late_compile={} probe_ms={} scale={} dpr={:.2} shadow={}x{} gtao={} taa={} particles={} decals={} physfx={}/{}/{} tex_max={} wired={}",
             self.name,
             self.why,
             fallback_for(&self.why),
@@ -805,7 +808,7 @@ mod tests {
         );
         assert!(line.contains("shadow=1024x2 gtao=half taa=off"), "{line}");
         assert!(
-            line.contains("physfx=192/4/512 tex=1024 wired=scale,bloom,shadow,"),
+            line.contains("physfx=192/4/512 tex_max=1024 wired=scale,bloom,shadow,"),
             "{line}"
         );
         assert!(!line.contains('\n'));
