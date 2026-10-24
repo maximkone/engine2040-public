@@ -626,4 +626,136 @@ mod tests {
             i64::from(i32::MAX)
         );
     }
+    #[test]
+    fn checked_ops_none_on_overflow_and_exact_otherwise() {
+        assert_eq!(
+            Fixed::from_int(2).checked_add(Fixed::from_int(3)),
+            Some(Fixed::from_int(5))
+        );
+        assert_eq!(Fixed::MAX.checked_add(Fixed::ONE), None);
+        assert_eq!(
+            Fixed::from_int(2).checked_sub(Fixed::from_int(5)),
+            Some(Fixed::from_int(-3))
+        );
+        assert_eq!(Fixed::MIN.checked_sub(Fixed::ONE), None);
+        assert_eq!(
+            Fixed::from_int(3).checked_mul(Fixed::from_int(2)),
+            Some(Fixed::from_int(6))
+        );
+        assert_eq!(Fixed::MAX.checked_mul(Fixed::from_int(2)), None);
+        // 3 / 2 is exactly 1.5 raw 98304; a shift, remainder or multiply in place of the
+        // divide gives 0 or overflows.
+        assert_eq!(
+            Fixed::from_int(3).checked_div(Fixed::from_int(2)),
+            Some(Fixed::from_bits(98_304))
+        );
+        assert_eq!(Fixed::MAX.checked_div(Fixed::from_bits(1)), None);
+    }
+    #[test]
+    fn saturating_ops_hold_the_bounds() {
+        assert_eq!(
+            Fixed::from_int(2).saturating_add(Fixed::from_int(3)),
+            Fixed::from_int(5)
+        );
+        assert_eq!(Fixed::MAX.saturating_add(Fixed::ONE), Fixed::MAX);
+        assert_eq!(
+            Fixed::from_int(5).saturating_sub(Fixed::from_int(2)),
+            Fixed::from_int(3)
+        );
+        assert_eq!(Fixed::MIN.saturating_sub(Fixed::ONE), Fixed::MIN);
+    }
+    #[test]
+    fn abs_min_max_pick_the_right_side() {
+        assert_eq!(Fixed::from_int(-3).abs(), Fixed::from_int(3));
+        assert_eq!(Fixed::from_int(3).abs(), Fixed::from_int(3));
+        assert_eq!(Fixed::ZERO.abs(), Fixed::ZERO);
+        assert_eq!(Fixed::MIN.abs(), Fixed::MAX);
+        assert_eq!(
+            Fixed::from_int(2).min(Fixed::from_int(3)),
+            Fixed::from_int(2)
+        );
+        assert_eq!(
+            Fixed::from_int(3).min(Fixed::from_int(2)),
+            Fixed::from_int(2)
+        );
+        assert_eq!(
+            Fixed::from_int(-4).min(Fixed::from_int(-1)),
+            Fixed::from_int(-4)
+        );
+        assert_eq!(
+            Fixed::from_int(2).max(Fixed::from_int(3)),
+            Fixed::from_int(3)
+        );
+        assert_eq!(
+            Fixed::from_int(3).max(Fixed::from_int(2)),
+            Fixed::from_int(3)
+        );
+        assert_eq!(
+            Fixed::from_int(-4).max(Fixed::from_int(-1)),
+            Fixed::from_int(-1)
+        );
+    }
+    #[test]
+    fn clamp_inverted_range_at_lo_takes_hi() {
+        // With lo > hi the strict `<` leaves self == lo to the upper check, which returns hi.
+        let (lo, hi) = (Fixed::from_int(6), Fixed::from_int(2));
+        assert_eq!(lo.clamp(lo, hi), hi);
+        assert_eq!(Fixed::from_int(1).clamp(lo, hi), lo);
+    }
+    #[test]
+    fn sin_cos_pair_and_tan_at_the_quarter_turns() {
+        assert_eq!(Fixed::ZERO.sin_cos(), (Fixed::ZERO, Fixed::ONE));
+        assert_eq!(Fixed::FRAC_PI_2.sin_cos(), (Fixed::ONE, Fixed::ZERO));
+        // At pi/4 the sine and cosine are the same table entry, so the tangent is exactly one.
+        assert_eq!(Fixed::FRAC_PI_4.tan(), Fixed::ONE);
+        // Cosine is exactly zero at +-pi/2: the sign of the sine picks the saturated bound.
+        assert_eq!(Fixed::FRAC_PI_2.tan(), Fixed::MAX);
+        assert_eq!((-Fixed::FRAC_PI_2).tan(), Fixed::MIN);
+    }
+    #[test]
+    fn atan2_axis_edge_and_third_quadrant() {
+        // x = i64::MIN: its negation wraps back to itself, so the half-plane branch picks by y.
+        assert_eq!(
+            Fixed::atan2(Fixed::ONE, Fixed::from_bits(i64::MIN)),
+            Fixed::PI
+        );
+        assert_eq!(
+            Fixed::atan2(Fixed::NEG_ONE, Fixed::from_bits(i64::MIN)),
+            -Fixed::PI
+        );
+        // Third quadrant: -3pi/4 is raw -154416; the CORDIC error is far under 300.
+        let d = (Fixed::atan2(Fixed::NEG_ONE, Fixed::NEG_ONE) - Fixed::from_bits(-154_416))
+            .abs()
+            .to_bits();
+        assert!(d < 300, "atan(-1,-1) diff={}", d);
+    }
+    #[test]
+    fn isqrt_rounds_down_on_small_and_max_values() {
+        assert_eq!(isqrt(0), 0);
+        assert_eq!(isqrt(1), 1);
+        assert_eq!(isqrt(2), 1);
+        assert_eq!(isqrt(3), 1);
+        assert_eq!(isqrt(4), 2);
+        assert_eq!(isqrt(15), 3);
+        assert_eq!(isqrt(16), 4);
+        assert_eq!(isqrt(u128::MAX), u128::from(u64::MAX));
+    }
+    #[test]
+    fn sin_second_and_fourth_quarter_waves() {
+        // sin(pi + 0.5) = -sin(0.5) and sin(-0.5) = -sin(0.5); the LUT gives raw 31417 for 0.5.
+        assert_eq!(Fixed::from_bits(205_888 + 32_768).sin().to_bits(), -31_417);
+        assert_eq!(Fixed::from_bits(-32_768).sin().to_bits(), -31_417);
+    }
+    #[test]
+    fn scalar_compare_past_i128_scale_takes_the_sign() {
+        // A scalar whose scaled form overflows i128 orders by its sign alone.
+        assert_eq!(
+            Fixed::ZERO.partial_cmp(&i128::MIN),
+            Some(core::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            Fixed::ZERO.partial_cmp(&i128::MAX),
+            Some(core::cmp::Ordering::Less)
+        );
+    }
 }

@@ -135,6 +135,8 @@ pub struct FramePostReceipt {
     pub upsample: PassReceipt,
     /// Bloom pass.
     pub bloom: PassReceipt,
+    /// Heat shimmer pass over the brazier and the hot-sand patches (QA9).
+    pub shimmer: PassReceipt,
     /// Exposure pass.
     pub exposure: PassReceipt,
     /// ACES tonemap pass.
@@ -155,6 +157,7 @@ impl FramePostReceipt {
         self.taa.ms
             + self.upsample.ms
             + self.bloom.ms
+            + self.shimmer.ms
             + self.exposure.ms
             + self.aces.ms
             + self.grade.ms
@@ -178,14 +181,27 @@ mod taa;
 pub use taa::*;
 mod upscale;
 pub use upscale::*;
+mod fsr1;
+pub use fsr1::fsr1_easu;
 mod chain;
 pub use chain::*;
+mod haze;
+pub use haze::{
+    apply as haze_apply, depth_mask as haze_depth_mask, runs as haze_runs, shift_px as haze_shift_px,
+    HazeError, MAX_SHIFT_PX as HAZE_MAX_SHIFT_PX, MIN_DEPTH as HAZE_MIN_DEPTH,
+};
 pub(crate) mod auto_exposure;
 pub use auto_exposure::*;
 mod graph;
 pub use graph::*;
 pub mod lut;
 pub mod preset;
+
+/// The finisher beat's depth of field (SW173): half-res CoC plus gather, the
+/// CPU twin of `shaders/dof.wgsl`. Off at Potato and off outside the beat.
+#[path = "post_dof.rs"]
+mod post_dof;
+pub use post_dof::*;
 
 /// Pinned 720p-to-1080p spatial upscale (FC3): EASU-shape lobe plus gradient reject.
 #[path = "upscale_easu.rs"]
@@ -1714,6 +1730,11 @@ mod tests {
                 pixels: 1024,
                 ms,
             },
+            shimmer: PassReceipt {
+                pass: "shimmer",
+                pixels: 0,
+                ms,
+            },
             exposure: PassReceipt {
                 pass: "exposure",
                 pixels: 1024,
@@ -1733,7 +1754,10 @@ mod tests {
             cluster_ms: 0.5,
             ibl_ms: 2.0,
         };
-        assert!((flat(0.1).total_ms() - 0.6).abs() < 1e-12);
+        // Seven passes at 0.1 ms: taa, taau, bloom, shimmer (QA9), exposure,
+        // aces, grade. The shimmer pass is part of the frame total, so the sum
+        // is pinned here with it.
+        assert!((flat(0.1).total_ms() - 0.7).abs() < 1e-12);
         assert!(flat(0.1).total_ms() <= POST_FRAME_BUDGET_MS);
         assert!(flat(9.9).total_ms() > POST_FRAME_BUDGET_MS);
         assert!((flat(0.1).lights_ms() - 3.75).abs() < 1e-9);
