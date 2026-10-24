@@ -9,6 +9,8 @@ use engine_render::particles_gpu::EmitterKind;
 use super::*;
 
 mod fight_fx;
+mod grapple;
+mod pov;
 pub(crate) mod speed_demo;
 
 pub(super) mod latency;
@@ -360,29 +362,75 @@ impl ArenaApp {
                     .as_ref()
                     .and_then(|seat| seat.input_for_tick(tick, human))
             });
-        let input = match staged {
-            // Tape-bound capture: the tape owns the human slot this tick.
-            Some(input) => input,
-            None if self.staged.is_some() => staged_fight_input(tick, human),
-            None if self.spear.demo => self.spear_demo_input(tick, human),
-            // No pad held: the keyboard path exactly as before. A held pad
-            // or deflected stick merges into the same single input.
-            None if self.pad.is_idle() => self.aim_at_rival(self.camera_relative(
-                fighter_input_from_pressed(tick, human, &self.pressed, &self.bindings),
+        // The showcase tour (`--showcase`) owns the slot like a script does.
+        let toured = match self.showcase.as_mut() {
+            Some(show) => Some(show.input(
+                tick,
+                human,
+                self.app.fighter_views(),
+                self.app.live_match().spear_view(),
             )),
-            None => {
-                let held = self
-                    .pad
-                    .fighter_input(tick, human, &self.pressed, &self.bindings)
-                    // The slot is the session's own human, so the table cannot
-                    // refuse; the keyboard input is the safe answer if it ever did.
-                    .unwrap_or_else(|_| {
-                        fighter_input_from_pressed(tick, human, &self.pressed, &self.bindings)
-                    });
-                self.aim_at_rival(self.camera_relative(held))
-            }
+            None => None,
+        };
+        let input = match (staged, toured) {
+            // Tape-bound capture: the tape owns the human slot this tick.
+            (Some(input), _) | (None, Some(input)) => input,
+            (None, None) => self.unscripted_input(tick, human),
         };
         self.with_spear_key(input)
+    }
+
+    /// The human slot's input when no tape, seat or tour owns it: the staged fight, the spear
+    /// demo, or the keyboard and pad.
+    fn unscripted_input(&mut self, tick: u32, human: FighterId) -> FighterInput {
+        if self.staged.is_some() {
+            return staged_fight_input(tick, human);
+        }
+        if self.spear.demo {
+            return self.spear_demo_input(tick, human);
+        }
+        // No pad held: the keyboard path exactly as before. A held pad
+        // or deflected stick merges into the same single input.
+        if self.pad.is_idle() {
+            return self.aim_at_rival(self.camera_relative(fighter_input_from_pressed(
+                tick,
+                human,
+                &self.pressed,
+                &self.bindings,
+            )));
+        }
+        let held = self
+            .pad
+            .fighter_input(tick, human, &self.pressed, &self.bindings)
+            // The slot is the session's own human, so the table cannot
+            // refuse; the keyboard input is the safe answer if it ever did.
+            .unwrap_or_else(|_| fighter_input_from_pressed(tick, human, &self.pressed, &self.bindings));
+        self.aim_at_rival(self.camera_relative(held))
+    }
+
+    /// One sim tick with the showcase tour's two halves around it: before it the rival dummy
+    /// is staged as the remote slot, after it the tour grades what the match reported.
+    /// Without `--showcase` this is the plain tick.
+    fn tick_with_showcase(&mut self, tick: u32, human: FighterId, input: FighterInput) {
+        if let Some(show) = self.showcase.as_ref() {
+            if let Some(dummy) = show.rival_input(tick, human.get(), self.app.fighter_views()) {
+                if let Err(err) = self.app.offer_remote(dummy) {
+                    tell!("arena: showcase dummy: {err}");
+                }
+            }
+        }
+        self.app.tick_into(input, &mut self.tick_scratch);
+        let Some(show) = self.showcase.as_mut() else {
+            return;
+        };
+        let live = self.app.live_match();
+        show.observe(
+            tick,
+            human.get(),
+            live.spear_view(),
+            live.spear_events(),
+            &self.tick_scratch.cues,
+        );
     }
 
     /// The agent seat reads back this tick's match hash, and the view
@@ -439,7 +487,7 @@ impl ArenaApp {
             } else {
                 let input = self.human_input(tick, human);
                 self.check_forced_tick(tick);
-                self.app.tick_into(input, &mut self.tick_scratch);
+                self.tick_with_showcase(tick, human, input);
                 input
             };
             // PQ18 stage two: the tick carrying that input reached the sim.
@@ -450,6 +498,18 @@ impl ArenaApp {
             // The look folds before the feed: the feed plays the run clip's
             // footstep events (BG5) the look stepped on this tick.
             self.fold_look_tick(tick);
+            // EG19c: a press schedules the swing whoosh for the blade's strike,
+            // `lead` ticks (the armed weapon's startup) after the press.
+            if !self.tick_scratch.started.is_empty() {
+                let bare = engine_combat::fight::TABLES_V2.attack_startup_ticks;
+                let leads: [u32; 8] = std::array::from_fn(|slot| {
+                    u8::try_from(slot)
+                        .ok()
+                        .and_then(|slot| self.app.weapon(slot))
+                        .map_or(bare, |weapon| weapon.startup_ticks)
+                });
+                self.audio_space.arm_swings(&leads);
+            }
             // Lock-free feed first (tick-stamped, bounded, `dropped_full`
             // counted): a busy mixer never loses commands because the feed
             // already queued them with the camera listener.
@@ -513,6 +573,7 @@ impl ArenaApp {
             hp,
             &self.tick_scratch.cues,
             &self.tick_scratch.lands,
+            (&self.tick_scratch.started, self.app.live_match()),
         );
         if let Some(scene) = self.spear.scene.as_mut() {
             scene.observe_tick(look, self.app.live_match(), views);
@@ -529,7 +590,17 @@ impl ArenaApp {
         if let Some(tally) = self.staged.as_mut() {
             tally.observe(&self.tick_scratch.cues);
         }
-        self.feel.observe(&self.tick_scratch.cues);
+        // GF2/GF3: each blow plays the authored sequence of its class and its
+        // attacker's weapon (`impact.rows`), along the axis the views give.
+        if !self.tick_scratch.cues.is_empty() {
+            let weapons: [Option<&str>; 8] = std::array::from_fn(|slot| {
+                u8::try_from(slot)
+                    .ok()
+                    .and_then(|slot| self.app.weapon_name(slot))
+            });
+            self.feel
+                .observe_with(&self.tick_scratch.cues, self.app.fighter_views(), &weapons);
+        }
         // FEEL5: sparks, blood and dust where the blow lands.
         self.throw_fight_fx();
         self.step_speed_demo();
@@ -574,7 +645,7 @@ impl ArenaApp {
             stats.unknown_cue,
         );
         say!(
-            "arena audio space: placed={} flat={} footsteps={} clip_footsteps={} tension_sends={} tension_unheard={} bed_writes={} refused={} breaks={}",
+            "arena audio space: placed={} flat={} footsteps={} clip_footsteps={} tension_sends={} tension_unheard={} bed_writes={} refused={} breaks={} swings={}",
             space.positioned,
             space.flat,
             space.footsteps,
@@ -584,6 +655,7 @@ impl ArenaApp {
             space.bed_writes,
             space.refused,
             space.breaks,
+            space.swings,
         );
     }
 

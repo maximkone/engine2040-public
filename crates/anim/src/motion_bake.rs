@@ -298,6 +298,122 @@ pub fn bake_unpack_rots(bytes: &[u8]) -> Result<Vec<super::pose::QuatTrack>, Bak
     Ok(out)
 }
 
+/// Sample rate of a baked foot-grounded weight track, Hz: OpenKCC's
+/// `HumanoidFootIKEditor.BakeAnimations` samples feet at 30, not at the tick rate, so the
+/// track is half the length of the clip's 60 Hz frames.
+pub const FOOT_WEIGHT_HZ: u32 = 30;
+/// Tick rate the planted lane is handed in, Hz: one flag pair per baked frame.
+pub const FOOT_TICK_HZ: u32 = 60;
+
+/// One clip's foot-grounded weight lane: per sample, the permille of its window each foot spent
+/// planted. 1000 is a foot down for the whole sample, 0 is a foot in the air.
+///
+/// The IK starts from this lane ([`FootWeights::weight_at`]) instead of solving contacts every
+/// tick, so a clipped or lagged contact table cannot drop a planted foot mid-slide.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FootWeights {
+    /// Sample rate, Hz.
+    pub hz: u32,
+    /// Tick rate the flags came in at, Hz.
+    pub tick_hz: u32,
+    /// Samples baked: `ceil(ticks * hz / tick_hz)`.
+    pub samples: u32,
+    /// One `[left, right]` permille pair per sample.
+    pub ik_weight: Vec<[u16; 2]>,
+}
+
+/// Why a foot-weight bake was refused; every variant names the fault.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum FootWeightError {
+    /// No frames: a clip with no motion has no plant to bake.
+    Empty,
+    /// The tick rate is not a whole multiple of [`FOOT_WEIGHT_HZ`]: refused rather than
+    /// mis-sampled, because a fractional window cannot be counted in whole ticks.
+    BadTickHz(u32),
+    /// More frames than the shared bake cap ([`MAX_BAKE_TICKS`]).
+    TooLong(u32),
+}
+
+impl core::fmt::Display for FootWeightError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "foot weights: no frames, no plant"),
+            Self::BadTickHz(hz) => write!(
+                f,
+                "foot weights: {hz} Hz is not a whole multiple of {FOOT_WEIGHT_HZ} Hz"
+            ),
+            Self::TooLong(ticks) => write!(f, "foot weights: {ticks} frames passes the bake cap"),
+        }
+    }
+}
+
+impl std::error::Error for FootWeightError {}
+
+impl FootWeights {
+    /// The baked weight of `foot` (0 left, 1 right) at `tick`, permille; the sample the tick
+    /// falls in, and 0 past the lane's end. Never interpolated: a half-planted weight between
+    /// two samples is a foot the IK would slide.
+    pub fn weight_at(&self, tick: u32, foot: usize) -> u16 {
+        if foot > 1 || self.tick_hz == 0 {
+            return 0;
+        }
+        let sample =
+            usize::try_from(u64::from(tick) * u64::from(self.hz) / u64::from(self.tick_hz))
+                .unwrap_or(usize::MAX);
+        self.ik_weight
+            .get(sample)
+            .map_or(0, |pair| pair[foot.min(1)])
+    }
+}
+
+/// Bake a planted-foot lane, one `[left, right]` flag pair per tick, into 30 Hz permille
+/// weights: each sample's weight is the share of its whole window the foot spent down, so a
+/// window of two planted ticks reads 1000 and one of two airborne ticks reads 0.
+///
+/// Refused instead of clipped: no frames ([`FootWeightError::Empty`]), a tick rate that is not
+/// a whole multiple of [`FOOT_WEIGHT_HZ`] ([`FootWeightError::BadTickHz`]) and more than
+/// [`MAX_BAKE_TICKS`] frames ([`FootWeightError::TooLong`]).
+pub fn bake_foot_weights(
+    planted: &[[bool; 2]],
+    tick_hz: u32,
+) -> Result<FootWeights, FootWeightError> {
+    if planted.is_empty() {
+        return Err(FootWeightError::Empty);
+    }
+    if tick_hz == 0 || tick_hz % FOOT_WEIGHT_HZ != 0 {
+        return Err(FootWeightError::BadTickHz(tick_hz));
+    }
+    let ticks = u32::try_from(planted.len()).map_err(|_| FootWeightError::TooLong(u32::MAX))?;
+    if ticks > MAX_BAKE_TICKS {
+        return Err(FootWeightError::TooLong(ticks));
+    }
+    let per = usize::try_from(tick_hz / FOOT_WEIGHT_HZ).unwrap_or(1);
+    let samples = planted.len().div_ceil(per);
+    let mut ik_weight = Vec::with_capacity(samples);
+    for sample in 0..samples {
+        let mut pair = [0u16; 2];
+        for foot in 0..2 {
+            let window = planted[sample * per..(sample * per + per).min(planted.len())]
+                .iter()
+                .filter(|flags| flags[foot])
+                .count();
+            // The last window of a clip may be short; its weight is over the ticks it has.
+            let held = u32::try_from(window).unwrap_or(u32::MAX);
+            let whole = u32::try_from((sample * per + per).min(planted.len()) - sample * per)
+                .unwrap_or(1)
+                .max(1);
+            pair[foot] = u16::try_from(held * 1000 / whole).unwrap_or(1000);
+        }
+        ik_weight.push(pair);
+    }
+    Ok(FootWeights {
+        hz: FOOT_WEIGHT_HZ,
+        tick_hz,
+        samples: u32::try_from(samples).unwrap_or(u32::MAX),
+        ik_weight,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::clip::{avg_world_slip, bake_clip, bake_track, TICK_DT};
@@ -498,5 +614,58 @@ mod tests {
         rebuilt.rotations = rot_tracks;
         assert_eq!(rebuilt.to_bytes(), bytes, "fixed point");
         println!("AM27_FIXTURE ticks=61 slip={slip:.6}");
+    }
+
+    /// One second at 60 Hz with the left foot down for the first twelve ticks (so the 30 Hz
+    /// windows that hold ticks 0..10 are whole plants): the lane the IK starts from must read
+    /// planted while it is down and clear once it lifts.
+    fn planted_lane() -> Vec<[bool; 2]> {
+        (0..60u32).map(|tick| [tick <= 11, false]).collect()
+    }
+
+    #[test]
+    fn foot_weights_are_the_planted_share_of_each_window() {
+        let weights = bake_foot_weights(&planted_lane(), FOOT_TICK_HZ).expect("one second bakes");
+        assert_eq!(weights.hz, 30, "sampled at OpenKCC's 30 Hz");
+        assert_eq!(weights.samples, 30, "half the frames");
+        for tick in 0..=10u32 {
+            let left = weights.weight_at(tick, 0);
+            assert!(left >= 900, "left planted at tick {tick}, weight {left}");
+        }
+        let lifted = weights.weight_at(20, 0);
+        assert!(lifted <= 100, "left lifted by tick 20, weight {lifted}");
+        // The right foot never went down.
+        assert!((0..60).all(|tick| weights.weight_at(tick, 1) == 0));
+        // A window with one planted tick of two is half planted, not a hard 1000 or 0.
+        let half =
+            bake_foot_weights(&[[true, false], [false, false]], FOOT_TICK_HZ).expect("two frames");
+        assert_eq!(half.weight_at(0, 0), 500, "ticks 0 and 1");
+        println!(
+            "foot weights: tick 0 {} , tick 10 {} , tick 20 {} permille",
+            weights.weight_at(0, 0),
+            weights.weight_at(10, 0),
+            weights.weight_at(20, 0)
+        );
+    }
+
+    #[test]
+    fn foot_weights_refuse_an_empty_lane_and_a_bad_tick_rate() {
+        assert_eq!(
+            bake_foot_weights(&[], FOOT_TICK_HZ),
+            Err(FootWeightError::Empty)
+        );
+        // 50 Hz does not divide into 30 Hz windows.
+        assert_eq!(
+            bake_foot_weights(&[[true, true]], 50),
+            Err(FootWeightError::BadTickHz(50))
+        );
+        assert_eq!(
+            bake_foot_weights(&[[true, true]; MAX_BAKE_TICKS as usize + 1], FOOT_TICK_HZ),
+            Err(FootWeightError::TooLong(MAX_BAKE_TICKS + 1))
+        );
+        // Past the lane's end a foot is not planted.
+        let weights = bake_foot_weights(&[[true, true]], FOOT_TICK_HZ).expect("one frame");
+        assert_eq!(weights.weight_at(0, 0), 1000);
+        assert_eq!(weights.weight_at(99, 0), 0);
     }
 }
