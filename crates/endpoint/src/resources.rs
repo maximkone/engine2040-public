@@ -1,13 +1,16 @@
-//! D16: the four static door resources plus the live scene view, served over
-//! `resources/list` and `resources/read`.
+//! D16: the four static door resources plus the live scene view and the
+//! lesson store, served over `resources/list` and `resources/read`.
 //!
 //! Consumer: an MCP client that wants the crate map, the door reference, the
-//! error catalog, the `game.toml` schema or the live scene. Data owner stays
-//! the crate it names: the crate map is the engine's own crate list, the door
-//! reference is the tool router plus the pack registry, the error catalog is
-//! the typed refusal list, the `game.toml` schema is the project manifest
-//! contract, and the scene view is the session document. This module owns only
-//! the URIs, the root pointers and the text each one carries.
+//! error catalog, the `game.toml` schema, the live scene or the lessons a
+//! build left behind. Data owner stays the crate it names: the crate map is
+//! the engine's own crate list, the door reference is the tool router plus the
+//! pack registry, the error catalog is the typed refusal list, the `game.toml`
+//! schema is the project manifest contract, the scene view is the session
+//! document, and the lesson rows are the JSONL store
+//! `tools/memory/memory.mjs` writes, read and ordered through
+//! [`crate::memory_store`] (BG14). This module owns only the URIs, the root
+//! pointers and the text each one carries.
 //!
 //! Why resources and not tools: a read-only view does not need a tool
 //! definition in every `tools/list`. Serving it here keeps the advertised tool
@@ -25,7 +28,9 @@
 //! build always produces the same bytes; no clock, no network, no float. The
 //! door reference carries a pin line (tool count and the FNV-64 of the rows
 //! below it) computed at render time, so a reader can see the surface moved
-//! without a version number to trust.
+//! without a version number to trust. The lesson view is the one body that
+//! reads a file: the same store always renders the same rows, in stamp order,
+//! and a store that is not there renders no row.
 //! Errors: [`ResourceError`], one named variant per refusal, every message
 //! naming the legal URIs.
 
@@ -46,6 +51,12 @@ pub const GAME_TOML_SCHEMA_URI: &str = "e2040://game-toml-schema";
 /// and content digest. Unlike the four static families this body is read from
 /// the session, so it is served beside them, not through [`ROOT_URIS`].
 pub const SCENE_URI: &str = "e2040://scene";
+/// Root URI of the lesson store: the rows `tools/memory/memory.mjs` keeps, in
+/// stamp order. `?path=`, `?kind=` and `?hash=` filter it, the same three the
+/// tool's `query` takes (BG14).
+pub const MEMORY_URI: &str = "e2040://memory";
+/// The filter keys one lesson read takes, in contract order.
+pub const MEMORY_FILTER_KEYS: [&str; 3] = ["kind", "path", "hash"];
 
 /// Every root URI this door serves, in contract order.
 pub const ROOT_URIS: [&str; 4] = [
@@ -188,10 +199,12 @@ impl std::fmt::Display for ResourceError {
 
 impl std::error::Error for ResourceError {}
 
-/// The four resources, in contract order.
+/// The resources the door lists: the four static families in contract order,
+/// then the lesson view. The live scene view rides beside them, pushed by the
+/// door itself because its body comes from the session.
 #[must_use]
 pub fn resource_list() -> Vec<Resource> {
-    ROOT_URIS
+    let mut listed: Vec<Resource> = ROOT_URIS
         .iter()
         .map(|uri| {
             let mut resource = Resource::new(*uri, resource_name(uri));
@@ -199,14 +212,17 @@ pub fn resource_list() -> Vec<Resource> {
             resource.mime_type = Some(RESOURCE_MIME.to_owned());
             resource
         })
-        .collect()
+        .collect();
+    listed.push(memory_resource());
+    listed
 }
 
-/// The four resource templates, one per family, so a client can discover a
-/// child URI shape before it has read the root.
+/// The resource templates: one per static family, so a client can discover a
+/// child URI shape before it has read the root, plus the lesson view's query
+/// shape.
 #[must_use]
 pub fn resource_templates() -> Vec<ResourceTemplate> {
-    ROOT_URIS
+    let mut listed: Vec<ResourceTemplate> = ROOT_URIS
         .iter()
         .map(|uri| {
             let mut template = ResourceTemplate::new(format!("{uri}/{{id}}"), resource_name(uri));
@@ -214,7 +230,9 @@ pub fn resource_templates() -> Vec<ResourceTemplate> {
             template.mime_type = Some(RESOURCE_MIME.to_owned());
             template
         })
-        .collect()
+        .collect();
+    listed.push(memory_template());
+    listed
 }
 
 /// Short name of one resource family.
@@ -281,6 +299,144 @@ pub fn scene_contents(text: String) -> ResourceContents {
     ResourceContents::text(text, SCENE_URI).with_mime_type(RESOURCE_MIME)
 }
 
+/// The lesson view, listed beside the four static families. Its body is one
+/// JSONL file the memory tool already writes, so the door adds no store of its
+/// own; a client filters it with the query keys in [`MEMORY_FILTER_KEYS`].
+#[must_use]
+pub fn memory_resource() -> Resource {
+    let mut resource = Resource::new(MEMORY_URI, "memory");
+    resource.description = Some(
+        "The lessons a build left behind: one row per decision, failed fix or tuned \
+         value, each carrying the tape hash it was learned under, in UTC-stamp order. \
+         `?kind=`, `?path=` and `?hash=` filter it."
+            .to_owned(),
+    );
+    resource.mime_type = Some(RESOURCE_MIME.to_owned());
+    resource
+}
+
+/// The lesson view's template, so a client can learn the query shape before it
+/// reads a row.
+#[must_use]
+pub fn memory_template() -> ResourceTemplate {
+    let mut template = ResourceTemplate::new(format!("{MEMORY_URI}{{?kind,path,hash}}"), "memory");
+    template.description = Some(
+        "One lesson store, three filters: `kind` (exact), `path` (a substring of the \
+         source path the lesson is about) and `hash` (the 16 hex digits of the tape it \
+         was learned under)."
+            .to_owned(),
+    );
+    template.mime_type = Some(RESOURCE_MIME.to_owned());
+    template
+}
+
+/// True when the URI names a lesson read: the root itself or the root with a
+/// `?` query. A `/` child is not a lesson URI; the lesson view has no children.
+#[must_use]
+pub fn is_memory_uri(uri: &str) -> bool {
+    uri.strip_prefix(MEMORY_URI)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('?'))
+}
+
+/// The filter one lesson URI asks for.
+///
+/// `e2040://memory` alone asks for every row. A query takes the three keys of
+/// [`MEMORY_FILTER_KEYS`], each at most once, none empty.
+///
+/// # Errors
+/// [`ResourceError::UnknownUri`] for a URI that is not a lesson URI, and
+/// [`ResourceError::Unavailable`] for a key the view does not take, a key given
+/// twice, an empty value, a kind that is not a lesson kind or a hash that is
+/// not 16 hex digits.
+pub fn memory_filter(uri: &str) -> Result<crate::memory_store::Filter, ResourceError> {
+    let refusal = |reason: String| ResourceError::Unavailable {
+        uri: uri.to_owned(),
+        reason,
+    };
+    let rest = uri
+        .strip_prefix(MEMORY_URI)
+        .ok_or_else(|| ResourceError::UnknownUri {
+            uri: uri.to_owned(),
+        })?;
+    let query = match rest.as_bytes().first() {
+        None => return Ok(crate::memory_store::Filter::default()),
+        Some(b'?') => &rest[1..],
+        Some(_) => {
+            return Err(ResourceError::UnknownUri {
+                uri: uri.to_owned(),
+            })
+        }
+    };
+    let mut filter = crate::memory_store::Filter::default();
+    let mut given: Vec<String> = Vec::new();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').ok_or_else(|| {
+            refusal(format!(
+                "`{pair}` carries no `=`; the keys are kind, path, hash"
+            ))
+        })?;
+        if !MEMORY_FILTER_KEYS.contains(&key) {
+            return Err(refusal(format!(
+                "`{key}` is not a lesson filter; the keys are {}",
+                MEMORY_FILTER_KEYS.join(", ")
+            )));
+        }
+        if given.contains(&key.to_owned()) {
+            return Err(refusal(format!("`{key}` is given twice")));
+        }
+        given.push(key.to_owned());
+        if value.is_empty() {
+            return Err(refusal(format!("`{key}` has no value")));
+        }
+        match key {
+            "kind" => {
+                if !crate::memory_store::is_kind(value) {
+                    return Err(refusal(format!(
+                        "`{value}` is not a lesson kind; legal kinds are {}",
+                        crate::memory_store::KINDS.join(", ")
+                    )));
+                }
+                filter.kind = Some(value.to_owned());
+            }
+            "path" => filter.path = Some(value.replace('\\', "/")),
+            "hash" => {
+                filter.hash = Some(
+                    crate::memory_store::normalize_hash(value)
+                        .map_err(|error| refusal(error.to_string()))?,
+                )
+            }
+            _ => {}
+        }
+    }
+    Ok(filter)
+}
+
+/// Render the lesson view: the rows the filter keeps, in the order they were
+/// given (stamp order from [`crate::memory_store::stamp_order`]), one canonical
+/// JSON line each — the same bytes `memory.mjs query --json` prints.
+#[must_use]
+pub fn memory_body(
+    rows: &[crate::memory_store::Record],
+    filter: &crate::memory_store::Filter,
+) -> String {
+    let kept = filter.select(rows);
+    let mut out = String::from("# memory\n\n");
+    out.push_str(&format!(
+        "rows: {} of {} | filter: {}\n\n",
+        kept.len(),
+        rows.len(),
+        filter.describe()
+    ));
+    for row in &kept {
+        out.push_str(&row.line());
+        out.push('\n');
+    }
+    if kept.is_empty() {
+        out.push_str("(no lesson row matches)\n");
+    }
+    out
+}
+
 /// Read one resource body as text.
 ///
 /// The `tool_rows` are the door's own advertised rows: name, pack and
@@ -290,7 +446,18 @@ pub fn read_resource_text(
     uri: &str,
     tool_rows: &[(String, String, String)],
 ) -> Result<String, ResourceError> {
-    let body = if let Some((root, id)) = split_child(uri) {
+    let body = if is_memory_uri(uri) {
+        // BG14: the lesson rows the memory tool keeps, filtered by the query
+        // the URI carries. A store that is not there renders no row.
+        let filter = memory_filter(uri)?;
+        let rows = crate::memory_store::read_ordered(&crate::memory_store::store_path()).map_err(
+            |error| ResourceError::Unavailable {
+                uri: uri.to_owned(),
+                reason: error.to_string(),
+            },
+        )?;
+        memory_body(&rows, &filter)
+    } else if let Some((root, id)) = split_child(uri) {
         child_text(root, id, tool_rows).ok_or_else(|| ResourceError::UnknownUri {
             uri: uri.to_owned(),
         })?
@@ -893,11 +1060,16 @@ mod tests {
     }
 
     #[test]
-    fn four_roots_are_served_and_listed() {
+    fn four_static_roots_and_the_lesson_view_are_served_and_listed() {
         let list = resource_list();
-        assert_eq!(list.len(), 4, "the door serves four resources");
+        assert_eq!(
+            list.len(),
+            ROOT_URIS.len() + 1,
+            "the door serves the four static families plus the lesson view"
+        );
         let uris: Vec<&str> = list.iter().map(|r| r.uri.as_str()).collect();
-        assert_eq!(uris, ROOT_URIS.to_vec());
+        assert_eq!(uris[..ROOT_URIS.len()], ROOT_URIS.to_vec());
+        assert_eq!(uris[ROOT_URIS.len()], MEMORY_URI, "then the lesson view");
         for resource in &list {
             assert!(!resource.name.is_empty(), "every resource is named");
             assert!(
@@ -906,15 +1078,23 @@ mod tests {
             );
             assert_eq!(resource.mime_type.as_deref(), Some(RESOURCE_MIME));
         }
-        assert_eq!(resource_templates().len(), 4, "one template per family");
+        assert_eq!(
+            resource_templates().len(),
+            ROOT_URIS.len() + 1,
+            "one template per static family, plus the lesson query shape"
+        );
     }
 
     #[test]
-    fn door_resource_serves_four_roots_at_no_tool_budget() {
-        // The four resources cost no tool-list budget: no root URI is a tool
+    fn door_resource_serves_the_roots_at_no_tool_budget() {
+        // These resources cost no tool-list budget: no root URI is a tool
         // name, so `tools/list` does not grow by a char for them.
         let list = resource_list();
-        assert_eq!(list.len(), 4, "the door serves four resources");
+        assert_eq!(
+            list.len(),
+            ROOT_URIS.len() + 1,
+            "the door serves the four static families plus the lesson view"
+        );
         let mut tool_names: Vec<String> = crate::mcp::tool_names()
             .into_iter()
             .map(|name| (*name).to_owned())
@@ -924,7 +1104,7 @@ mod tests {
                 tool_names.push((*verb).to_owned());
             }
         }
-        for uri in ROOT_URIS {
+        for uri in ROOT_URIS.into_iter().chain([MEMORY_URI]) {
             assert!(
                 !tool_names.iter().any(|name| name == uri),
                 "{uri} is served as a resource, not as a tool"
@@ -939,7 +1119,10 @@ mod tests {
             let text = read_resource_text(uri, &rows).expect("root reads");
             assert!(!text.is_empty(), "{uri} carries text");
         }
-        println!("door_resource: 4 resources, 0 tool-budget chars PASS");
+        println!(
+            "door_resource: {} resources, 0 tool-budget chars PASS",
+            list.len()
+        );
     }
 
     #[test]
@@ -1003,6 +1186,147 @@ mod tests {
         assert!(
             read_resource_text(SCENE_URI, &[]).is_err(),
             "the live view needs a document; it is read through the door, not this table"
+        );
+    }
+
+    /// The lesson view's rows, as the body prints them: the JSON lines only.
+    fn body_rows(body: &str) -> Vec<&str> {
+        body.lines().filter(|line| line.starts_with('{')).collect()
+    }
+
+    fn lesson(kind: &str, path: &str, utc: &str, text: &str) -> crate::memory_store::Record {
+        crate::memory_store::build(kind, "d57b5c8ae3096614", path, utc, text, Some("49f3615e4"))
+            .expect("a well-shaped lesson")
+    }
+
+    #[test]
+    fn the_lesson_view_is_listed_and_its_query_shape_is_advertised() {
+        let list = resource_list();
+        let listed: Vec<&str> = list.iter().map(|r| r.uri.as_str()).collect();
+        assert_eq!(
+            listed,
+            vec![
+                CRATE_MAP_URI,
+                DOOR_REFERENCE_URI,
+                ERROR_CATALOG_URI,
+                GAME_TOML_SCHEMA_URI,
+                MEMORY_URI,
+            ],
+            "the four families, then the lesson view"
+        );
+        let templates: Vec<String> = resource_templates()
+            .iter()
+            .map(|template| template.uri_template.to_string())
+            .collect();
+        assert!(
+            templates.contains(&format!("{MEMORY_URI}{{?kind,path,hash}}")),
+            "the lesson query shape is advertised: {templates:?}"
+        );
+    }
+
+    #[test]
+    fn the_lesson_resource_answers_rows_in_stamp_order() {
+        // The shipped store: every row reads back, in UTC-stamp order, and the
+        // body renders each row as the line the tool would print.
+        let text = read_resource_text(MEMORY_URI, &[]).expect("the lesson view reads");
+        let printed = body_rows(&text);
+        assert!(printed.len() >= 4, "{text}");
+        assert!(text.starts_with("# memory\n\n"), "{text}");
+        let rows = crate::memory_store::parse(&printed.join("\n"), "view")
+            .expect("every printed line is a row");
+        assert_eq!(
+            rows,
+            crate::memory_store::stamp_order(&rows),
+            "the view answers in stamp order"
+        );
+        assert_eq!(
+            text,
+            read_resource_text(MEMORY_URI, &[]).expect("a second read"),
+            "no clock, no per-call state"
+        );
+        // A filter keeps only the rows it names, and says how many it dropped.
+        let anim = read_resource_text(&format!("{MEMORY_URI}?path=crates/anim"), &[])
+            .expect("a filtered read");
+        for line in body_rows(&anim) {
+            assert!(line.contains("crates/anim"), "{line}");
+        }
+        assert!(anim.contains("| filter: path=crates/anim"), "{anim}");
+        assert!(
+            body_rows(&anim).len() < printed.len(),
+            "the filter kept fewer rows than the root"
+        );
+        let none = read_resource_text(&format!("{MEMORY_URI}?path=crates/nope"), &[])
+            .expect("an empty answer is still an answer");
+        assert!(body_rows(&none).is_empty(), "{none}");
+        assert!(none.contains("(no lesson row matches)"), "{none}");
+    }
+
+    #[test]
+    fn the_lesson_query_refuses_the_shape_it_did_not_ask_for() {
+        for uri in [
+            "e2040://memory?kind=rumour",
+            "e2040://memory?hash=not-a-hash",
+            "e2040://memory?size=3",
+            "e2040://memory?path=",
+            "e2040://memory?path=a&path=b",
+        ] {
+            let error = memory_filter(uri).expect_err("the query refuses");
+            assert!(
+                matches!(error, ResourceError::Unavailable { .. }),
+                "{uri} refuses as unavailable: {error}"
+            );
+        }
+        for uri in ["e2040://memories", "e2040://memory/row", "e2040://scene"] {
+            assert!(!is_memory_uri(uri), "{uri} is not a lesson read");
+            let error = read_resource_text(uri, &[]).expect_err("unknown family");
+            assert!(matches!(error, ResourceError::UnknownUri { .. }), "{uri}");
+        }
+        // The keys normalize the way the tool normalizes them.
+        let filter = memory_filter("e2040://memory?hash=0xD57B5C8AE3096614&kind=decision")
+            .expect("an 0x upper-case hash is the same query");
+        assert_eq!(filter.hash.as_deref(), Some("d57b5c8ae3096614"));
+        assert_eq!(filter.kind.as_deref(), Some("decision"));
+        assert_eq!(
+            memory_filter(MEMORY_URI).expect("the root asks for all rows"),
+            crate::memory_store::Filter::default()
+        );
+    }
+
+    #[test]
+    fn the_lesson_body_prints_the_canonical_line_of_each_row_it_keeps() {
+        let early = lesson(
+            "decision",
+            "crates/anim/src/a.rs",
+            "2026-10-23T09:00:00Z",
+            "one",
+        );
+        let late = lesson(
+            "failed-fix",
+            "crates/anim/src/b.rs",
+            "2026-10-24T09:00:00Z",
+            "two",
+        );
+        let rows = crate::memory_store::stamp_order(&[late.clone(), early.clone()]);
+        let body = memory_body(&rows, &crate::memory_store::Filter::default());
+        assert_eq!(
+            body,
+            format!(
+                "# memory\n\nrows: 2 of 2 | filter: all rows\n\n{}\n{}\n",
+                early.line(),
+                late.line()
+            ),
+            "stamp order, one canonical line each"
+        );
+        let kind = crate::memory_store::Filter {
+            kind: Some("failed-fix".to_owned()),
+            ..crate::memory_store::Filter::default()
+        };
+        assert_eq!(
+            memory_body(&rows, &kind),
+            format!(
+                "# memory\n\nrows: 1 of 2 | filter: kind=failed-fix\n\n{}\n",
+                late.line()
+            )
         );
     }
 

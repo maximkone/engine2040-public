@@ -6,6 +6,7 @@
 //! the submitter. Budget: stack bytes for packing; the builders run once per draw state.
 
 use crate::draw::TrailStripVert;
+use crate::vfx_soft::{vfx_depth_layout, vfx_pack_frame, VfxFrame, VFX_FRAME_BYTES};
 
 // ---------------------------------------------------------------------------
 // Staged draw bytes (behind `window`): the CPU image of
@@ -15,10 +16,18 @@ use crate::draw::TrailStripVert;
 // ---------------------------------------------------------------------------
 
 /// Draw-uniform byte size for `shaders/trail.wgsl` (`TrailU`): one `mat4`
-/// view-projection, the camera right and up axes, and the width scale.
-/// WGSL puts every `vec3` member on a 16-byte bound, so the image is 96 bytes
-/// where the fields add up to 88.
-pub const TRAIL_DRAW_UNIFORM_BYTES: usize = 96;
+/// view-projection, the camera right and up axes, the width scale and the live
+/// vert count (96 bytes, every `vec3` member on a 16-byte bound), then the
+/// 32-byte [`VfxFrame`] block (depth constants, depth-valid word, light).
+pub const TRAIL_DRAW_UNIFORM_BYTES: usize = 128;
+
+/// Byte offset of the [`VfxFrame`] block inside the draw uniform.
+const TRAIL_VFX_AT: usize = TRAIL_DRAW_UNIFORM_BYTES - VFX_FRAME_BYTES;
+
+/// [`TRAIL_VFX_AT`] and the depth-valid word eight bytes in, as buffer
+/// addresses for the queue writes (a test pins both to the layout).
+const TRAIL_VFX_ADDR: u64 = 96;
+const TRAIL_DEPTH_ON_ADDR: u64 = 104;
 
 /// One staged vert: the `StripVert` image of `shaders/trail.wgsl` (position
 /// plus alpha). 16 bytes per vert, so the storage buffer is 16 * vert_count.
@@ -38,14 +47,15 @@ fn trail_put_f32(out: &mut [u8], at: &mut usize, v: f32) {
 
 /// Pack the `TrailU` image: the frame view-projection in column-major order
 /// (the image the forward camera uniform carries), the camera right and up
-/// axes, the width scale and the staged vert count. Deterministic: fixed
-/// field order, no wall clock.
+/// axes, the width scale, the staged vert count and the [`VfxFrame`] block.
+/// Deterministic: fixed field order, no wall clock.
 pub fn trail_pack_uniform(
     view_proj: [[f32; 4]; 4],
     cam_right: [f32; 3],
     cam_up: [f32; 3],
     width_scale: f32,
     vert_count: u32,
+    vfx: &VfxFrame,
 ) -> [u8; TRAIL_DRAW_UNIFORM_BYTES] {
     let mut out = [0u8; TRAIL_DRAW_UNIFORM_BYTES];
     let mut at = 0usize;
@@ -64,7 +74,8 @@ pub fn trail_pack_uniform(
     // The `vec3` up axis pads to 16 bytes; the last 4 bytes are the live count.
     out[at..at + 4].copy_from_slice(&vert_count.to_le_bytes());
     at += 4;
-    debug_assert_eq!(at, TRAIL_DRAW_UNIFORM_BYTES);
+    debug_assert_eq!(at, TRAIL_VFX_AT);
+    vfx_pack_frame(vfx, &mut out[at..]);
     out
 }
 
@@ -100,7 +111,8 @@ pub fn trail_draw_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // The fragment reads `trail.light` and `trail.depth_on` too.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -122,20 +134,25 @@ pub fn trail_draw_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-/// Draw pipeline layout: one bind-group layout (the uniform and the strip).
+/// Draw pipeline layout: the uniform and strip bind group, then the scene
+/// depth the soft contact reads (`vfx_soft`, group 1).
 pub fn trail_draw_pipeline_layout(
     device: &wgpu::Device,
     bind_group_layout: &wgpu::BindGroupLayout,
 ) -> wgpu::PipelineLayout {
+    let depth = vfx_depth_layout(device);
     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("rl53-trail-draw-pipeline-layout"),
-        bind_group_layouts: &[Some(bind_group_layout)],
+        bind_group_layouts: &[Some(bind_group_layout), Some(&depth)],
         immediate_size: 0,
     })
 }
 
 /// Draw render pipeline: triangle strip topology, one vertex shader reading
-/// the strip storage, one fragment shader outputting `vec4<f32>(1.0, 1.0, 1.0, alpha)`.
+/// the strip storage, one fragment shader shaping the soft streak. The colour
+/// target blends premultiplied (the shader's alpha word keeps part of the light
+/// additive), and there is no depth attachment: the shader fades against the
+/// stored depth itself, so the pass keeps the colour-only shape.
 pub fn trail_draw_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -156,7 +173,7 @@ pub fn trail_draw_pipeline(
             entry_point: Some("trail_fs"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: target_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
@@ -302,6 +319,11 @@ pub fn trail_strip_runs(
 pub struct TrailSubmitter {
     view: [u8; TRAIL_DRAW_UNIFORM_BYTES],
     draw: Option<TrailDrawState>,
+    /// The frame constants the next stage packs behind the camera.
+    vfx: VfxFrame,
+    /// Group 1: the frame's stored depth, rebuilt with the targets. Without it
+    /// the strip cannot draw (the pipeline layout asks for it).
+    depth_bind: Option<wgpu::BindGroup>,
 }
 
 impl Default for TrailSubmitter {
@@ -326,8 +348,54 @@ impl TrailSubmitter {
                 [0.0, 1.0, 0.0],
                 TRAIL_WIDTH_SCALE,
                 0,
+                &VfxFrame::default(),
             ),
             draw: None,
+            vfx: VfxFrame::default(),
+            depth_bind: None,
+        }
+    }
+
+    /// Hand the strip the frame's stored depth (the presenter rebuilds this
+    /// with its targets). Cheap: one bind group.
+    pub fn bind_depth(&mut self, depth_bind: wgpu::BindGroup) {
+        self.depth_bind = Some(depth_bind);
+    }
+
+    /// True once a depth bind is in place.
+    pub fn has_depth_bind(&self) -> bool {
+        self.depth_bind.is_some()
+    }
+
+    /// The frame constants the next stage packs.
+    pub fn vfx(&self) -> VfxFrame {
+        self.vfx
+    }
+
+    /// Take the frame's depth constants and light. A non-finite block is
+    /// refused (the last good one stays). Rewrites the uniform tail in place.
+    pub fn set_vfx(&mut self, queue: &wgpu::Queue, vfx: VfxFrame) -> bool {
+        if !crate::vfx_soft::vfx_frame_finite(&vfx) {
+            return false;
+        }
+        self.vfx = vfx;
+        vfx_pack_frame(&vfx, &mut self.view[TRAIL_VFX_AT..]);
+        if let Some(draw) = self.draw.as_ref() {
+            queue.write_buffer(&draw.uniform, TRAIL_VFX_ADDR, &self.view[TRAIL_VFX_AT..]);
+        }
+        true
+    }
+
+    /// Say whether the depth bind holds this frame's depth (the frame decides
+    /// at record time: the 4x path keeps none). Rewrites one word of the live
+    /// uniform; `stage` repacks the tail from the last [`Self::set_vfx`].
+    pub fn set_depth_valid(&self, queue: &wgpu::Queue, valid: bool) {
+        if let Some(draw) = self.draw.as_ref() {
+            queue.write_buffer(
+                &draw.uniform,
+                TRAIL_DEPTH_ON_ADDR,
+                &u32::from(valid).to_le_bytes(),
+            );
         }
     }
 
@@ -382,7 +450,14 @@ impl TrailSubmitter {
             return Err(TrailDrawError::NotFinite);
         }
         let total = u32::try_from(verts.len()).unwrap_or(u32::MAX);
-        self.view = trail_pack_uniform(view_proj, cam_right, cam_up, TRAIL_WIDTH_SCALE, total);
+        self.view = trail_pack_uniform(
+            view_proj,
+            cam_right,
+            cam_up,
+            TRAIL_WIDTH_SCALE,
+            total,
+            &self.vfx,
+        );
         if verts.is_empty() {
             if let Some(draw) = self.draw.as_mut() {
                 draw.runs.clear();
@@ -410,9 +485,10 @@ impl TrailSubmitter {
     /// Record the staged strips into `pass`: one triangle-strip draw per busy
     /// slot, or nothing when the frame staged none, so a calm frame issues no
     /// draw call at all. The pass must carry one HDR colour target and no
-    /// depth attachment, the shape the pipeline declares.
+    /// depth attachment, the shape the pipeline declares; the depth the soft
+    /// contact reads rides group 1 ([`Self::bind_depth`]).
     pub fn encode_draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let Some(draw) = self.draw.as_ref() else {
+        let (Some(draw), Some(depth)) = (self.draw.as_ref(), self.depth_bind.as_ref()) else {
             return;
         };
         if draw.runs.is_empty() {
@@ -420,6 +496,7 @@ impl TrailSubmitter {
         }
         pass.set_pipeline(&draw.pipeline);
         pass.set_bind_group(0, &draw.bind, &[]);
+        pass.set_bind_group(crate::vfx_soft::VFX_DEPTH_GROUP, depth, &[]);
         for (start, count) in &draw.runs {
             pass.draw(*start..start + count, 0..1);
         }
@@ -496,14 +573,22 @@ mod tests {
         let cam_right = [1.0, 0.0, 0.0];
         let cam_up = [0.0, 1.0, 0.0];
         let width_scale = 1.5;
-        let a = trail_pack_uniform(view_proj, cam_right, cam_up, width_scale, 24);
-        let b = trail_pack_uniform(view_proj, cam_right, cam_up, width_scale, 24);
+        let vfx = VfxFrame::default();
+        let a = trail_pack_uniform(view_proj, cam_right, cam_up, width_scale, 24, &vfx);
+        let b = trail_pack_uniform(view_proj, cam_right, cam_up, width_scale, 24, &vfx);
         assert_eq!(a, b, "the same inputs pack the same uniform bytes");
         assert_eq!(a.len(), TRAIL_DRAW_UNIFORM_BYTES);
         assert_eq!(
-            &a[TRAIL_DRAW_UNIFORM_BYTES - 4..],
+            &a[TRAIL_VFX_AT - 4..TRAIL_VFX_AT],
             &24u32.to_le_bytes(),
-            "the last word is the live vert count"
+            "the word before the frame block is the live vert count"
+        );
+        let mut tail = [0u8; VFX_FRAME_BYTES];
+        vfx_pack_frame(&vfx, &mut tail);
+        assert_eq!(
+            &a[TRAIL_VFX_AT..],
+            &tail,
+            "the frame block closes the uniform"
         );
     }
 
@@ -591,6 +676,23 @@ mod tests {
         let mut submitter = TrailSubmitter::new();
         assert_eq!(submitter.created_buffers(), 0);
         assert!(!submitter.has_draw(), "a fresh submitter draws nothing");
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lf14-trail-draw-depth"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::present::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        submitter.bind_depth(crate::vfx_soft::vfx_depth_bind(device, &depth_view));
+        assert!(submitter.has_depth_bind());
         let verts = strip(24);
         let staged = submitter
             .stage(
@@ -706,6 +808,12 @@ mod tests {
         assert_eq!(offset("width_scale"), 76);
         assert_eq!(offset("cam_up"), 80);
         assert_eq!(offset("vert_count"), 92);
+        let at = |bytes: usize| u32::try_from(bytes).expect("small");
+        assert_eq!(offset("zparams"), at(TRAIL_VFX_AT));
+        assert_eq!(offset("depth_on"), at(TRAIL_VFX_AT) + 8);
+        assert_eq!(offset("light"), at(TRAIL_VFX_AT) + 16);
+        assert_eq!(usize::try_from(TRAIL_VFX_ADDR), Ok(TRAIL_VFX_AT));
+        assert_eq!(usize::try_from(TRAIL_DEPTH_ON_ADDR), Ok(TRAIL_VFX_AT + 8));
 
         let packed = trail_pack_uniform(
             [
@@ -718,6 +826,7 @@ mod tests {
             [0.125, 0.375, 0.625],
             TRAIL_WIDTH_SCALE,
             42,
+            &VfxFrame::default(),
         );
         let f32_at =
             |at: usize| f32::from_le_bytes(packed[at..at + 4].try_into().expect("4 bytes"));
