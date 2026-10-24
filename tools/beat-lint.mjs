@@ -7,6 +7,10 @@
 // returns), at most 3 new elements per rung, the enemy tier never falls, the
 // boss flag sits only on the last rung, and rewards plus ranks match
 // crates/game/src/ladder.rs (a second door to the same numbers, GP27).
+// The arena a rung runs is checked too: the `arena=` cell must name a
+// placement file that exists (the ids mirror `LADDER_PLACEMENTS` of
+// crates/game/src/ladder.rs), and the `new_arena` count must follow the
+// swap, 1 when the rung changes the placement and 0 when it keeps it.
 //
 // The first-bout launch cap is NOT a rule here. ladder.rs owns it
 // (`FIRST_BOUT_START_SECS` 45 s, `FIRST_BOUT_START_LIMIT_SECS` 60 s) and its
@@ -22,14 +26,18 @@
 // Rows file format (content/design/ladder.rows):
 //   first non-blank non-# line: `table ladder version 1`
 //   rows: `rung_<0..7> tier=<1..3> new_moves=<int> new_rules=<int>
-//     new_arena=<int> reward=<int> penalty=<int> minutes=<int>
-//     rank=<0..4> boss=<0|1>`; whole numbers only, `#` comments.
+//     new_arena=<int> arena=<name> reward=<int> penalty=<int> minutes=<int>
+//     rank=<0..4> boss=<0|1>`; whole numbers only, `#` comments. The one
+//     word cell is `arena=`: the placement id the rung runs (base, ludus or
+//     siege), named by the rows file and loaded by the game.
 //
-// Prints one line per rung (id, tier, new total, minutes, reward, rank).
-// Exit 1 when a rule fails: minutes or new total off the compiled chart,
-// clumped rung (over 3 new), falling tier, boss off the last rung, reward or
-// rank drift from ladder.rs. Exit 2 on bad CLI, missing file or unparsable
-// rows (with line number).
+// Prints one line per rung (id, tier, new total, minutes, reward, rank,
+// arena). Exit 1 when a rule fails: minutes or new total off the compiled
+// chart, clumped rung (over 3 new), falling tier, boss off the last rung,
+// reward or rank drift from ladder.rs, an arena id no placement file backs
+// or a missing placement file, and a `new_arena` count that does not follow
+// the placement swap. Exit 2 on bad CLI, missing file or unparsable rows
+// (with line number).
 //
 // Usage:
 //   node tools/beat-lint.mjs [--ladder PATH] [--help]
@@ -37,12 +45,21 @@
 //
 // Owner: game design seat. Units: glory counts, whole minutes. Deterministic:
 // same file gives same lines (no clock, no HashMap order).
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = dirname(HERE);
+
+// Mirror of crates/game/src/ladder.rs LADDER_PLACEMENTS: the arena ids a
+// rung may name and the placement file each one loads. Drift here fails the
+// lint on purpose: a variant the game cannot load must not ship in the rows.
+export const ARENA_VARIANTS = [
+  { id: "base", file: join(ROOT, "content", "arena", "placement.json") },
+  { id: "ludus", file: join(ROOT, "content", "maps", "placement_ludus.json") },
+  { id: "siege", file: join(ROOT, "content", "maps", "placement_siege.json") },
+];
 
 // Mirror of crates/game/src/ladder.rs:15-27. A drift here fails the lint
 // on purpose: rows must equal the compiled table, never fork it.
@@ -62,6 +79,7 @@ export const RUNG_MINUTES = [2, 2, 3, 3, 4, 4, 5, 6];
 export const DEFAULT_LADDER = join(ROOT, "content", "design", "ladder.rows");
 
 const INT_RE = /^\d+$/;
+const NAME_RE = /^[a-z][a-z0-9_]*$/;
 
 function fail(msg) {
   throw new Error(msg);
@@ -108,7 +126,7 @@ export function parseLadder(text, label = "ladder") {
     if (!id || id.includes("=")) fail(label + " line " + n + ": misses rung id");
     if (seen.has(id)) fail(label + " line " + n + ": duplicate row " + id);
     seen.add(id);
-    const want = ["tier", "new_moves", "new_rules", "new_arena", "reward", "penalty", "minutes", "rank", "boss"];
+    const want = ["tier", "new_moves", "new_rules", "new_arena", "arena", "reward", "penalty", "minutes", "rank", "boss"];
     const got = {};
     for (const p of parts.slice(1)) {
       const eq = p.indexOf("=");
@@ -117,6 +135,11 @@ export function parseLadder(text, label = "ladder") {
       const v = p.slice(eq + 1);
       if (!want.includes(k)) fail(label + " line " + n + ": unknown key " + k);
       if (got[k] !== undefined) fail(label + " line " + n + ": duplicate key " + k);
+      if (k === "arena") {
+        if (!NAME_RE.test(v)) fail(label + " line " + n + ": arena must be a name, got `" + v + "`");
+        got[k] = v;
+        continue;
+      }
       if (!INT_RE.test(v)) fail(label + " line " + n + ": " + k + " must be a whole number, got `" + v + "`");
       got[k] = Number(v);
     }
@@ -187,6 +210,22 @@ export function checkAll({ ladderText }) {
     if (i === MAX_RUNG && r.boss !== 1) failures.push(tag + ": last rung must carry boss=1");
     if (i !== MAX_RUNG && r.boss === 1) failures.push(tag + ": boss=1 before the last rung");
 
+    // The arena the rung runs: the named variant must name a placement file
+    // that exists, and the new-arena count must follow the swap: 1 when the
+    // rung changes the placement, 0 when it keeps it.
+    const variant = ARENA_VARIANTS.find((entry) => entry.id === r.arena);
+    if (!variant) {
+      failures.push(tag + ": unknown arena variant `" + r.arena + "`");
+    } else if (!existsSync(variant.file)) {
+      failures.push(tag + ": arena placement file missing: " + variant.file);
+    }
+    const swaps = i > 0 && rows[i - 1].arena !== r.arena;
+    if (r.new_arena !== (swaps ? 1 : 0)) {
+      failures.push(
+        tag + ": new_arena " + r.new_arena + ", but the placement " + (swaps ? "changes" : "stays"),
+      );
+    }
+
     cumulative += r.reward;
   }
 
@@ -196,7 +235,7 @@ export function checkAll({ ladderText }) {
 export function formatLines(r) {
   return r.rows.map((row) => {
     const added = row.new_moves + row.new_rules + row.new_arena;
-    return row.id + " tier " + row.tier + " new " + added + " minutes " + row.minutes + " reward " + row.reward + " rank " + row.rank;
+    return row.id + " tier " + row.tier + " new " + added + " minutes " + row.minutes + " reward " + row.reward + " rank " + row.rank + " arena " + row.arena;
   });
 }
 
