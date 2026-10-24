@@ -67,8 +67,19 @@ use engine_endpoint::{
 /// PNG frame. Two seats landed while DOOR9 was in review: the project pack
 /// (`project.new`, `project.build`, `project.run`) and the memory pack
 /// (`memory.write`, `memory.recall`, `memory.share`), six verbs more. Measured
-/// 2026-10-24 under `--features mcp` after all of that: 143.
-const EXPECTED_ROUTER: usize = 143
+/// 2026-10-24 under `--features mcp` after all of that: 143. BG14 (2026-10-24)
+/// adds `memory.record`, the lesson-row write behind the `e2040://memory`
+/// resource, and the `tasks` pack with its one read `tasks.list`, so every arm
+/// moves up by two. `view.scene` and `view.steer` (SP62, EG35: the spatial
+/// scene report and the render steer, 2026-10-24) join the view pack and move
+/// every arm up by two more. `claim.check` (AD21, the claim gate over the
+/// journal's apply receipts) joins the view pack. Measured 2026-10-24 on the
+/// runner with this verb in the tree: 149 live verbs, one over the 148 the
+/// arms read before it (an earlier landing moved the router without moving
+/// this pin), so every arm is 149. SW145 (2026-10-25) adds photo.shoot to the
+/// stage pack and four verbs landed while it was in review; measured on the
+/// runner with them in the tree: 154 live verbs, so every arm is 154.
+const EXPECTED_ROUTER: usize = 154
     + if cfg!(feature = "rules") { 5 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

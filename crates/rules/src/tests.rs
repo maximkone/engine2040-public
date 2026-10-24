@@ -118,10 +118,11 @@ fn float_op_refused() {
     let err = refused("let r = 1;\nlet f = 1.5;\ndamage(1, 10);\n");
     assert_eq!(err, RulesError::Float { line: 2 });
     assert!(matches!(refused("let r = 2e3;"), RulesError::Float { .. }));
-    // `..` ranges next to integers are not floats.
+    // `..` ranges next to integers are not floats. A memory-only script
+    // fires no action, so it is a declared no-op (AD13).
     let mut rules = Rules::default();
     rules
-        .set("for i in 0..3 { mem_set(0, i); }", 0)
+        .set_allowing_no_op("for i in 0..3 { mem_set(0, i); }", 0, true)
         .expect("range is fine");
 }
 
@@ -300,8 +301,15 @@ fn good_edit_replaces_and_history_grows() {
         script_hash("heal(id, 1);\r\nstun(id, 1);\r\n"),
         script_hash("heal(id, 1);\nstun(id, 1);\n")
     );
-    // An empty script is a valid (do-nothing) rule set.
-    assert!(rules.set("", 80).is_ok());
+    // An empty script fires no action, so it needs the declared no-op (AD13)
+    // and is then a valid do-nothing rule set.
+    assert!(matches!(
+        rules
+            .set("", 80)
+            .expect_err("an undeclared empty script refuses"),
+        RulesError::NoEffect { .. }
+    ));
+    assert!(rules.set_allowing_no_op("", 80, true).is_ok());
     assert!(rules.tick(&bash_world(100)).unwrap().actions.is_empty());
 }
 #[test]

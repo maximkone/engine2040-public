@@ -135,6 +135,7 @@ mod tests {
             size_m: [0.5, 2.0, 0.5],
             yaw: 0.0,
             physical: false,
+            texture_scale: 1.0,
         }
     }
 
