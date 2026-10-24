@@ -147,6 +147,33 @@ pub fn two_bone_pole(
     target: [f32; 3],
     pole: [f32; 3],
 ) -> Result<([f32; 3], [f32; 3]), IkError> {
+    two_bone_soften(root, mid, end, target, pole, 0.0)
+}
+
+/// Two-bone solve with a soften band, so an arm reaching just past its limit
+/// eases instead of popping straight.
+///
+/// `soften` is the width of the band at the end of the chain: past
+/// `da = (l1 + l2) * (1 - soften)` the target length becomes
+/// `da + ds - ds * ratio` with `ds = (l1 + l2) * soften`,
+/// `alpha = (len - da) / ds` and `ratio = 81 / (alpha + 3)^4`, one at the band
+/// and zero far out (the donor's approximation of an exponential ease). The
+/// direction is untouched, so the chain shortens along the same line. The
+/// donor calls `1 - soften` its `IKTwoBoneJob::soften` ratio, where the ease
+/// starts; here `0` is that donor's `1` and keeps the hard clamp.
+///
+/// `soften` is clamped to `0..=1`; `0` reproduces [`two_bone_pole`] exactly,
+/// `0.3` eases the last 30% of the chain and holds the end about 1% short of
+/// full extension for a far target. Units, errors and allocation match
+/// [`two_bone_pole`]; a non-finite `soften` refuses.
+pub fn two_bone_soften(
+    root: [f32; 3],
+    mid: [f32; 3],
+    end: [f32; 3],
+    target: [f32; 3],
+    pole: [f32; 3],
+    soften: f32,
+) -> Result<([f32; 3], [f32; 3]), IkError> {
     for (name, lane) in [
         ("root", root),
         ("mid", mid),
@@ -157,6 +184,9 @@ pub fn two_bone_pole(
         if !finite3(lane) {
             return Err(IkError::NonFinite(name));
         }
+    }
+    if !soften.is_finite() {
+        return Err(IkError::NonFinite("soften"));
     }
     let (l1, l2) = (len(sub(mid, root)), len(sub(end, mid)));
     if l1 < MIN_BONE_M {
@@ -176,13 +206,32 @@ pub fn two_bone_pole(
     } else {
         norm(sub(end, root))
     };
-    let d = dist.clamp((l1 - l2).abs().max(MIN_REACH_M), l1 + l2);
+    let reach = soft_reach(dist, l1 + l2, soften.clamp(0.0, 1.0));
+    let d = reach.clamp((l1 - l2).abs().max(MIN_REACH_M), l1 + l2);
     // Law of cosines: the mid joint sits `a` along the axis and `h` off it.
     let a = ((l1 * l1 - l2 * l2 + d * d) / (2.0 * d)).clamp(-l1, l1);
     let h = (l1 * l1 - a * a).max(0.0).sqrt();
     let bend = bend_axis(dir, pole, sub(mid, root));
     let mid_p = madd(madd(root, dir, a), bend, h);
     Ok((mid_p, madd(root, dir, d)))
+}
+
+/// Target length after the soften band, donor `SoftenTarget`: the last
+/// `full * soften` of the chain eases toward full extension as
+/// `da + ds - ds * 81 / (alpha + 3)^4`, and the length itself below the band.
+/// A zero band leaves every length alone, so the hard clamp is the same code
+/// path with `soften = 0`.
+fn soft_reach(len: f32, full: f32, soften: f32) -> f32 {
+    let band = full * soften;
+    let da = full - band;
+    if band <= 0.0 || len <= da {
+        return len;
+    }
+    let alpha = (len - da) / band;
+    let t = alpha + 3.0;
+    let t2 = t * t;
+    let ratio = 81.0 / (t2 * t2);
+    da + band - band * ratio
 }
 
 /// Two-bone analytic that keeps the chain's current bend side: the pole is the
@@ -196,6 +245,18 @@ pub fn two_bone(
     target: [f32; 3],
 ) -> ([f32; 3], [f32; 3]) {
     two_bone_pole(root, mid, end, target, sub(mid, root)).unwrap_or((mid, end))
+}
+
+/// [`two_bone_soften`] with the chain's current bend side as the pole: a
+/// refusal keeps the current chain, the same contract as [`two_bone`].
+pub fn two_bone_soft(
+    root: [f32; 3],
+    mid: [f32; 3],
+    end: [f32; 3],
+    target: [f32; 3],
+    soften: f32,
+) -> ([f32; 3], [f32; 3]) {
+    two_bone_soften(root, mid, end, target, sub(mid, root), soften).unwrap_or((mid, end))
 }
 
 /// Shortest-arc unit quaternion that turns direction `from` onto `to`
@@ -318,6 +379,79 @@ pub fn look_at(
         cp,
     ];
     quat_mul(q_pitch, q_yaw)
+}
+
+/// The offsetted aim: a joint aims a point that sits `offset` from its own
+/// origin, with the aim plane pinned by `pole`, scaled by `weight`.
+///
+/// Donor: ozz `IKAimJob` (`ComputeOffsettedForward`, the pole plane, the
+/// `weight` NLerp). `offset` is in the joint's own frame, so a head aims a
+/// point 0.09 m ahead of its neck joint and a spear hand a point 0.4 m along
+/// the shaft: the joint's own axis is not the line to the target.
+///
+/// Returns the local rotation and whether the target is aimable. A target
+/// inside the sphere the offset sweeps is unaimable: identity, `false`. With
+/// no offset this is exactly [`look_at`], limits and weight included, so a
+/// caller can swap it in without moving an unoffset joint.
+#[must_use]
+pub fn aim_offset(
+    forward: [f32; 3],
+    up: [f32; 3],
+    offset: [f32; 3],
+    pole: [f32; 3],
+    to: [f32; 3],
+    limits: AimLimits,
+    weight: f32,
+) -> ([f32; 4], bool) {
+    let id = [0.0, 0.0, 0.0, 1.0];
+    if !finite3(forward) || !finite3(up) || !finite3(offset) || !finite3(pole) || !finite3(to) {
+        return (id, false);
+    }
+    let (f, u, d) = (norm(forward), norm(up), norm(to));
+    if len(f) == 0.0 || len(u) == 0.0 || len(d) == 0.0 {
+        return (id, false);
+    }
+    if dot(offset, offset) <= 1.0e-12 {
+        return (look_at(f, u, to, limits, weight), true);
+    }
+    let reach = len(to);
+    // The target must sit outside the sphere the offset sweeps about the axis.
+    let along = dot(f, offset);
+    let off_sq = dot(offset, offset) - along * along;
+    if off_sq > reach * reach {
+        return (id, false);
+    }
+    let ahead = (reach * reach - off_sq).max(0.0).sqrt();
+    let offsetted = madd(f, offset, ahead - along);
+    // The clamped aim keeps today's yaw and pitch limits in force.
+    let clamped = rotate(&f, &look_at(f, u, to, limits, 1.0));
+    let aim = turn_between(offsetted, clamped);
+    // Pinning the aim plane to the pole is a twist about the aim axis.
+    let plane = turn_between(cross3(rotate(&u, &aim), clamped), cross3(pole, clamped));
+    let w = if weight.is_finite() {
+        weight.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (nlerp_from_identity(quat_mul(plane, aim), w), true)
+}
+
+/// Shortest-arc NLerp from identity to unit `q` by `w` in `0..=1`.
+fn nlerp_from_identity(q: [f32; 4], w: f32) -> [f32; 4] {
+    let id = [0.0, 0.0, 0.0, 1.0];
+    if w <= 0.0 {
+        return id;
+    }
+    if w >= 1.0 {
+        return q;
+    }
+    let s = if q[3] < 0.0 { -1.0 } else { 1.0 };
+    unit([
+        s * q[0] * w,
+        s * q[1] * w,
+        s * q[2] * w,
+        s * q[3] * w + (1.0 - w),
+    ])
 }
 
 /// Elevation of unit `v` above the plane whose unit normal is `u`, radians,
@@ -1030,5 +1164,175 @@ mod tests {
         });
         assert_eq!(heap.calls, 0, "500 aims touch no heap");
         assert!(sum > 0.0);
+    }
+
+    /// A 0.62 m arm chain along -y: shoulder, elbow, wrist straight.
+    fn straight_arm() -> ([f32; 3], [f32; 3], [f32; 3]) {
+        ([0.0, 1.4, 0.0], [0.0, 1.1, 0.0], [0.0, 0.78, 0.0])
+    }
+
+    fn target_at(meters: f32) -> [f32; 3] {
+        [0.0, 1.4 - meters, 0.0]
+    }
+
+    #[test]
+    fn soften_off_reproduces_the_hard_clamp() {
+        let (root, mid, end) = straight_arm();
+        let pole = [0.0, 0.0, 1.0];
+        for step in 0..=40u8 {
+            let target = target_at(f32::from(step) * 0.06);
+            let hard = two_bone_pole(root, mid, end, target, pole).unwrap();
+            let soft = two_bone_soften(root, mid, end, target, pole, 0.0).unwrap();
+            assert_eq!(hard, soft, "soften off at step {step}");
+            // The hard clamp is today's rule: the reach is the target length
+            // confined to the chain, |l1 - l2| .. l1 + l2.
+            let want = len(sub(target, root)).clamp(0.02, 0.62);
+            let reach = len(sub(hard.1, root));
+            assert!(
+                (reach - want).abs() < 1.0e-5,
+                "step {step}: {reach} vs {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn soften_holds_the_end_short_of_a_far_target() {
+        let (root, mid, end) = straight_arm();
+        // Chain 0.62 m with a 0.3 band at the end: a target twice the chain
+        // eases to 0.6148 m, 5 mm short of the hard clamp.
+        let (_, wrist) =
+            two_bone_soften(root, mid, end, target_at(1.24), [0.0, 0.0, 1.0], 0.3).unwrap();
+        let reach = len(sub(wrist, root));
+        assert!((reach - 0.6148).abs() < 1.0e-3, "softened reach {reach}");
+        assert!(reach < 0.62, "the far target is held short: {reach}");
+        // The direction is untouched: the wrist stays on the target line.
+        assert!(
+            wrist[0].abs() < 1.0e-6 && wrist[2].abs() < 1.0e-6,
+            "{wrist:?}"
+        );
+    }
+
+    #[test]
+    fn soften_makes_the_reach_continuous_at_the_band() {
+        let (root, mid, end) = straight_arm();
+        let full = 0.62_f32;
+        let band = full * 0.7;
+        let pole = [0.0, 0.0, 1.0];
+        let below = two_bone_soften(root, mid, end, target_at(band - 0.000_05), pole, 0.3)
+            .unwrap()
+            .1;
+        let above = two_bone_soften(root, mid, end, target_at(band + 0.000_05), pole, 0.3)
+            .unwrap()
+            .1;
+        let step_mm = (len(sub(above, root)) - len(sub(below, root))).abs() * 1000.0;
+        assert!(
+            step_mm < 0.2,
+            "the band is a curve, not a step: {step_mm} mm"
+        );
+
+        // Monotone over the whole span and never past the chain length.
+        let mut last = 0.0;
+        for step in 1..=60u8 {
+            let reach = len(sub(
+                two_bone_soften(root, mid, end, target_at(f32::from(step) * 0.06), pole, 0.3)
+                    .unwrap()
+                    .1,
+                root,
+            ));
+            assert!(reach >= last - 1.0e-6, "reach fell at step {step}");
+            assert!(reach <= full + 1.0e-6, "reach past the chain at {step}");
+            last = reach;
+        }
+    }
+
+    #[test]
+    fn soften_refuses_a_non_finite_band() {
+        let (root, mid, end) = straight_arm();
+        assert_eq!(
+            two_bone_soften(root, mid, end, target_at(0.5), [0.0, 0.0, 1.0], f32::NAN).unwrap_err(),
+            IkError::NonFinite("soften")
+        );
+    }
+
+    #[test]
+    fn aim_offset_without_an_offset_is_the_plain_look_at() {
+        let limits = AimLimits::rival();
+        for step in 0..12u8 {
+            let x = f32::from(step) * 0.6 - 3.0;
+            let to = [x, 0.4, -6.0];
+            let plain = look_at(FWD, UP, to, limits, 0.7);
+            let (aimed, reached) = aim_offset(FWD, UP, [0.0; 3], UP, to, limits, 0.7);
+            assert!(reached, "an on-axis target is aimable at {x}");
+            assert_eq!(aimed, plain, "no offset at {x}");
+        }
+    }
+
+    #[test]
+    fn aim_offset_keeps_the_same_aim_as_a_bare_target() {
+        let limits = AimLimits::rival();
+        let to = [0.0, 0.2, -6.0];
+        let bare = rotate(&FWD, &look_at(FWD, UP, to, limits, 1.0));
+        // An offset along the joint's own axis moves the aim point, not the
+        // aim: a 1.2 m shaft offset on a 6 m target keeps the axis on it.
+        let (aimed, reached) = aim_offset(FWD, UP, [0.0, 0.0, -1.2], UP, to, limits, 1.0);
+        assert!(reached);
+        let angle = crate::inertialize::acos_unit(dot(rotate(&FWD, &aimed), bare).clamp(-1.0, 1.0));
+        assert!(
+            angle.to_degrees() < 0.2,
+            "a shaft offset keeps the aim: {} deg",
+            angle.to_degrees()
+        );
+    }
+
+    #[test]
+    fn aim_offset_aims_the_offset_point_at_the_target() {
+        let limits = AimLimits::rival();
+        // The head aims 0.09 m ahead of its joint, the spear hand 0.4 m along
+        // the shaft: the joint's axis must pass through the target from the
+        // offset point, not from the joint's origin.
+        for offset in [[0.0, 0.0, -0.09], [0.0, 0.0, -0.4], [0.3, -0.2, -0.4]] {
+            let to = [0.5, 0.2, -6.0];
+            let (aimed, reached) = aim_offset(FWD, UP, offset, UP, to, limits, 1.0);
+            assert!(reached, "{offset:?}");
+            let axis = rotate(&FWD, &aimed);
+            let from_point = norm(sub(to, rotate(&offset, &aimed)));
+            let angle = crate::inertialize::acos_unit(dot(axis, from_point).clamp(-1.0, 1.0));
+            assert!(
+                angle.to_degrees() < 0.1,
+                "{offset:?} aims its offset point at the target: {} deg",
+                angle.to_degrees()
+            );
+        }
+    }
+
+    #[test]
+    fn aim_beyond_the_offset_sphere_refuses() {
+        let limits = AimLimits::rival();
+        let (q, reached) = aim_offset(FWD, UP, [0.5, 0.0, 0.0], UP, [0.0, 0.0, 0.3], limits, 1.0);
+        assert!(!reached, "the target sits inside the offset sphere");
+        assert_eq!(q, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn aim_offset_scales_with_weight_and_repeats() {
+        let limits = AimLimits::rival();
+        let args = ([0.4, 0.0, 0.0], [1.0, 0.0, 6.0]);
+        let (half, reached) = aim_offset(FWD, UP, args.0, UP, args.1, limits, 0.5);
+        assert!(reached);
+        let n =
+            (half[0] * half[0] + half[1] * half[1] + half[2] * half[2] + half[3] * half[3]).sqrt();
+        assert!((n - 1.0).abs() < 1e-6, "a unit rotation at half weight");
+        assert_ne!(
+            half,
+            [0.0, 0.0, 0.0, 1.0],
+            "half weight is not the rest pose"
+        );
+        let (zero, _) = aim_offset(FWD, UP, args.0, UP, args.1, limits, 0.0);
+        assert_eq!(zero, [0.0, 0.0, 0.0, 1.0], "weight 0 keeps the pose");
+        assert_eq!(
+            aim_offset(FWD, UP, args.0, UP, args.1, limits, 0.5),
+            (half, reached),
+            "x2 equal"
+        );
     }
 }
