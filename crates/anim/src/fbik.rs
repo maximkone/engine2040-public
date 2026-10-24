@@ -11,11 +11,11 @@
 //! poses only, steady-state allocates nothing.
 
 use super::contract::MAX_JOINTS;
-use super::feet::{
-    dist_m, lock_graph_pose, solve_two_bone, FootError, FootLocker, LegMap, LegSolution,
-};
+#[cfg(test)]
+use super::feet::solve_two_bone;
+use super::feet::{dist_m, lock_graph_pose, FootError, FootLocker, LegMap, LegSolution};
 use super::graph::Pose;
-use super::ik::fabrik;
+use super::ik::{aim_offset, fabrik, two_bone_soft, AimLimits};
 use engine_core::vec3::cross3;
 use engine_core::{quat_mul, Fnv64};
 
@@ -26,6 +26,15 @@ pub const FABRIK_ITERS: u32 = 8;
 pub const FABRIK_TOL_M: f32 = 0.001;
 /// Hand acceptance bar in millimeters: reach fixtures land inside 1 cm.
 pub const HAND_TOL_MM: u32 = 10;
+/// Soften band of the arm reach: the last 4% of the chain eases out instead
+/// of popping straight, about 25 mm on a 0.62 m arm.
+///
+/// chosen: the donor's `IKTwoBoneJob::soften` ratio is where the ease starts,
+/// so a band is `1 - soften` there. A 30% band (donor 0.3 read the other way)
+/// holds a full-length arm 58 mm short and fails the 1 cm hand bar
+/// (`reach_lands_inside_1cm_analytic_first`); 4% keeps the largest shortfall
+/// at band * 0.316 = 7.7 mm, inside the bar.
+pub const ARM_SOFTEN: f32 = 0.04;
 /// Posted cost of one analytic chain solve (closed-form pass + meters).
 pub const OPS_ANALYTIC_CHAIN: u32 = 64;
 /// Posted cost per joint per FABRIK iteration (forward + backward passes).
@@ -216,9 +225,14 @@ fn reach_on_lanes(
     let l1 = dist_m(elbow, shoulder);
     let l2 = dist_m(wrist, elbow);
     let clamped = dist_m(target, shoulder) > l1 + l2;
-    let (a_elbow, a_wrist) = solve_two_bone(shoulder, elbow, wrist, target);
+    let (a_elbow, a_wrist) = two_bone_soft(shoulder, elbow, wrist, target, ARM_SOFTEN);
     let a_err = error_mm(a_wrist, target);
     if a_err <= HAND_TOL_MM {
+        return (a_elbow, a_wrist, IkMethod::Analytic, 1, a_err, clamped);
+    }
+    // Inside the soften band the short reach is the answer by design: the ease
+    // is what stops the pop, so the FABRIK fallback must not chase past it.
+    if dist_m(target, shoulder) > (l1 + l2) * (1.0 - ARM_SOFTEN) {
         return (a_elbow, a_wrist, IkMethod::Analytic, 1, a_err, clamped);
     }
     let mut buf = [shoulder, elbow, wrist];
@@ -359,31 +373,22 @@ fn turned_rotation(pose: &Pose, joint: usize, target: [f32; 3]) -> Option<[f32; 
     Some(quat_norm(quat_mul(q, pose.rotations[joint])))
 }
 
-/// Turn `joint` so its local +Z (fighter forward) points at `target`.
-/// Returns `true` when the rotation was applied; a target sitting on the
-/// joint keeps the current rotation (`false`, still `Ok`). Positions stay.
-fn turn_to(pose: &mut Pose, joint: usize, target: [f32; 3]) -> Result<bool, FbikError> {
-    let joints = checked_joints(pose)?;
-    if joint >= joints {
-        return Err(FbikError::BadJoint(joint));
-    }
-    if !finite3(target) {
-        return Err(FbikError::NonFinite("target"));
-    }
-    match turned_rotation(pose, joint, target) {
-        Some(rotation) => {
-            pose.rotations[joint] = rotation;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
-}
+/// Aim point the head seeks, in its own frame, metres: 0.09 m ahead of the
+/// neck joint (row SW101, donor `IKAimJob` offset).
+pub const HEAD_AIM_OFFSET_M: [f32; 3] = [0.0, 0.0, 0.09];
+/// Aim point the spear hand seeks, in its own frame, metres: 0.4 m along the
+/// shaft (row SW101).
+pub const SPEAR_AIM_OFFSET_M: [f32; 3] = [0.0, 0.0, 0.4];
+/// Degrees from vertical under which the aim pole switches from world up to
+/// the joint's own forward, so a straight-up aim still has a defined twist
+/// (row SW101, chosen).
+pub const POLE_VERTICAL_DEG: f32 = 5.0;
 
 /// Look-at: turn the head joint toward `target` (rotation only, so the feet
 /// and hands stay where the reach solves put them). Returns whether the head
-/// turned; see [`turn_to`] for the on-joint rule.
+/// turned; a target sitting on the joint keeps the rotation and reads `false`.
 pub fn solve_look(pose: &mut Pose, head: usize, target: [f32; 3]) -> Result<bool, FbikError> {
-    turn_to(pose, head, target)
+    turn_to_offset(pose, head, target, HEAD_AIM_OFFSET_M)
 }
 
 /// Aim: turn the aim joint (spine or shoulder) so the weapon axis (+Z)
@@ -391,7 +396,42 @@ pub fn solve_look(pose: &mut Pose, head: usize, target: [f32; 3]) -> Result<bool
 /// balance reads the resulting spine lane. Same on-joint rule as
 /// [`solve_look`].
 pub fn solve_aim(pose: &mut Pose, joint: usize, target: [f32; 3]) -> Result<bool, FbikError> {
-    turn_to(pose, joint, target)
+    turn_to_offset(pose, joint, target, SPEAR_AIM_OFFSET_M)
+}
+
+/// The offsetted aim (SW101): the joint aims a point
+/// `offset` from its own origin, clamped to the rival cone, with world up as
+/// the pole unless the aim sits within [`POLE_VERTICAL_DEG`] of vertical.
+fn turn_to_offset(
+    pose: &mut Pose,
+    joint: usize,
+    target: [f32; 3],
+    offset: [f32; 3],
+) -> Result<bool, FbikError> {
+    let joints = checked_joints(pose)?;
+    if joint >= joints {
+        return Err(FbikError::BadJoint(joint));
+    }
+    if !finite3(target) {
+        return Err(FbikError::NonFinite("target"));
+    }
+    let to = sub3(target, pose.positions[joint]);
+    if !len3(to).is_finite() || len3(to) <= 1e-6 {
+        return Ok(false);
+    }
+    let fwd = norm3_or(quat_rot(pose.rotations[joint], [0.0, 0.0, 1.0]), UNIT_UP);
+    let up = norm3_or(quat_rot(pose.rotations[joint], [0.0, 1.0, 0.0]), UNIT_UP);
+    // The offset is authored in the joint's own frame.
+    let offset_local = quat_rot(pose.rotations[joint], offset);
+    let aim = norm3_or(to, fwd);
+    let near_vertical = aim[1].abs() > POLE_VERTICAL_DEG.to_radians().cos();
+    let pole = if near_vertical { fwd } else { UNIT_UP };
+    let (q, reached) = aim_offset(fwd, up, offset_local, pole, to, AimLimits::rival(), 1.0);
+    if !reached {
+        return Ok(false);
+    }
+    pose.rotations[joint] = quat_norm(quat_mul(q, pose.rotations[joint]));
+    Ok(true)
 }
 
 /// Soft-limit knee in degrees of head yaw: below it the head follows the
@@ -1096,20 +1136,38 @@ mod tests {
 
     #[test]
     fn look_and_aim_face_the_target() {
+        // The head aims the point 0.09 m ahead of its joint (SW101), so the
+        // joint's own axis lands a few degrees inside the bare target line:
+        // check the axis from that offset point, which is what aims.
         let mut pose = rig();
-        assert!(solve_look(&mut pose, 2, [0.6, 1.45, 0.8]).expect("look"));
-        let dir = norm3_or(sub3([0.6, 1.45, 0.8], pose.positions[2]), [0.0, 0.0, 1.0]);
-        let fwd = norm3_or(
-            quat_rot(pose.rotations[2], [0.0, 0.0, 1.0]),
-            [0.0, 0.0, 1.0],
-        );
+        let target = [0.6, 1.45, 0.8];
+        assert!(solve_look(&mut pose, 2, target).expect("look"));
+        let q = pose.rotations[2];
+        let from = {
+            let o = quat_rot(q, HEAD_AIM_OFFSET_M);
+            [
+                pose.positions[2][0] + o[0],
+                pose.positions[2][1] + o[1],
+                pose.positions[2][2] + o[2],
+            ]
+        };
+        let dir = norm3_or(sub3(target, from), [0.0, 0.0, 1.0]);
+        let fwd = norm3_or(quat_rot(q, [0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]);
         assert!(dot3(fwd, dir) > 0.999, "head {fwd:?} vs {dir:?}");
-        assert!(solve_aim(&mut pose, 1, [-0.7, 1.10, 0.9]).expect("aim"));
-        let dir = norm3_or(sub3([-0.7, 1.10, 0.9], pose.positions[1]), [0.0, 0.0, 1.0]);
-        let fwd = norm3_or(
-            quat_rot(pose.rotations[1], [0.0, 0.0, 1.0]),
-            [0.0, 0.0, 1.0],
-        );
+
+        let aim_target = [-0.7, 1.10, 0.9];
+        assert!(solve_aim(&mut pose, 1, aim_target).expect("aim"));
+        let q = pose.rotations[1];
+        let from = {
+            let o = quat_rot(q, SPEAR_AIM_OFFSET_M);
+            [
+                pose.positions[1][0] + o[0],
+                pose.positions[1][1] + o[1],
+                pose.positions[1][2] + o[2],
+            ]
+        };
+        let dir = norm3_or(sub3(aim_target, from), [0.0, 0.0, 1.0]);
+        let fwd = norm3_or(quat_rot(q, [0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]);
         assert!(dot3(fwd, dir) > 0.999, "spine {fwd:?} vs {dir:?}");
         // Rotations stay unit; positions untouched by look/aim.
         for q in pose.rotations.iter() {
@@ -1117,15 +1175,17 @@ mod tests {
             assert!((n2 - 1.0).abs() < 1e-5, "{q:?}");
         }
         assert_eq!(pose.positions, rig().positions);
-        // Antipodal target (straight behind) still faces within tolerance.
+        // A target straight behind clamps to the rival cone (SW101) instead
+        // of turning the head around.
         let mut pose = rig();
         assert!(solve_look(&mut pose, 2, [0.0, 1.50, -2.0]).expect("behind"));
-        let dir = norm3_or(sub3([0.0, 1.50, -2.0], pose.positions[2]), [0.0, 0.0, 1.0]);
         let fwd = norm3_or(
             quat_rot(pose.rotations[2], [0.0, 0.0, 1.0]),
             [0.0, 0.0, 1.0],
         );
-        assert!(dot3(fwd, dir) > 0.999, "behind {fwd:?}");
+        let yaw_deg = fwd[0].atan2(fwd[2]).to_degrees().abs();
+        assert!(yaw_deg <= 75.0, "the cone holds the head at {yaw_deg} deg");
+        assert_eq!(pose.positions, rig().positions);
         // On-joint target keeps the rotation and reports false.
         let mut pose = rig();
         let head_pos = pose.positions[2];
@@ -1925,6 +1985,23 @@ mod tests {
             "NS6 carry: climb edge ticks={ticks} loads={} hash=0x{:016x}",
             first.len(),
             first[ticks - 1]
+        );
+    }
+
+    #[test]
+    fn fbik_wire_reach_softens_the_last_centimetres_instead_of_popping() {
+        // The arm path the combat reach tick runs: a 0.62 m chain reaching for
+        // a target twice its length stays a curve, with no FABRIK chase.
+        let (shoulder, elbow, wrist) = ([0.0, 1.4, 0.0], [0.0, 1.1, 0.0], [0.0, 0.78, 0.0]);
+        let far = [0.0, 0.2, 0.0];
+        let (_, end, method, passes, _, clamped) = reach_on_lanes(shoulder, elbow, wrist, far);
+        assert!(matches!(method, IkMethod::Analytic), "no fallback");
+        assert_eq!(passes, 1, "one analytic pass inside the band");
+        assert!(clamped, "the target is beyond the chain");
+        let reach = dist_m(end, shoulder);
+        assert!(
+            (0.619..0.62).contains(&reach),
+            "held a hair short of the chain: {reach}"
         );
     }
 }
