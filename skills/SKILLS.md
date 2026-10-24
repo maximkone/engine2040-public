@@ -1,4 +1,4 @@
-# Skills - 30 skills in skills/ (none in .opencode/skills/)
+# Skills - 31 skills in skills/ (none in .opencode/skills/)
 
 New here? Read `skills/START-HERE.md` first (the core map and task-to-skill router).
 
@@ -10,6 +10,7 @@ Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing tr
 
 | skill | when |
 |---|---|
+| fleet-lead | you lead helper agents in OpenChamber or OpenCode: spawn children, watch stuck or slow ones, judge and tick rows, merge hunter rows, archive sessions |
 | commit-and-board | commit or push on the shared tree, write a board row, close a row (`Landed <sha7>`, evidence) or log progress, plan rows, add a doc that needs an index line |
 | github-check | any cargo test, clippy or check proof, a red gate or CI check, a link failure, a blocked local cargo lock; the odd gh-check messages (exit 2 or 3, 0 tests, push or dispatch errors) |
 | rust-quality-ratchet | the pre-commit hook refused, `tools/rust-quality.mjs` FAIL, casts, long fns, big files; tighten or accept |

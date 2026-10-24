@@ -248,3 +248,9 @@ mod tests {
         assert!(light().scaled(-1.0).is_err());
     }
 }
+
+/// SW5: the vertex-rate twin of the torch sum. `quality::TorchLighting::Vertex`
+/// picks it on the potato row, `shaders/forward_torch_vertex.wgsl` runs it on
+/// the GPU, and this module is the CPU model its accept measures. Std-only.
+#[path = "torch_vertex.rs"]
+pub mod vertex;
