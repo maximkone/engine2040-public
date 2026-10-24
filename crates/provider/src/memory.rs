@@ -248,7 +248,10 @@ impl fmt::Display for MemoryError {
             }
             Self::NoFact { id } => write!(f, "memory share refused: no fact has id {id}"),
             Self::NotYours { id } => {
-                write!(f, "memory share refused: fact {id} belongs to another session")
+                write!(
+                    f,
+                    "memory share refused: fact {id} belongs to another session"
+                )
             }
             Self::Malformed { line } => write!(f, "memory store line {line} is malformed"),
             Self::SequenceExhausted => f.write_str("memory store tick counter is exhausted"),
@@ -540,9 +543,7 @@ mod tests {
         assert!(store.recall(2).is_empty(), "a private fact never leaks");
 
         // A foreign session cannot share it, and the store does not change.
-        let foreign = store
-            .share(2, id)
-            .expect_err("another session's fact");
+        let foreign = store.share(2, id).expect_err("another session's fact");
         assert_eq!(foreign.code(), "memory_not_yours");
         assert!(store.recall(2).is_empty());
 
