@@ -355,6 +355,41 @@ mod tests {
     }
 
     #[test]
+    fn stable_ids_and_divergences_print_and_report_their_raw_value() {
+        assert_eq!(StableId::slot(7).raw(), 7, "raw is the id it was built from");
+        assert_eq!(StableId::slot(0x2a).to_string(), "stable:000000000000002a");
+        let found = Divergence {
+            tick: 5,
+            id: StableId::slot(2),
+        };
+        assert_eq!(
+            found.to_string(),
+            "divergence at tick 5 id stable:0000000000000002"
+        );
+    }
+
+    #[test]
+    fn with_capacity_leaves_no_growth_for_the_named_ticks() {
+        let mut chain = DigestChain::with_capacity(4, 4);
+        let ((), heap) = measure(|| {
+            for tick in 0..4u32 {
+                chain.push_tick(tick, &[(StableId::slot(0), u64::from(tick))]);
+            }
+            std::hint::black_box(chain.tick_count());
+        });
+        assert_eq!(heap.calls, 0, "the chain was sized at construction");
+        assert_eq!(chain.ticks().len(), 4, "every recorded tick is listed");
+        assert_eq!(
+            chain.ticks()[3],
+            TickDigest {
+                tick: 3,
+                digest: chain.digest()
+            },
+            "the last entry is the running digest"
+        );
+    }
+
+    #[test]
     fn width_pads_to_a_power_of_two_and_root_summarises() {
         assert_eq!(MerkleDigest::from_leaves(&[]).width(), 1);
         assert_eq!(MerkleDigest::from_leaves(&[7]).width(), 1);
