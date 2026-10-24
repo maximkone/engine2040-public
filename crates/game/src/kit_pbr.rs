@@ -60,6 +60,20 @@ pub fn pbr_for_file(file: &str) -> Option<KitPbr> {
     })
 }
 
+/// RL51: the surface detail a kit file's mesh takes in the forward shader. The
+/// sand floor gets hex-tiled maps and sand patches; the stone files (walls,
+/// stands, debris, the paved gate tunnel) get hex-tiled maps, weathering and
+/// dust on the foot; the crate, the torch and the banner keep the plain taps
+/// (their UVs are one chart each, not a tiled plane).
+pub fn surface_detail_for_file(file: &str) -> engine_render::hextile::SurfaceDetail {
+    use engine_render::hextile::SurfaceDetail;
+    match file {
+        "sand_floor.gltf" => SurfaceDetail::Floor,
+        "walls.gltf" | "stands.gltf" | "debris.gltf" | "gate_tunnel.gltf" => SurfaceDetail::Wall,
+        _ => SurfaceDetail::None,
+    }
+}
+
 /// The shape one cooked map reaches the GPU in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CookedShape {

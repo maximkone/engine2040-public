@@ -34,6 +34,12 @@ const DUNE: PbrMaterial = PbrMaterial {
     exposure: 1.0,
 };
 
+/// A ground band's material: the dune surface with the band's colour (SD8). Sand keeps
+/// [`DUNE`]'s colour; grass and rock are the same sand with their own colour.
+fn ground_material(base_color: [f32; 3]) -> PbrMaterial {
+    PbrMaterial { base_color, ..DUNE }
+}
+
 /// How a building looks: a flat colour (dune towers) or a New York facade style.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Look {
@@ -245,7 +251,12 @@ impl Stage {
 
     fn upload_ground(&mut self, presenter: &mut Presenter) -> Result<(), String> {
         let draws = match &self.ground {
-            Ground::Dunes(t) => t.meshes()?.into_iter().map(|m| (m, DUNE)).collect(),
+            // SD8: one mesh per slope band, drawn with that band's colour.
+            Ground::Dunes(t) => t
+                .meshes()?
+                .into_iter()
+                .map(|(mesh, colour)| (mesh, ground_material(colour)))
+                .collect(),
             Ground::Nyc(city) => city.ground_draws()?,
         };
         for (i, (mesh, material)) in draws.into_iter().enumerate() {
