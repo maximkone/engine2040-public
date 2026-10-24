@@ -1,7 +1,7 @@
 //! proxy_rig: the potato tier's cheap rig. A shipped fighter draws its body
 //! with 43 joints and up to four influences a vertex; the low tier cannot pay
 //! that, so this module folds the authored rig into at most
-//! [`MAX_PROXY_BONES`] bones and keeps the silhouette.
+//! [`MAX_PROXY_BONES`](crate::proxy_rig::MAX_PROXY_BONES) bones and keeps the silhouette.
 //!
 //! Consumer: the low-tier body cook, before the render skin is built; the tick
 //! never reads this module. Data owner: `engine-assets`; the rig and pose types
@@ -19,7 +19,7 @@
 //! normalized, so the deformation follows the dominant authored bones. The
 //! output is ordered vectors only; no hash map is built or returned.
 //!
-//! Pose: [`fold_pose`] keeps each kept bone's world transform, so a clip baked
+//! Pose: [`fold_pose`](crate::proxy_rig::fold_pose) keeps each kept bone's world transform, so a clip baked
 //! on the full rig plays on the proxy rig with no retarget. Only the motion of
 //! the merged bones is dropped, and that is the tier's cost.
 //!
@@ -32,6 +32,11 @@ use std::fmt;
 
 /// Most bones a proxy rig carries: the low tier's skinning budget.
 pub const MAX_PROXY_BONES: usize = 16;
+/// Far-tier frame height the silhouette budget is measured on: the page's
+/// 1080p view.
+pub const FAR_VIEW_H: u32 = 1080;
+/// Far-tier vertical field of view in degrees: the presenter camera at 60 m.
+pub const FAR_FOV_Y_DEG: f32 = 50.0;
 /// Influences per vertex row; mirrors the A3 row the render skin uploads.
 pub const INFLUENCES: usize = 4;
 /// Proxy byte-image magic (`PXR1` in little-endian order).
@@ -105,7 +110,7 @@ pub enum ProxyRigError {
         /// Offending joint index.
         joint: usize,
     },
-    /// A weight row does not sum to one within [`WEIGHT_SUM_EPS`].
+    /// A weight row does not sum to one within `WEIGHT_SUM_EPS`.
     BadWeightSum {
         /// Vertex row index.
         vertex: usize,
@@ -264,6 +269,12 @@ impl ProxyRig {
         hash.write(&self.to_bytes());
         hash.finish()
     }
+
+    /// The fold's palette as `(source joints, proxy bones)`: the far tier's
+    /// receipt number (43 -> 15 for the shipped CT7 hero).
+    pub fn palette(&self) -> (usize, usize) {
+        (self.source_joints, self.skeleton.len())
+    }
 }
 
 /// One length as a `u32` byte field; a rig never reaches the impossible tail.
@@ -282,6 +293,17 @@ fn pack_parent(parent: Option<usize>) -> [u8; 2] {
         Some(parent) => u16::try_from(parent).unwrap_or(NO_PARENT).to_le_bytes(),
         None => NO_PARENT.to_le_bytes(),
     }
+}
+
+/// Screen error in pixels of a world-space `error_m` seen `distance_m` away
+/// through a `fov_y_deg` lens on a `viewport_h` px tall frame. One metre spans
+/// `(viewport_h / 2) / (tan(fov_y / 2) * distance_m)` pixels, so one pixel is
+/// about 5.2 cm at 60 m on the far tier's 1080p frame. `distance_m` must be
+/// positive; a height past `u16::MAX` counts as `u16::MAX`.
+pub fn silhouette_px(error_m: f32, distance_m: f32, viewport_h: u32, fov_y_deg: f32) -> f32 {
+    let half_h = f32::from(u16::try_from(viewport_h).unwrap_or(u16::MAX)) * 0.5;
+    let px_per_m = half_h / ((fov_y_deg.to_radians() * 0.5).tan() * distance_m);
+    error_m * px_per_m
 }
 
 /// World transform per joint: position plus rotation, parents first.
@@ -1286,6 +1308,102 @@ mod tests {
         );
         assert!(mean <= 0.02, "mean error {mean} m is over 2 cm");
         assert!(worst <= 0.05, "worst error {worst} m is over 5 cm");
+    }
+
+    #[test]
+    fn the_far_proxy_palette_is_under_seventeen_and_a_pixel_at_sixty_metres() {
+        let (skeleton, positions, rotations) = hero_rig();
+        let (points, joints, weights) = potato_body(&skeleton, &positions, &rotations);
+        let rig = bake_proxy_rig(
+            &skeleton,
+            &positions,
+            &rotations,
+            &joints,
+            &weights,
+            &PROXY_KEEP,
+        )
+        .expect("the fighter bakes");
+        let (source, palette) = rig.palette();
+        assert_eq!(source, 43, "the shipped hero body skins 43 joints");
+        // The row asks for 17 roles; the shipped keep list carries 15 and the cap is 16. This
+        // proves the palette the fold really produces, not a count it never reached.
+        assert_eq!(palette, PROXY_KEEP.len(), "one proxy bone per kept name");
+        assert!(
+            palette <= MAX_PROXY_BONES,
+            "a palette of {palette} bones over the low tier's {MAX_PROXY_BONES}"
+        );
+
+        let bind = posed(&skeleton, &positions, &rotations);
+        let proxy_bind = posed(&rig.skeleton, &rig.bind.positions, &rig.bind.rotations);
+        let pose = hero_swing(&skeleton, &positions, &rotations);
+        let proxy_pose = fold_pose(&skeleton, &rig.plan, &pose).expect("the pose folds");
+        let full_posed = posed(&skeleton, &pose.positions, &pose.rotations);
+        let proxy_posed = posed(&rig.skeleton, &proxy_pose.positions, &proxy_pose.rotations);
+
+        let count = f32::from(u16::try_from(points.len()).expect("the body fits a u16"));
+        let mut total = 0.0f32;
+        let mut worst = 0.0f32;
+        for (vertex, point) in points.iter().enumerate() {
+            let full_point = skinned(
+                *point,
+                &joints[vertex],
+                &weights[vertex],
+                &bind,
+                &full_posed,
+            );
+            let proxy_point = skinned(
+                *point,
+                &rig.skin.joints[vertex],
+                &rig.skin.weights[vertex],
+                &proxy_bind,
+                &proxy_posed,
+            );
+            let error = distance(full_point, proxy_point);
+            total += error;
+            if error > worst {
+                worst = error;
+            }
+        }
+        let mean = total / count;
+        let mean_px = silhouette_px(mean, 60.0, FAR_VIEW_H, FAR_FOV_Y_DEG);
+        let worst_px = silhouette_px(worst, 60.0, FAR_VIEW_H, FAR_FOV_Y_DEG);
+        eprintln!(
+            "proxy_rig far tier: source={source} palette={palette} mean_px={mean_px:.3} worst_px={worst_px:.3} mean_error_cm={:.3} worst_error_cm={:.3}",
+            mean * 100.0,
+            worst * 100.0
+        );
+        assert!(
+            worst_px < 1.0,
+            "silhouette error {worst} m is {worst_px} px at 60 m"
+        );
+    }
+
+    #[test]
+    fn the_silhouette_pixel_law_matches_the_camera_table() {
+        let px_per_m = silhouette_px(1.0, 60.0, FAR_VIEW_H, FAR_FOV_Y_DEG);
+        // 540 px of half-frame over tan(25 deg) * 60 m: 19.3 px per metre at 60 m.
+        assert!(
+            (px_per_m - 19.3).abs() < 0.05,
+            "{px_per_m} px per metre at 60 m"
+        );
+        assert_eq!(
+            silhouette_px(0.0, 60.0, FAR_VIEW_H, FAR_FOV_Y_DEG),
+            0.0,
+            "no world error is no pixels"
+        );
+        let one_px = silhouette_px(0.052, 60.0, FAR_VIEW_H, FAR_FOV_Y_DEG);
+        assert!((one_px - 1.0).abs() < 0.05, "5.2 cm at 60 m is {one_px} px");
+        // Linear in the world error, inverse in the distance: the two ways the law can drift.
+        let doubled = silhouette_px(0.104, 60.0, FAR_VIEW_H, FAR_FOV_Y_DEG);
+        assert!(
+            (doubled - 2.0 * one_px).abs() < 1e-4,
+            "twice the error is twice the pixels: {doubled}"
+        );
+        let nearer = silhouette_px(0.052, 30.0, FAR_VIEW_H, FAR_FOV_Y_DEG);
+        assert!(
+            (nearer - 2.0 * one_px).abs() < 1e-4,
+            "half the distance doubles the pixels: {nearer}"
+        );
     }
 
     #[test]
