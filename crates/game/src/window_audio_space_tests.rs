@@ -250,6 +250,122 @@ fn window_audio_space_the_crowd_bed_rides_the_outcome_gain() {
 }
 
 #[test]
+fn window_audio_space_a_cheer_queues_one_crowd_cheer_inside_the_cooldown() {
+    // LOUD: the crowd's own reaction table owns the spacing (a cheer every
+    // 45 ticks); this module plays one `crowd_cheer` per reaction it is
+    // handed, so a burst inside the cooldown is one play, not one per cue.
+    let (mut tx, mut rx) = feed(256, bank());
+    let cheer = tx.bank().id(cue_names::CROWD_CHEER).expect("cheer cue");
+    let mut space = AudioSpace::with_parts(SpaceParts {
+        bed: true,
+        ..SpaceParts::EVENTS_ONLY
+    });
+    let mut crowd = engine_audio::Crowd::new();
+    let mut plays = Vec::new();
+    let parried = FightCue::Parried {
+        attacker: 0,
+        victim: 1,
+    };
+    let mut fire = |space: &mut AudioSpace, tick: u32, reaction: Reaction, plays: &mut Vec<u32>| {
+        let mut outcome = outcome_with(Vec::new());
+        outcome.reactions.push(reaction);
+        space.feed(&mut tx, tick, &outcome, &[]);
+        while let Some(command) = rx.pop() {
+            if let Command::Play(play) = command {
+                if play.cue == cheer {
+                    plays.push(tick);
+                }
+            }
+        }
+    };
+    // Two parries inside the cooldown: the table answers one cheer.
+    for tick in 0..3u32 {
+        let reaction = crowd.on_fight_event(parried);
+        if tick == 0 {
+            assert!(
+                matches!(reaction, Reaction::Cheer { .. }),
+                "a parry is a cheer, got {reaction:?}"
+            );
+        }
+        fire(&mut space, tick, reaction, &mut plays);
+        crowd.tick();
+    }
+    assert_eq!(plays, vec![0], "one cheer inside the cooldown");
+    // Past the cooldown the next parry cheers again.
+    for tick in 3..50u32 {
+        let reaction = crowd.on_fight_event(parried);
+        fire(&mut space, tick, reaction, &mut plays);
+        crowd.tick();
+    }
+    assert_eq!(
+        plays.len(),
+        2,
+        "a second cheer after the cooldown: {plays:?}"
+    );
+    assert!(plays[1] >= 45, "not before CHEER_COOLDOWN_TICKS: {plays:?}");
+    assert_eq!(
+        usize::try_from(space.stats().cheers).expect("plays fit"),
+        plays.len()
+    );
+}
+
+#[test]
+fn window_audio_space_a_hit_boos_and_a_dodge_gasps_on_their_own_cues() {
+    // LOUD: the two other crowd reactions have recorded takes now. A hit is
+    // an `Ooh` (the crowd turns) and a dodge a `Gasp` (a near miss); each
+    // plays its own cue over the bed, spaced by the reaction table.
+    let (mut tx, mut rx) = feed(256, bank());
+    let boo = tx.bank().id(cue_names::CROWD_BOO).expect("boo cue");
+    let gasp = tx.bank().id(cue_names::CROWD_GASP).expect("gasp cue");
+    let mut space = AudioSpace::with_parts(SpaceParts {
+        bed: true,
+        ..SpaceParts::EVENTS_ONLY
+    });
+    let mut crowd = engine_audio::Crowd::new();
+    let mut fired = Vec::new();
+    let mut fire = |space: &mut AudioSpace,
+                    crowd: &mut engine_audio::Crowd,
+                    tick: u32,
+                    event: FightCue,
+                    fired: &mut Vec<(&str, u32)>| {
+        let reaction = crowd.on_fight_event(event);
+        let mut outcome = outcome_with(Vec::new());
+        outcome.reactions.push(reaction);
+        space.feed(&mut tx, tick, &outcome, &[]);
+        while let Some(command) = rx.pop() {
+            if let Command::Play(play) = command {
+                if play.cue == boo {
+                    fired.push(("boo", tick));
+                } else if play.cue == gasp {
+                    fired.push(("gasp", tick));
+                }
+            }
+        }
+    };
+    let hit = FightCue::Hit {
+        attacker: 0,
+        victim: 1,
+        damage: 12,
+    };
+    let dodged = FightCue::Dodged {
+        attacker: 0,
+        victim: 1,
+    };
+    fire(&mut space, &mut crowd, 0, hit, &mut fired);
+    // The table's clock is its own `tick`; advance it past the 6-tick global
+    // cooldown so the dodge is a fresh reaction, not a swallowed one.
+    for _ in 0..7 {
+        crowd.tick();
+    }
+    fire(&mut space, &mut crowd, 7, dodged, &mut fired);
+    assert_eq!(
+        fired,
+        vec![("boo", 0), ("gasp", 7)],
+        "each reaction its cue"
+    );
+}
+
+#[test]
 fn window_audio_space_walking_fighters_step_on_the_surface_cue() {
     let (mut tx, mut rx) = feed(256, bank());
     let mut space = AudioSpace::with_parts(SpaceParts {
