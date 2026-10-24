@@ -237,6 +237,7 @@ impl FighterLook {
             slots: vec![SlotAnim::new(); MAX_LOOK_FIGHTERS],
             bridge: bridge_slots(),
             trails: TrailRing::new(),
+            clip_events: ClipEventLane::new(),
             tick: 0,
             swing_ticks,
             bundle_shas,

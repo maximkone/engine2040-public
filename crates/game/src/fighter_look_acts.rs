@@ -274,6 +274,9 @@ impl FighterLook {
         self.fold_cues(tick, cues, replaying);
         self.fold_acts(tick, views, hp, cues, elapsed, live);
         self.fold_switches(&before, elapsed);
+        // BG5: a run slot's phase crossed a foot plant this tick: hand the
+        // audio feed the step on this exact tick. Presentation only.
+        self.step_clip_events(tick, replaying);
         // LF12: step each slot's planted feet from the clip's end-of-tick
         // ankles, after the switch offsets so a plant reads the shown pose.
         self.fold_feet(elapsed);
@@ -606,7 +609,7 @@ impl FighterLook {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Act, FighterLook, SlotAnim, MAX_LOOK_FIGHTERS};
+    use super::super::{Act, ClipEventLane, FighterLook, SlotAnim, MAX_LOOK_FIGHTERS};
     use super::{bridge_slots, hold_frozen};
     use crate::weapon_trail::TrailRing;
     use crate::FighterView;
@@ -629,6 +632,7 @@ mod tests {
             slots: vec![SlotAnim::new(); MAX_LOOK_FIGHTERS],
             bridge: bridge_slots(),
             trails: TrailRing::new(),
+            clip_events: ClipEventLane::new(),
             tick: 0,
             swing_ticks: 12,
             bundle_shas: Vec::new(),

@@ -34,6 +34,7 @@ use self::windowed_captions::{caption_strip, push_caption_tick};
 use super::audio_mix::{Material, MixBridge, MixVoice, VoiceSeed, Wall, MAX_MIX_VOICES};
 use super::camera::DirectorParams;
 use super::camera_feed::PresentationFeed;
+use super::clip_events::ClipFootstep;
 #[cfg(test)]
 use super::pad::poll_gilrs_once;
 #[cfg(any(debug_assertions, test))]
@@ -980,18 +981,19 @@ pub fn stage_arena_bank(sample_rate: u32) -> Result<(Arc<CueBank>, bool), WinErr
 
 /// Queue one tick through the feed with the room's shape (EG21w): the
 /// listener at the camera, each fight event as its named cue placed at the
-/// fighter it happened to, footsteps on the floor's surface cue, the tension
-/// level and the crowd bed gain from the outcome.
+/// fighter it happened to, run clip footstep events (BG5), footsteps on the
+/// floor's surface cue, the tension level and the crowd bed gain from the
+/// outcome.
 ///
 /// Consumer: the `arena` window, once per fixed tick, instead of the lossy
 /// `try_lock` hand-off. Data owner: the feed owns the queue, `space` owns the
 /// camera seat and the stride/tension/bed state, the game owns `views`
-/// (`App::fighter_views`, meters) and the outcome. Units: `tick` is the fixed
-/// tick the outcome ran on; positions leave as centimeters. Determinism: same
-/// outcomes, views and camera queue the same commands (presentation only,
-/// never hashed). Errors: never fails: a full ring or a cue the bank lacks is
-/// counted in `FeedStats` (`dropped_full`, `unknown_cue`), never dropped
-/// silently.
+/// (`App::fighter_views`, meters), the outcome and the look's `clip_steps`.
+/// Units: `tick` is the fixed tick the outcome ran on; positions leave as
+/// centimeters. Determinism: same outcomes, views, clip steps and camera
+/// queue the same commands (presentation only, never hashed). Errors: never
+/// fails: a full ring or a cue the bank lacks is counted in `FeedStats`
+/// (`dropped_full`, `unknown_cue`), never dropped silently.
 /// Caller: `crates/game/src/bin/arena_frame/mod.rs::ArenaApp::run_sim_ticks`.
 pub fn feed_tick_audio(
     tx: &mut FeedTx,
@@ -999,7 +1001,9 @@ pub fn feed_tick_audio(
     tick: u32,
     outcome: &TickOutcome,
     views: &[FighterView],
+    clip_steps: &[ClipFootstep],
 ) {
+    space.feed_clip_steps(tx, tick, clip_steps, views);
     space.feed(tx, tick, outcome, views);
 }
 
@@ -2860,7 +2864,8 @@ mod tests {
         for tick in 0..10 {
             let input = fighter_input_from_pressed(tick, human, &[], &bindings);
             let outcome = app.tick(input);
-            feed_tick_audio(&mut tx, &mut space, tick, &outcome, app.fighter_views());
+            let views = app.fighter_views();
+            feed_tick_audio(&mut tx, &mut space, tick, &outcome, views, &[]);
             let mut stereo = [0.0f32; 2];
             engine.render_stereo_into(&mut stereo);
         }

@@ -69,6 +69,9 @@ pub mod capture;
 /// sheet, with the schema rules the loader refuses instead of patching.
 /// Std-only; setup IO, never on the tick.
 pub mod class_sheet;
+/// The run clip's authored footstep events, mapped onto `engine-anim`'s
+/// frame-exact event lane and played by the audio feed. Std-only.
+pub mod clip_events;
 /// Dev console: read-only door verbs, pause/step/slow, set-knob; never hashed.
 pub mod console;
 /// Crash reports to a local file: version, adapter, tape tail,

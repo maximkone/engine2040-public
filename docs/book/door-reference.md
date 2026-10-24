@@ -931,8 +931,9 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `pixel` | `Option<[u32; 2]>` | no |  | Question 1: pixel [x, y] to read; answers the object or the floor point there. |
 | `object` | `Option<String>` | no |  | Question 2: object label (`lamp_2 [uuid]`) to find in the frame. |
 | `cell` | `Option<u32>` | no |  | `1..=4096`; Question 3: cell edge in pixels; answers the frame as rectangles of objects. |
+| `mark` | `Option<u64>` | no |  | Question 4: a mark id from `view.observe` (a body slot) to find in the frame. |
 
-<details><summary>12 typed refusals</summary>
+<details><summary>13 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -940,10 +941,11 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `bad_camera` | fov_cdeg {fov_cdeg} is outside 100..=17900 (1 to 179 degrees) |
 | `bad_camera` | pitch_cdeg {pitch_cdeg} is outside -8999..=8999 (straight down to straight up) |
 | `bad_cell` | cell {cell} must make 1..=4096 samples of a {}x{} frame; send a cell of at least {least} |
-| `bad_pixel` | pixel {x},{y} is outside the {}x{} frame; send x in 0..{} and y in 0..{} |
 | `no_pose` | {object} has no finite position; place it first with scene.place |
+| `unknown_actor` | mark {mark} names no drawn body; legal marks are 0..={} for the {count} staged objects: re-run view.observe and pick one of its marks |
+| `bad_pixel` | pixel {x},{y} is outside the {}x{} frame; send x in 0..{} and y in 0..{} |
 | `bad_cell` | cell {cell} makes no samples |
-| `bad_pick` | send exactly one of pixel, object or cell; pixel reads one point, object finds a label in the frame, cell lists the frame as regions |
+| `bad_pick` | send exactly one of pixel, object, cell or mark; pixel reads one point, object finds a label in the frame, cell lists the frame as regions, mark finds one view.observe mark |
 | `unknown_actor` | object `{object}` names no staged object ({} staged; re-read scene.brief for the staged labels) |
 | `ambiguous_name` | name `{object}` is shared by {} objects; send one label with its bracketed id: {} |
 | `bad_id` | {field} `{text}` holds bracket text that is not an object id (expected `name [uuid]` or bare UUID text; re-read scene.brief for the staged labels) |
@@ -2646,7 +2648,7 @@ Listed in a fresh session: no, call `api.load` with `view`. Source: `crates/endp
 - **Scope:** `observe` · read-only · pack `view` is listed after `api.load`
 - **Undo:** none: read-only
 - **Source:** `crates/endpoint/src/packs/view.rs`
-- **Returns:** `ViewCompareOutput` with `width`, `height`, `ssim_x10000`, `flip_x10000`, `mean_de_x100`, `hist_tv_x10000`, `hist_emd_x10000`, `ssimulacra2_x10000`, `diff_png`, `region`, `rect`
+- **Returns:** `ViewCompareOutput` with `width`, `height`, `ssim_x10000`, `flip_x10000`, `mean_de_x100`, `hist_tv_x10000`, `hist_emd_x10000`, `ssimulacra2_x10000`, `diff_png`, `score_x10000`, `region`, `rect`
 
 **Arguments** (`ViewCompareArgs`):
 
@@ -2656,8 +2658,9 @@ Listed in a fresh session: no, call `api.load` with `view`. Source: `crates/endp
 | `right` | `String` | yes |  |  |
 | `diff` | `Option<String>` | no |  |  |
 | `region` | `Option<CompareRegion>` | no |  |  |
+| `ignore` | `Option<Vec<CompareRegion>>` | no |  |  |
 
-**Typed refusals:**
+<details><summary>11 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -2669,6 +2672,11 @@ Listed in a fresh session: no, call `api.load` with `view`. Source: `crates/endp
 | `bad_image` | region does not crop: {error} |
 | `bad_image` | frames do not compare: {error} |
 | `write_failed` | could not write diff `{rel}` under the project root ({why}); re-run with a writable path such as target/reports/diff.png |
+| `bad_args` | ignore names a full-frame region: legal entries are rectangles {"kind":"rect","x":..,"y":..,"w":..,"h":..} inside the frame; re-run without that entry or with a rect |
+| `bad_args` | ignored rect {}x{} at ({},{}) does not fit the {}x{} frame; re-run with a rect inside the picture |
+| `bad_args` | the resolved region and the ignored rects leave no pixel to score: re-run with a wider region or a smaller ignore list |
+
+</details>
 
 ## Pack `net`
 
@@ -3841,7 +3849,7 @@ Listed in a fresh session: no, call `api.load` with `world`. Source: `crates/end
 
 ## Coverage
 
-117 tools parsed, 922 refusal rows printed, 0 declarations the parser could not read.
+117 tools parsed, 926 refusal rows printed, 0 declarations the parser could not read.
 A verb whose handler converts a typed error defined in another file (the log tools, the level builder) shows fewer refusals than it can return, and a handler whose call graph passes the 500-function walk stops there; the tests next to its source are the full list.
 
 Tools with no refusal site found: `note.pin.list`, `note.pin.clear`, `wound.table.get`, `material.list`, `asset.generate`, `rules.get`, `door.status`, `perf.doctor`, `settings.get`, `session.activity`, `codex.search`.

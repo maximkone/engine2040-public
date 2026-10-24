@@ -819,6 +819,51 @@ fn planted_feet_hold_their_spot_in_a_real_duel() {
     }
 }
 
+#[test]
+fn bg5_a_steady_run_hands_its_foot_plants_to_the_audio_side() {
+    // The runner moves at the reference speed, so the run clip plays at its
+    // authored rate: one clip tick a sim tick. The lane hands the audio feed
+    // its two plants an eighth and five eighths into the cycle, then again
+    // one half cycle later, on the sim tick each phase crossed them.
+    let mut look = loaded_look(true);
+    let hp = [1000u16, 1000];
+    let mut x = -3.0f32;
+    let (mut first_run, mut steps) = (None, Vec::new());
+    for tick in 0..=90u32 {
+        if tick > 0 {
+            x += RUN_REF_M_PER_TICK;
+        }
+        look.observe_tick(tick, &[view(0, x, 0.0), view(1, 5.0, 0.0)], &hp, &[]);
+        if first_run.is_none() && look.slots[0].act == Act::Run {
+            first_run = Some(tick);
+        }
+        steps.extend(
+            look.clip_footsteps()
+                .iter()
+                .map(|step| (step.tick, step.slot)),
+        );
+    }
+    let first_run = first_run.expect("the runner starts");
+    let cycle_ticks = look.rigs[look.rig_for_slot(0)].clips[1].duration * TICK_HZ;
+    eprintln!("bg5 plants: {steps:?}, first run {first_run}, cycle {cycle_ticks} ticks");
+    assert!(steps.len() >= 3, "a run plants its feet: {steps:?}");
+    assert!(steps.iter().all(|&(_, slot)| slot == 0), "{steps:?}");
+    // One tick of slack: the phase is a float sum of speeds.
+    let close = |got: u32, want: f32| (got as f32 - want).abs() <= 1.0;
+    assert!(
+        close(steps[0].0, first_run as f32 + cycle_ticks / 8.0),
+        "first plant {} is an eighth cycle after the run start: {steps:?}",
+        steps[0].0
+    );
+    for pair in steps.windows(2) {
+        let gap = pair[1].0 - pair[0].0;
+        assert!(
+            close(gap, cycle_ticks / 2.0),
+            "plants sit half a cycle apart: {pair:?} of {steps:?}"
+        );
+    }
+}
+
 /// A look with the plant switched `ik` (on or off) and no match behind it.
 fn loaded_look(ik: bool) -> FighterLook {
     let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");

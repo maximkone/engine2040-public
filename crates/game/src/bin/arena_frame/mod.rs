@@ -418,16 +418,24 @@ impl ArenaApp {
             self.latency.note_sim_submitted(Instant::now());
             debug_assert!(self.tick_scratch.input_accepted);
             self.publish_seat(tick);
+            // The look folds before the feed: the feed plays the run clip's
+            // footstep events (BG5) the look stepped on this tick.
+            self.fold_look_tick(tick);
             // Lock-free feed first (tick-stamped, bounded, `dropped_full`
             // counted): a busy mixer never loses commands because the feed
             // already queued them with the camera listener.
             if let Some(tx) = self.feed_tx.as_mut() {
+                let clip_steps = self
+                    .look
+                    .as_ref()
+                    .map_or(&[][..], |look| look.clip_footsteps());
                 feed_tick_audio(
                     tx,
                     &mut self.audio_space,
                     tick,
                     &self.tick_scratch,
                     self.app.fighter_views(),
+                    clip_steps,
                 );
             }
             // Offline mirror into the shared mixer (best effort), only while
@@ -459,9 +467,36 @@ impl ArenaApp {
         }
     }
 
+    /// The look after one sim tick: the per-slot fold plus the spear scene
+    /// and the live balance poll. Runs before the audio feed so the feed can
+    /// play the run clip's footstep events this tick stepped (BG5).
+    /// Presentation only; never writes the sim.
+    fn fold_look_tick(&mut self, tick: u32) {
+        let Some(look) = self.look.as_mut() else {
+            return;
+        };
+        let (views, hp) = (self.app.fighter_views(), self.app.hp());
+        look.observe_hitstop(tick, &self.tick_scratch.cues, self.app.hitstop_remaining());
+        observe_tick_with_sim(
+            look,
+            tick,
+            views,
+            hp,
+            &self.tick_scratch.cues,
+            &self.tick_scratch.lands,
+            None,
+        );
+        if let Some(scene) = self.spear.scene.as_mut() {
+            scene.observe_tick(look, self.app.live_match(), views);
+        }
+        // EG45: poll authoritative balance gaits into the pose (presentation only).
+        look.observe_live_balances(self.app.live_match(), usize::from(self.config.fighters));
+    }
+
     /// Presentation after one sim tick: the staged tally, feel and fight fx,
-    /// the look and the break picture with its sound. Reads the tick's
-    /// outcome and writes no sim field, so a capture repeats.
+    /// the spear cues, the look's pop check and the break picture with its
+    /// sound. Reads the tick's outcome and writes no sim field, so a capture
+    /// repeats.
     fn note_tick_after_sim(&mut self, tick: u32) {
         if let Some(tally) = self.staged.as_mut() {
             tally.observe(&self.tick_scratch.cues);
@@ -473,24 +508,6 @@ impl ArenaApp {
         // FEEL3: the feel and the look freeze for the live fight's count, read after the tick.
         self.feel.observe_hitstop(self.app.hitstop_remaining());
         self.observe_spear_events(tick);
-        if let Some(look) = self.look.as_mut() {
-            let (views, hp) = (self.app.fighter_views(), self.app.hp());
-            look.observe_hitstop(tick, &self.tick_scratch.cues, self.app.hitstop_remaining());
-            observe_tick_with_sim(
-                look,
-                tick,
-                views,
-                hp,
-                &self.tick_scratch.cues,
-                &self.tick_scratch.lands,
-                None,
-            );
-            if let Some(scene) = self.spear.scene.as_mut() {
-                scene.observe_tick(look, self.app.live_match(), views);
-            }
-            // EG45: poll authoritative balance gaits into the pose (presentation only).
-            look.observe_live_balances(self.app.live_match(), usize::from(self.config.fighters));
-        }
         self.note_pop_tick(tick);
         // The crate's break picture takes the tick's authority break events (an empty
         // slice on quiet ticks) and steps its debris once; presentation only (RZ4w).
@@ -529,10 +546,11 @@ impl ArenaApp {
             stats.unknown_cue,
         );
         say!(
-            "arena audio space: placed={} flat={} footsteps={} tension_sends={} tension_unheard={} bed_writes={} refused={} breaks={}",
+            "arena audio space: placed={} flat={} footsteps={} clip_footsteps={} tension_sends={} tension_unheard={} bed_writes={} refused={} breaks={}",
             space.positioned,
             space.flat,
             space.footsteps,
+            space.clip_footsteps,
             space.tension_sends,
             space.tension_unheard,
             space.bed_writes,

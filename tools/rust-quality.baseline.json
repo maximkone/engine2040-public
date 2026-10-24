@@ -892,9 +892,9 @@
   "crates/endpoint/src/scene_tools.rs": 3422,
   "crates/game/src/bin/arena.rs": 5101,
   "crates/game/src/camera.rs": 3459,
-  "crates/game/src/fighter_look.rs": 6747,
-  "crates/game/src/lib.rs": 4035,
-  "crates/game/src/windowed.rs": 3629,
+  "crates/game/src/fighter_look.rs": 6757,
+  "crates/game/src/lib.rs": 4038,
+  "crates/game/src/windowed.rs": 3634,
   "crates/net/src/interest.rs": 3076,
   "crates/physics/src/ragdoll.rs": 3376,
   "crates/render/src/gtao.rs": 3497,
@@ -4578,6 +4578,27 @@
    "from": 4030,
    "to": 4035,
    "reason": "C13: debug_lines module declaration in the crate root (one doc block, one cfg line, one mod line); the builder lives in crates/game/src/debug_lines.rs"
+  },
+  {
+   "date": "2026-10-24",
+   "file": "crates/game/src/fighter_look.rs",
+   "from": 6747,
+   "to": 6757,
+   "reason": "BG5: the clip-event lane field, its child module hook and the five constructor literals live on FighterLook; the look split is still owed."
+  },
+  {
+   "date": "2026-10-24",
+   "file": "crates/game/src/lib.rs",
+   "from": 4035,
+   "to": 4038,
+   "reason": "BG5: the clip_events module declaration and its two-line doc sit in the crate root; the lane's code lives in crates/game/src/clip_events.rs. lib.rs is already pinned over 3000 lines."
+  },
+  {
+   "date": "2026-10-24",
+   "file": "crates/game/src/windowed.rs",
+   "from": 3629,
+   "to": 3634,
+   "reason": "BG5: feed_tick_audio takes the look's clip steps and forwards them to the audio feed (one import, one param, one call, doc); the file is still due its split out of the 3000-line band."
   }
  ]
 }

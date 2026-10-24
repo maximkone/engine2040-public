@@ -456,7 +456,7 @@ impl CueSheet {
         let last_tick = self
             .rows
             .iter()
-            .map(|cue| cue.loop_until.unwrap_or(cue.tick.saturating_add(1)))
+            .map(|cue| cue.loop_until.unwrap_or_else(|| cue.tick.saturating_add(1)))
             .max()
             .unwrap_or(0);
         let span = last_tick.saturating_sub(first_tick);

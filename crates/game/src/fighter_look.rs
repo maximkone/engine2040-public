@@ -43,6 +43,7 @@ use engine_render::v1_skin::{SkinPipeline, SkinWeights};
 use sha2::{Digest, Sha256};
 
 use crate::anim_bridge::FighterSlot;
+use crate::clip_events::ClipEventLane;
 use crate::fight_ring::FightRing;
 use crate::fighter_bind::{self, FighterBinding};
 use crate::stage_bodies::place_joint;
@@ -56,6 +57,11 @@ use crate::weapon_trail::{TrailPoint, TrailRing, TRAIL_LEN};
 mod fighter_look_acts;
 
 use self::fighter_look_acts::{bridge_act, bridge_slots};
+
+/// Run-clip events (BG5): the look's run phase feeds the std lane, whose
+/// foot plants the audio feed plays. Presentation only.
+#[path = "fighter_look_events.rs"]
+mod fighter_look_events;
 
 /// Rollback rewind (EG39): one checkpoint per folded tick, the restore and
 /// the fading correction offset the frame adds to the drawn root.
@@ -1467,6 +1473,10 @@ pub struct FighterLook {
     /// Blade trail ring, view only: `start_swing` pushes attacking slots,
     /// the next slice's strip reads `pairs`. Never hashed.
     trails: TrailRing,
+    /// Run-clip footstep events (BG5): the std lane, fed one clock per
+    /// running slot each tick by [`step_clip_events`](Self::step_clip_events).
+    /// Presentation only; never hashed.
+    clip_events: ClipEventLane,
     tick: u32,
     /// Ticks one swing clip plays (from the hero's first swing clip).
     swing_ticks: u32,
@@ -3315,6 +3325,7 @@ mod tests {
             slots,
             bridge: bridge_slots(),
             trails: TrailRing::new(),
+            clip_events: ClipEventLane::new(),
             tick: 0,
             swing_ticks: 1,
             bundle_shas: Vec::new(),
@@ -3388,6 +3399,7 @@ mod tests {
             slots,
             bridge: bridge_slots(),
             trails: TrailRing::new(),
+            clip_events: ClipEventLane::new(),
             tick: 0,
             swing_ticks: 1,
             bundle_shas: Vec::new(),
@@ -3695,6 +3707,7 @@ mod tests {
             slots: vec![SlotAnim::new(); MAX_LOOK_FIGHTERS],
             bridge: bridge_slots(),
             trails: TrailRing::new(),
+            clip_events: ClipEventLane::new(),
             tick: 0,
             swing_ticks: 1,
             bundle_shas: Vec::new(),
@@ -3949,6 +3962,7 @@ mod tests {
             slots,
             bridge: bridge_slots(),
             trails: TrailRing::new(),
+            clip_events: ClipEventLane::new(),
             tick: 0,
             swing_ticks: 1,
             bundle_shas: Vec::new(),
@@ -6447,6 +6461,7 @@ mod tests {
             slots: vec![SlotAnim::new(); MAX_LOOK_FIGHTERS],
             bridge: bridge_slots(),
             trails: TrailRing::new(),
+            clip_events: ClipEventLane::new(),
             tick: 0,
             swing_ticks: 1,
             bundle_shas: Vec::new(),

@@ -287,6 +287,47 @@ fn window_audio_space_walking_fighters_step_on_the_surface_cue() {
 }
 
 #[test]
+fn window_audio_space_a_run_clip_plant_plays_on_its_tick_not_the_stride() {
+    let (mut tx, mut rx) = feed(64, bank());
+    let sand = tx.bank().id(cue_names::FOOTSTEP).expect("sand cue");
+    let mut space = AudioSpace::with_parts(SpaceParts {
+        footsteps: true,
+        ..SpaceParts::EVENTS_ONLY
+    });
+    let quiet = outcome_with(Vec::new());
+    let mut plays = Vec::new();
+    for tick in 0..=4u32 {
+        // 0.5 m a tick: two ticks walk the 0.8 m stride.
+        let views = [view(0, 0.5 * tick as f32, 0.0)];
+        if tick == 2 {
+            // The run clip plants a foot on tick 2: one sand cue at the
+            // fighter's feet, and this tick's stride stands down.
+            let steps = [ClipFootstep {
+                slot: 0,
+                tick,
+                code: FOOTSTEP_CODE,
+            }];
+            space.feed_clip_steps(&mut tx, tick, &steps, &views);
+        }
+        space.feed(&mut tx, tick, &quiet, &views);
+        while let Some(cmd) = rx.pop() {
+            if let Command::Play(play) = cmd {
+                plays.push((play.tick, play.cue, play.pos_cm));
+            }
+        }
+    }
+    // Tick 2 is the clip's plant; tick 4 is the first stride after it, so
+    // the plant reset the stride meter instead of double-tapping.
+    assert_eq!(
+        plays,
+        vec![(2, sand, Some([100, 0, 0])), (4, sand, Some([200, 0, 0])),]
+    );
+    let stats = space.stats();
+    assert_eq!(stats.clip_footsteps, 1);
+    assert_eq!(stats.footsteps, 1, "the plant tick's stride stood down");
+}
+
+#[test]
 fn window_audio_space_a_break_plays_where_the_blow_landed() {
     let (mut tx, mut rx) = feed(64, bank());
     let mut space = AudioSpace::with_parts(SpaceParts::EVENTS_ONLY);

@@ -18,6 +18,9 @@
 //!   same kind sound different takes in turn;
 //! - a footstep per stride of each walking fighter, on the floor's
 //!   [`Surface`] cue;
+//! - one cue per run clip foot plant the look's event lane fired (BG5), on
+//!   the exact tick the clip crossed it, which replaces that slot's stride
+//!   cue for the tick;
 //! - the tension level, on the ticks it changes (rises at once, falls after a
 //!   hold, see [`TensionTracker`]), and a kill stinger on a knockdown;
 //! - the crowd bed, started once and then ridden by `outcome.bed_gain` every
@@ -35,15 +38,18 @@
 
 use std::sync::Arc;
 
+use engine_anim::events::FOOTSTEP_CODE;
 use engine_arena::{EndWhy, SpearEvent};
 use engine_audio::combat_cues::{cue_for_event, footstep, Surface};
 use engine_audio::{cue_names, FeedError, FeedTx, FightCue, ImpactRouter, Tension, TensionTracker};
 use engine_spatial::to_cm;
 
+use crate::clip_events::ClipFootstep;
 use crate::{FallLanding, FighterView, TickOutcome};
 
-/// Slots tracked for footsteps (the canonical roster cap).
-pub const MAX_SLOTS: usize = 32;
+/// Slots tracked for footsteps (the canonical roster cap, owned by the clip
+/// event lane so both arrays stay one size).
+pub use crate::clip_events::MAX_SLOTS;
 /// Meters a fighter travels between footsteps.
 pub const STRIDE_M: f32 = 0.8;
 /// A move longer than this in one tick is a teleport (respawn, rematch), not
@@ -98,8 +104,10 @@ pub struct SpaceStats {
     pub positioned: u64,
     /// Plays with no position because no view named the fighter.
     pub flat: u64,
-    /// Footsteps played.
+    /// Stride footsteps played.
     pub footsteps: u64,
+    /// Run clip footstep events played (BG5), one per plant.
+    pub clip_footsteps: u64,
     /// Tension levels sent.
     pub tension_sends: u64,
     /// Bed gain writes sent.
@@ -133,6 +141,10 @@ pub struct AudioSpace {
     bed: BedState,
     bed_gain_sent: f32,
     stride: [Stride; MAX_SLOTS],
+    /// Last tick each slot's run clip planted a foot (`u32::MAX` before the
+    /// first): its stride cue stands down on that tick, so one foot is one
+    /// cue.
+    clip_stepped: [u32; MAX_SLOTS],
     stats: SpaceStats,
     /// The impact table over the live [`CueBank`](engine_audio::CueBank) the
     /// feed resolves against: which cue an impact plays and which take of it
@@ -184,6 +196,7 @@ impl AudioSpace {
             bed: BedState::Idle,
             bed_gain_sent: 1.0,
             stride: [Stride::default(); MAX_SLOTS],
+            clip_stepped: [u32::MAX; MAX_SLOTS],
             stats: SpaceStats::default(),
             router: None,
         }
@@ -373,6 +386,50 @@ impl AudioSpace {
         }
     }
 
+    /// Play the run clip's footstep events for this tick (BG5): one surface
+    /// cue per [`ClipFootstep`], on the tick the clip crossed its plant and at
+    /// the fighter's feet. A slot with no view plays flat, counted like an
+    /// event. The slot is marked so [`Self::feed_footsteps`] stands that
+    /// stride cue down on the same tick; the stride stays the fallback for a
+    /// clip with no event. Called before [`Self::feed`], so the seat is sent
+    /// here first: the feed sends it again right after, and one repeated
+    /// listener on a plant tick is cheaper than a cue heard from last tick's
+    /// seat. Presentation only.
+    pub fn feed_clip_steps(
+        &mut self,
+        tx: &mut FeedTx,
+        tick: u32,
+        steps: &[ClipFootstep],
+        views: &[FighterView],
+    ) {
+        if steps.is_empty() {
+            return;
+        }
+        let sent = tx.listener(tick, self.listener_cm, self.yaw_deg);
+        self.note(sent);
+        for step in steps {
+            if step.code != FOOTSTEP_CODE {
+                continue;
+            }
+            let at = views
+                .iter()
+                .find(|view| view.slot == step.slot)
+                .map(feet_cm);
+            let play = footstep(self.surface, at.unwrap_or_default());
+            let sent = tx.play(step.tick, play.name, play.gain, at);
+            self.stats.clip_footsteps += 1;
+            if at.is_some() {
+                self.stats.positioned += 1;
+            } else {
+                self.stats.flat += 1;
+            }
+            self.note(sent);
+            if let Some(stepped) = self.clip_stepped.get_mut(usize::from(step.slot)) {
+                *stepped = step.tick;
+            }
+        }
+    }
+
     fn feed_footsteps(&mut self, tx: &mut FeedTx, tick: u32, views: &[FighterView]) {
         for view in views {
             let Some(stride) = self.stride.get_mut(usize::from(view.slot)) else {
@@ -388,6 +445,13 @@ impl AudioSpace {
                 continue;
             }
             stride.walked_m += step;
+            if self.clip_stepped.get(usize::from(view.slot)).copied() == Some(tick) {
+                // The run clip planted a foot this tick: one foot, one cue.
+                // The stride meter restarts, so the next stride cue waits for
+                // a full stride after the plant.
+                stride.walked_m = 0.0;
+                continue;
+            }
             if stride.walked_m < STRIDE_M {
                 continue;
             }
