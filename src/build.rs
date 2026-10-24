@@ -806,7 +806,6 @@ mod tests {
         ]);
         let mut out = Vec::new();
         build_verb_with(args, &env, &mut run, &mut out).unwrap();
-        drop(run);
 
         let dist_root = dir.join("dist");
         let dist = dist_root.join("duel-1");

@@ -669,7 +669,7 @@ fn cell_of(v: f32, size: u16) -> u16 {
     let mut low = 0u16;
     let mut high = size.saturating_sub(1);
     while low < high {
-        let mid = low + (high - low + 1) / 2;
+        let mid = low + (high - low).div_ceil(2);
         if f32::from(mid) <= v {
             low = mid;
         } else {

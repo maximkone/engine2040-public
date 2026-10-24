@@ -194,30 +194,40 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   `MemoryDoor` is a test double. Tier B. Size M. Owns `crates/provider/src/memory.rs`,
   `crates/endpoint/src/packs/memory/`. F2P: a write is refused without a policy key
   (new test). P2P: the door stays green. Accept: two sessions share one recalled fact.
-- [ ] LG5 provider: the model can see a frame - the door emits PNGs (`play.rs:1447`),
+- [x] LG5 provider: the model can see a frame - the door emits PNGs (`play.rs:1447`),
   adapters have no image part. Tier B. Size M. Owns `crates/provider/src/`,
   `crates/playtest/src/look.rs`. F2P: an image part reaches the vendor body under a size
   bound (new test). P2P: text requests stay byte-identical. Accept: the judge describes
   one capture's material split.
+  Landed `c9eb97072`: `ImagePart` (media type, 1 MiB cap, signature check) renders one
+  `image_url` block only in the chat wire; text body stayed byte-stable (run 40049910363).
 - [ ] LG6 endpoint: a streamable HTTP transport with a token gate - stdio only
   (`bin/e2040-mcp.rs:77`), remote shim is in-process. Tier B. Size L. Owns
   `crates/endpoint/src/transport.rs`, `bin/e2040-mcp.rs`. F2P: a second binary serves the
   same door over loopback HTTP with a token (new test). P2P: stdio stays green.
   Accept: a remote client lists tools and applies one scene edit.
-- [ ] LG7 endpoint: pagination and prompt arguments - `tools/list` answers
+- [x] LG7 endpoint: pagination and prompt arguments - `tools/list` answers
   `next_cursor: None` (`mcp.rs:1604`), `get_prompt` ignores arguments (`:1776`).
   Tier A. Size S. Owns `crates/endpoint/src/mcp.rs`. F2P: 120 tools page in two calls
   and a prompt takes one argument (new test). P2P: the 99-verb list is unchanged.
   Accept: a client with a 4 KB page sees every verb once.
-- [ ] LG8 provider: one committed provider cassette - `provider/cassette.rs` has 24 tests
+  Landed `d5e9a8c57` (code moved to `mcp/handler.rs`): 100-verb pages with a decimal cursor,
+  no cursor still answers the whole door, a bad cursor is refused by name, and `prompts/get`
+  appends one bounded sorted `arguments: k=v` line. Runs 40053565088, 40053677469.
+- [x] LG8 provider: one committed provider cassette - `provider/cassette.rs` has 24 tests
   and zero cassette files; every live number is a fixture. Tier A. Size S. Owns
   `fixtures/`, `crates/provider/`. F2P: the cassette test finds no file on HEAD.
   P2P: provider tests stay green. Accept: one model x one task set replays offline,
   byte-equal, in CI.
-- [ ] LG9 provider: cost per call reaches the adapters - `Usage`/`Budget` exist
+  Landed `892573f36`: three entries in `fixtures/cassettes/` (byte-pinned), an ignored
+  regenerator, and a replay test that refuses a missing file (run 40049197961, 26 tests).
+- [x] LG9 provider: cost per call reaches the adapters - `Usage`/`Budget` exist
   (`protocol.rs:96-135`) and `QuotaBook` has no consumer. Tier B. Size S. Owns
   `crates/provider/src/quota.rs`. F2P: an over-budget request is refused by name (new
   test). P2P: adapters stay green. Accept: the scorecard prints cost per row.
+  Landed `1e98cc205`: `QuotaCharge::of_request` + `QuotaBook::admit_request`; the refusal
+  names the remaining budget and the card prints a `cost per row` column, `unknown` when
+  any row is (never zero-claimed). Runs 40048528789, 40048960305.
 - [ ] LG10 endpoint: parallel read-only tool calls - one `Mutex<ServerState>`
   (`mcp.rs:1082`) serializes every call. Tier C. Size M. Owns `crates/endpoint/src/mcp.rs`.
   F2P: two `scene.read` calls overlap under the new read path (new test). P2P: the write

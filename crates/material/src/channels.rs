@@ -13,8 +13,10 @@
 //! formulas on the same packed values, so tests can pin what a wet or bloody
 //! surface looks like without a GPU.
 
+use std::fmt;
+
 use crate::compile::pack_uniform;
-use crate::record::{Channel, LayerKind, MaterialRecord};
+use crate::record::{Channel, Layer, LayerKind, MaterialRecord, MAX_LAYERS};
 
 /// Ticks between one unit of wetness drying off.
 pub const WET_DRY_PERIOD_TICKS: u32 = 4;
@@ -214,6 +216,215 @@ pub fn luminance(rgb: [f32; 3]) -> f32 {
     0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
 
+// ---------------------------------------------------------------------------
+// The weathering strip.
+// ---------------------------------------------------------------------------
+
+/// One step of the weathering strip: how much each coverage channel it
+/// stamps, and where it puts the surface's roughness and metalness.
+///
+/// Weights are permille of full coverage (`0..=1000`) in [`Channel::all`]
+/// order. The shifts are bounds in permille (`-1000..=1000`): a negative
+/// roughness shift is an upper bound, so the step pulls a rougher record down
+/// to it and leaves a smoother one alone; a positive metal shift is a lower
+/// bound. A bound applied twice is a no-op, so a step is idempotent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Weathering {
+    /// Step name, as the bake receipt and the docs name it.
+    pub name: &'static str,
+    /// Coverage weight per channel, permille, [`Channel::all`] order.
+    pub weights: [u16; 5],
+    /// Roughness bound, permille; negative is an upper bound (smoother).
+    pub roughness_shift: i16,
+    /// Metalness bound, permille; positive is a lower bound (shinier).
+    pub metal_shift: i16,
+}
+
+/// The fixed dry -> wet -> blood strip the gap report asks for: a surface
+/// starts dry, rain wets it and lifts its dirt, and a wound adds blood.
+pub const WEATHERING_STRIP: [Weathering; 3] = [
+    Weathering {
+        name: "dry",
+        weights: [0, 0, 0, 0, 0],
+        roughness_shift: 0,
+        metal_shift: 0,
+    },
+    Weathering {
+        name: "wet",
+        weights: [1000, 250, 0, 0, 0],
+        roughness_shift: -200,
+        metal_shift: 0,
+    },
+    Weathering {
+        name: "blood",
+        weights: [1000, 250, 1000, 0, 0],
+        roughness_shift: -100,
+        metal_shift: 50,
+    },
+];
+
+/// A weathering step that is not the shape [`WEATHERING_STRIP`] promises.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WeatheringError {
+    /// A channel weight sits outside `0..=1000` permille.
+    Weight {
+        /// The channel named.
+        channel: &'static str,
+        /// The weight asked for, permille.
+        permille: u16,
+    },
+    /// A roughness or metalness shift sits outside `-1000..=1000` permille.
+    Shift {
+        /// `"roughness"` or `"metalness"`.
+        field: &'static str,
+        /// The shift asked for, permille.
+        permille: i16,
+    },
+    /// The record's layer budget is full, so a channel has nowhere to land.
+    NoRoom {
+        /// The channel with no layer.
+        channel: &'static str,
+        /// The budget.
+        max: usize,
+    },
+}
+
+impl fmt::Display for WeatheringError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Weight { channel, permille } => write!(
+                f,
+                "weathering weight for `{channel}` is {permille} permille; \
+                 a weight is 0..=1000 (1000 is full coverage)"
+            ),
+            Self::Shift { field, permille } => write!(
+                f,
+                "weathering `{field}` shift is {permille} permille; \
+                 a shift is -1000..=1000"
+            ),
+            Self::NoRoom { channel, max } => write!(
+                f,
+                "the record already carries {max} layers, so `{channel}` has no \
+                 layer to drive; next: drop a layer the step does not need"
+            ),
+        }
+    }
+}
+
+/// The layer kind that reads one coverage channel.
+const fn layer_kind(channel: Channel) -> LayerKind {
+    match channel {
+        Channel::Wetness => LayerKind::Wet,
+        Channel::Dirt => LayerKind::Dirt,
+        Channel::Blood => LayerKind::Blood,
+        Channel::Strain => LayerKind::Damage,
+        Channel::Heat => LayerKind::Burn,
+    }
+}
+
+/// The strength of the record's layer that reads `channel`; zero when the
+/// record carries no such layer.
+#[must_use]
+pub fn coverage_weight(record: &MaterialRecord, channel: Channel) -> f32 {
+    record
+        .layers
+        .iter()
+        .filter(|layer| layer.driver == channel)
+        .map(|layer| layer.strength)
+        .fold(0.0, f32::max)
+}
+
+/// Permille to a `0..=1` weight without a truncating cast.
+fn permille(value: u16) -> f32 {
+    f32::from(value.min(1000)) / 1000.0
+}
+
+/// Pull `now` to the step's bound: a negative shift is an upper bound (the
+/// surface gets smoother), a positive shift a lower bound (shinier), and zero
+/// leaves the number alone. A bound applies again as a no-op.
+fn shift_toward(now: f32, shift: i16) -> f32 {
+    let bound = permille(u16::try_from(shift.unsigned_abs()).unwrap_or(0));
+    if shift < 0 {
+        now.min(bound)
+    } else if shift > 0 {
+        now.max(bound)
+    } else {
+        now
+    }
+}
+
+impl Weathering {
+    /// The coverage this step stamps, as sim-side channel values.
+    #[must_use]
+    pub fn coverage(&self) -> Coverage {
+        let mut out = Coverage::default();
+        for (channel, weight) in Channel::all().iter().zip(&self.weights) {
+            let value = u8::try_from(*weight / 4).unwrap_or(255);
+            match channel {
+                Channel::Wetness => out.wetness = value,
+                Channel::Dirt => out.dirt = value,
+                Channel::Blood => out.blood = value,
+                Channel::Strain => out.strain = value,
+                Channel::Heat => out.heat = value,
+            }
+        }
+        out
+    }
+
+    /// Stamp the step on a record: set each named channel's layer strength,
+    /// then move roughness and metalness toward the step.
+    ///
+    /// Idempotent: a channel is *set*, never added to, and the shifts stop at
+    /// the step's own value, so applying the same step twice gives the same
+    /// record text.
+    pub fn apply(&self, record: &mut MaterialRecord) -> Result<(), WeatheringError> {
+        for (channel, weight) in Channel::all().iter().zip(&self.weights) {
+            if *weight > 1000 {
+                return Err(WeatheringError::Weight {
+                    channel: channel.name(),
+                    permille: *weight,
+                });
+            }
+        }
+        for (field, shift) in [
+            ("roughness", self.roughness_shift),
+            ("metalness", self.metal_shift),
+        ] {
+            if !(-1000..=1000).contains(&shift) {
+                return Err(WeatheringError::Shift {
+                    field,
+                    permille: shift,
+                });
+            }
+        }
+        for (channel, weight) in Channel::all().iter().zip(&self.weights) {
+            let strength = permille(*weight);
+            let mut found = false;
+            for layer in record.layers.iter_mut() {
+                if layer.driver == *channel {
+                    layer.strength = strength;
+                    found = true;
+                }
+            }
+            if !found && strength > 0.0 {
+                if record.layers.len() >= MAX_LAYERS {
+                    return Err(WeatheringError::NoRoom {
+                        channel: channel.name(),
+                        max: MAX_LAYERS,
+                    });
+                }
+                let mut layer = Layer::new(layer_kind(*channel), *channel);
+                layer.strength = strength;
+                record.layers.push(layer);
+            }
+        }
+        record.look.specular_roughness =
+            shift_toward(record.look.specular_roughness, self.roughness_shift);
+        record.look.base_metalness = shift_toward(record.look.base_metalness, self.metal_shift);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +548,89 @@ mod tests {
         assert_eq!(p[0], 1.0);
         assert!((p[4] - 0.2).abs() < 1e-6);
         assert_eq!(&p[5..], &[0.0, 0.0, 0.0]);
+    }
+
+    fn brick() -> MaterialRecord {
+        let set = MaterialSet::siege_kit();
+        (*set.get("stone").expect("shipped")).clone()
+    }
+
+    #[test]
+    fn the_strip_is_dry_wet_blood_in_that_order() {
+        let names: Vec<&str> = WEATHERING_STRIP.iter().map(|step| step.name).collect();
+        assert_eq!(names, ["dry", "wet", "blood"]);
+        // Dry is the neutral step: every channel weight is zero.
+        let mut record = brick();
+        WEATHERING_STRIP[0].apply(&mut record).expect("dry applies");
+        for channel in Channel::all() {
+            assert_eq!(coverage_weight(&record, channel), 0.0, "{channel:?}");
+        }
+    }
+
+    #[test]
+    fn dry_to_wet_raises_dirt_and_lowers_roughness() {
+        let mut dry = brick();
+        WEATHERING_STRIP[0].apply(&mut dry).expect("dry");
+        let mut wet = dry.clone();
+        WEATHERING_STRIP[1].apply(&mut wet).expect("wet");
+        assert!(
+            coverage_weight(&wet, Channel::Dirt) > coverage_weight(&dry, Channel::Dirt),
+            "dirt {:.3} -> {:.3}",
+            coverage_weight(&dry, Channel::Dirt),
+            coverage_weight(&wet, Channel::Dirt)
+        );
+        assert!(
+            wet.look.specular_roughness < dry.look.specular_roughness,
+            "roughness {:.3} -> {:.3}",
+            dry.look.specular_roughness,
+            wet.look.specular_roughness
+        );
+        assert_eq!(coverage_weight(&wet, Channel::Wetness), 1.0);
+    }
+
+    #[test]
+    fn blood_sets_the_blood_channel() {
+        let mut record = brick();
+        WEATHERING_STRIP[2].apply(&mut record).expect("blood");
+        assert_eq!(coverage_weight(&record, Channel::Blood), 1.0);
+        let kind = record
+            .layers
+            .iter()
+            .find(|layer| layer.driver == Channel::Blood)
+            .map(|layer| layer.kind);
+        assert_eq!(kind, Some(LayerKind::Blood));
+    }
+
+    #[test]
+    fn every_step_twice_is_the_same_record() {
+        for step in &WEATHERING_STRIP {
+            let mut record = brick();
+            step.apply(&mut record).expect("first");
+            let once = record.to_text();
+            step.apply(&mut record).expect("second");
+            assert_eq!(record.to_text(), once, "step `{}`", step.name);
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_weight_is_refused_by_name() {
+        let mut step = WEATHERING_STRIP[1];
+        step.weights[1] = 1001;
+        let mut record = brick();
+        let err = step.apply(&mut record).expect_err("refused");
+        assert_eq!(
+            err,
+            WeatheringError::Weight {
+                channel: "dirt",
+                permille: 1001,
+            }
+        );
+        assert!(err.to_string().contains("0..=1000"), "{err}");
+        let mut step = WEATHERING_STRIP[1];
+        step.roughness_shift = -1001;
+        assert!(matches!(
+            step.apply(&mut record),
+            Err(WeatheringError::Shift { .. })
+        ));
     }
 }

@@ -91,6 +91,9 @@ pub struct Surface {
     pub metalness: f32,
     /// Mean coverage per [`Channel::all`] slot, `0..=1`.
     pub coverage: [f32; 5],
+    /// Per-pixel coverage, [`Channel::all`] order; an unmapped channel is flat
+    /// zero. The source of a coverage bake.
+    pub coverage_fields: [Field; 5],
     /// The height field.
     pub height: Field,
     /// The emissive field (all zero when the graph names none).
@@ -139,6 +142,24 @@ pub struct Baked {
     pub maps: Vec<BakeMap>,
     /// Digest of the canonical graph text.
     pub graph: u64,
+}
+
+/// Smallest and largest value per RGBA slot of a raw sample run, `0..=1`.
+pub(super) fn range(rgba: &[u8]) -> ([f32; 4], [f32; 4]) {
+    let mut min = [1.0f32; 4];
+    let mut max = [0.0f32; 4];
+    for pixel in rgba.chunks_exact(4) {
+        for (slot, byte) in pixel.iter().enumerate() {
+            let value = f32::from(*byte) / 255.0;
+            if let Some(low) = min.get_mut(slot) {
+                *low = low.min(value);
+            }
+            if let Some(high) = max.get_mut(slot) {
+                *high = high.max(value);
+            }
+        }
+    }
+    (min, max)
 }
 
 /// Linear `0..=1` to one 8-bit sample, rounding half up.

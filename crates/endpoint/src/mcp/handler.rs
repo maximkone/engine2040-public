@@ -9,6 +9,7 @@ use std::borrow::Cow;
 
 use engine_editor::save::save_to_bytes;
 use engine_scene::ids::content_digest;
+use rmcp::serde_json::{Map, Value};
 
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResponse,
@@ -165,9 +166,14 @@ impl ServerHandler for McpServer {
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        // A cursor walks a door larger than one page; no cursor lists the
+        // whole door, so the shipped 99-verb listing keeps its bytes.
+        let cursor = request.and_then(|params| params.cursor);
+        let (tools, next_cursor) = page_of(self.tools(), cursor.as_deref())
+            .map_err(|why| ErrorData::invalid_params(why.to_string(), None))?;
         // The list moves with `api.load`, so 2026-07-28 clients get a zero
         // cache hint: re-list after loading a pack.
         let supports_cache_hints = context
@@ -175,9 +181,9 @@ impl ServerHandler for McpServer {
             .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
         Ok(ListToolsResult {
             result_type: Some(ResultType::COMPLETE),
-            tools: self.tools(),
+            tools,
             meta: None,
-            next_cursor: None,
+            next_cursor,
             ttl_ms: supports_cache_hints.then_some(0),
             cache_scope: supports_cache_hints.then_some(CacheScope::Public),
         })
@@ -359,6 +365,7 @@ impl ServerHandler for McpServer {
         let Some(body) = self.prompt_text(&request.name) else {
             return Err(ErrorData::invalid_params("prompt not found", None));
         };
+        let body = with_prompt_arguments(body, request.arguments.as_ref());
         Ok(GetPromptResponse::Complete(GetPromptResult::new(vec![
             PromptMessage::new_text(Role::User, body),
         ])))
@@ -371,6 +378,105 @@ impl ServerHandler for McpServer {
                 .map(crate::packs::VerbSpec::model)
         })
     }
+}
+
+/// Most tools one `tools/list` answer carries. The shipped door lists 99 verbs,
+/// so a listing without a cursor is one page and keeps its exact bytes; a
+/// larger door pages from the cursor instead of truncating silently.
+pub(crate) const TOOLS_PAGE: usize = 100;
+
+/// Why a `tools/list` cursor was refused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CursorError {
+    /// The cursor is not a decimal page offset.
+    NotAnOffset,
+    /// The cursor points past the last tool.
+    PastTheEnd {
+        /// The offset the client sent.
+        start: usize,
+        /// Tools the door lists.
+        total: usize,
+    },
+}
+
+impl std::fmt::Display for CursorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAnOffset => f.write_str("cursor is not a page offset"),
+            Self::PastTheEnd { start, total } => {
+                write!(f, "cursor {start} is beyond {total} tools")
+            }
+        }
+    }
+}
+
+/// One page of `items` from a decimal offset `cursor`; `None` starts at zero.
+/// A cursor past the end is refused by name, so a client never gets a silently
+/// empty door.
+fn page_of<T>(
+    items: Vec<T>,
+    cursor: Option<&str>,
+) -> Result<(Vec<T>, Option<String>), CursorError> {
+    let total = items.len();
+    let start = match cursor {
+        None => 0,
+        Some(text) => text
+            .parse::<usize>()
+            .map_err(|_| CursorError::NotAnOffset)?,
+    };
+    if start > total {
+        return Err(CursorError::PastTheEnd { start, total });
+    }
+    let end = start.saturating_add(TOOLS_PAGE).min(total);
+    let next = (end < total).then(|| end.to_string());
+    let page = items.into_iter().skip(start).take(end - start).collect();
+    Ok((page, next))
+}
+
+/// Largest argument line one prompt answer may carry, in bytes.
+const MAX_ARGUMENT_LINE_BYTES: usize = 512;
+
+/// Append one bounded line naming the caller's `prompts/get` arguments, sorted
+/// by name, so an argument reaches the model instead of being dropped. No
+/// arguments leaves the body untouched: a plain answer keeps its bytes.
+pub(crate) fn with_prompt_arguments(
+    mut body: String,
+    arguments: Option<&Map<String, Value>>,
+) -> String {
+    let Some(arguments) = arguments else {
+        return body;
+    };
+    if arguments.is_empty() {
+        return body;
+    }
+    let mut line = String::from("\narguments:");
+    for (name, value) in arguments {
+        let value = match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        line.push(' ');
+        line.push_str(&flat(name));
+        line.push('=');
+        line.push_str(&flat(&value));
+    }
+    if line.len() > MAX_ARGUMENT_LINE_BYTES {
+        let mut cut = MAX_ARGUMENT_LINE_BYTES;
+        while !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        line.truncate(cut);
+    }
+    body.push_str(&line);
+    body
+}
+
+/// One argument token with control bytes turned into spaces, so the line stays
+/// one line and cannot carry a second instruction.
+fn flat(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Annotations for read-only MCP tools: read-only on, open world off.
@@ -390,4 +496,88 @@ pub(crate) fn write_annotations(idempotent: bool) -> Option<ToolAnnotations> {
     annotations.idempotent_hint = idempotent.then_some(true);
     annotations.open_world_hint = Some(false);
     Some(annotations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hundred_and_twenty_tools_page_in_two_calls() {
+        let items: Vec<u32> = (0..120).collect();
+        let (first, next) = page_of(items.clone(), None).expect("first page");
+        assert_eq!(first.len(), TOOLS_PAGE, "one page is one answer");
+        assert_eq!(first[0], 0);
+        let next = next.expect("120 tools need a second call");
+        assert_eq!(next, TOOLS_PAGE.to_string());
+        let (second, after) = page_of(items, Some(&next)).expect("second page");
+        assert_eq!(second.len(), 20, "the rest of the door");
+        assert_eq!(
+            second[0], 100,
+            "the second page starts where the first ends"
+        );
+        assert_eq!(after, None, "the second call ends the walk");
+    }
+
+    #[test]
+    fn the_shipped_listing_is_one_page_and_a_bad_cursor_is_named() {
+        // 99 shipped verbs stay one page: no cursor, same bytes as before.
+        let (all, none) = page_of((0..99).collect::<Vec<u32>>(), None).expect("one page");
+        assert_eq!(all.len(), 99);
+        assert_eq!(none, None);
+        let past = page_of((0..99).collect::<Vec<u32>>(), Some("99")).expect("the end is in range");
+        assert!(past.0.is_empty(), "the end of the walk is empty");
+        let beyond = page_of((0..99).collect::<Vec<u32>>(), Some("100")).expect_err("past the end");
+        assert!(beyond.to_string().contains("beyond 99 tools"), "{beyond}");
+        let bad = page_of((0..99).collect::<Vec<u32>>(), Some("abc")).expect_err("not an offset");
+        assert!(bad.to_string().contains("not a page offset"), "{bad}");
+    }
+
+    #[test]
+    fn the_default_door_fits_one_page() {
+        // A door that outgrows a page must raise `TOOLS_PAGE` with a reason;
+        // a listing that sends no cursor never drops a verb silently.
+        let count = crate::mcp::default_tool_names().len();
+        assert!(
+            count <= TOOLS_PAGE,
+            "the default door lists {count} verbs, over the {TOOLS_PAGE}-tool page"
+        );
+    }
+
+    #[test]
+    fn a_prompt_takes_one_argument() {
+        let mut arguments = Map::new();
+        arguments.insert("topic".to_owned(), Value::String("braziers".to_owned()));
+        let body = with_prompt_arguments("Read the scene.".to_owned(), Some(&arguments));
+        assert_eq!(body, "Read the scene.\narguments: topic=braziers");
+        let plain = with_prompt_arguments("Read the scene.".to_owned(), None);
+        assert_eq!(plain, "Read the scene.", "a plain prompt keeps its bytes");
+        let empty = with_prompt_arguments("Read the scene.".to_owned(), Some(&Map::new()));
+        assert_eq!(empty, "Read the scene.", "no arguments is no line");
+    }
+
+    #[test]
+    fn prompt_arguments_stay_one_bounded_line() {
+        let mut arguments = Map::new();
+        arguments.insert(
+            "brief".to_owned(),
+            Value::String("first line\nsecond line".to_owned()),
+        );
+        arguments.insert("count".to_owned(), Value::from(2));
+        let body = with_prompt_arguments("Read.".to_owned(), Some(&arguments));
+        assert!(
+            body.contains("brief=first line second line"),
+            "a control byte cannot start a line: {body}"
+        );
+        assert!(body.contains("count=2"), "{body}");
+        let long = Value::String("x".repeat(MAX_ARGUMENT_LINE_BYTES * 2));
+        let mut wide = Map::new();
+        wide.insert("brief".to_owned(), long);
+        let bounded = with_prompt_arguments("Read.".to_owned(), Some(&wide));
+        assert_eq!(
+            bounded.len(),
+            "Read.".len() + MAX_ARGUMENT_LINE_BYTES,
+            "the argument line stops at its cap"
+        );
+    }
 }

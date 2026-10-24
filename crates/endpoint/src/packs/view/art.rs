@@ -1180,7 +1180,7 @@ pub(crate) fn framing_of(
     .unwrap_or(0);
     let horizon_score = 1000u32
         .saturating_sub(horizon_gap.saturating_mul(3))
-        .saturating_sub(u32::try_from(tilt.unsigned_abs()).unwrap_or(0) / 2);
+        .saturating_sub(tilt.unsigned_abs() / 2);
     let scores = [coverage_score, headroom_score, thirds_score, horizon_score];
     let mut total = 0u32;
     let mut worst = (scores[0], FRAMING_WEIGHTS[0].0);

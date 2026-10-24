@@ -1,6 +1,10 @@
 //! BRP-shaped loopback shim over the verb table (in-process, no socket).
 //! PORT(bevy@4e6bd14 crates/bevy_remote/src/http.rs RemoteHttpPlugin + lib.rs BrpRequest/BrpBatch) -> transport-plus-allowlist shape only, idea only. Loopback stdio/in-process so headless stays clean.
 //! Consumer: `McpServer::brp_batch` via `execute_via_shim` (one gesture id per batch, seal at end) plus dry-run readers via `preview_via_shim`. Owner stays editor commands; this owns only `{method, params}` plus batch shapes. Units meters via `OpDto`. Determinism input-ordered, no clock. Errors one `RpcError` shape via default deny.
+
+/// Opt-in read-only TCP inspector on 127.0.0.1 (off unless started).
+pub mod loopback;
+
 use super::discover::{
     batch_execute_grouped, preview_batch, BatchExecuteOutput, PreviewItem, PreviewResult,
 };

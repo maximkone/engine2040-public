@@ -1271,6 +1271,7 @@ impl Graph {
             roughness: roughness.mean(),
             metalness: metalness.mean(),
             coverage: channel_mean,
+            coverage_fields: channels,
             height,
             emissive,
             size,
@@ -1351,6 +1352,21 @@ impl Graph {
         })
     }
 
+    /// Bake the five coverage channel maps and the two packed sheets at
+    /// `resolution` (one of [`BAKE_SIZES`]). A flat channel is named in
+    /// [`ChannelBake::flat`] instead of refused: a graph may drive a channel
+    /// flat on purpose.
+    pub fn bake_coverage(&self, resolution: u32) -> Result<ChannelBake, GraphError> {
+        if !BAKE_SIZES.contains(&resolution) {
+            return Err(GraphError::at(
+                "resolution",
+                GraphErrorKind::BadBakeSize { asked: resolution },
+            ));
+        }
+        let surface = self.sample(resolution)?;
+        Ok(channel_maps::channel_bake(&surface, resolution))
+    }
+
     /// The four RGBA8 sample runs of a baked surface, in [`BAKE_MAPS`] order.
     fn rasterize(&self, surface: &Surface, resolution: u32) -> [(&'static str, Vec<u8>); 4] {
         let count = usize::try_from(resolution)
@@ -1414,19 +1430,7 @@ impl Graph {
 /// One baked map: its PNG bytes, digest, per-channel range. A map whose
 /// every channel is constant is refused.
 fn baked_map(name: &'static str, resolution: u32, rgba: Vec<u8>) -> Result<BakeMap, GraphError> {
-    let mut min = [1.0f32; 4];
-    let mut max = [0.0f32; 4];
-    for pixel in rgba.chunks_exact(4) {
-        for (slot, byte) in pixel.iter().enumerate() {
-            let value = f32::from(*byte) / 255.0;
-            if let Some(low) = min.get_mut(slot) {
-                *low = low.min(value);
-            }
-            if let Some(high) = max.get_mut(slot) {
-                *high = high.max(value);
-            }
-        }
-    }
+    let (min, max) = eval::range(&rgba);
     let flat = (0..4)
         .all(|slot| min.get(slot).copied().unwrap_or(1.0) == max.get(slot).copied().unwrap_or(0.0));
     if flat {
@@ -1447,8 +1451,10 @@ fn baked_map(name: &'static str, resolution: u32, rgba: Vec<u8>) -> Result<BakeM
     })
 }
 
+mod channel_maps;
 mod eval;
 
+pub use channel_maps::{ChannelBake, COVERAGE_MAPS, COVERAGE_SHEET_MAPS};
 pub use eval::{BakeMap, Baked, Field, Surface};
 
 #[cfg(test)]

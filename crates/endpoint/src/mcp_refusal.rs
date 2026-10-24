@@ -412,6 +412,7 @@ const INPUT_CODES: &[&str] = &[
     "unknown_tool",
     "unknown_verb",
     "unsorted_tape",
+    "wfc_disconnected",
 ];
 
 const STATE_CODES: &[&str] = &[

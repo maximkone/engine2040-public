@@ -34,7 +34,12 @@
 //! - `material.graph.get` (observe): one stored graph back as canonical text.
 //! - `material.bake` (commit): sample a graph at 512 or 1024 into four PNGs
 //!   (base_color, orm, normal, emissive) in `out_dir`, with each map's digest,
-//!   bytes and per-channel min/max; a map flat on every channel is refused.
+//!   bytes and per-channel min/max; a look map flat on every channel is
+//!   refused. `coverage: true` also writes the five coverage channel maps and
+//!   the 4+1 packed sheets (`coverage`: wetness, dirt, blood, strain in RGBA;
+//!   `coverage_extra`: heat in red); a flat coverage channel is written and
+//!   named in `warnings` instead of refused. A build with the `intake` feature
+//!   also cooks each map to KTX2 and reports the copy's bytes and digest.
 //!
 //! The record table has no document of its own yet, so an edit lives in the
 //! text the caller holds; `material.set` is the one verb that writes the
@@ -408,7 +413,12 @@ pub struct MaterialBakeArgs {
     /// Map side in pixels: 512 or 1024; default 512.
     #[serde(default)]
     pub resolution: Option<u32>,
-    /// Folder the four PNGs are written into (created when absent).
+    /// Also bake the five coverage channel maps and the two packed sheets;
+    /// default false. A channel the graph drives flat is written anyway and
+    /// named in `warnings`.
+    #[serde(default)]
+    pub coverage: bool,
+    /// Folder the PNGs are written into (created when absent).
     pub out_dir: String,
 }
 
@@ -429,6 +439,13 @@ pub struct MaterialBakeMap {
     pub min: [f32; 4],
     /// Largest value per channel (R, G, B, A) in 0..=1.
     pub max: [f32; 4],
+    /// Size of the KTX2 copy of this map, bytes; `None` when this build has no
+    /// cook path (the `intake` feature carries it).
+    #[serde(default)]
+    pub ktx2_bytes: Option<u64>,
+    /// Digest of the KTX2 copy (hex): the same map twice cooks equal bytes.
+    #[serde(default)]
+    pub ktx2_digest: Option<String>,
 }
 
 /// Result of `material.bake`.
@@ -444,6 +461,13 @@ pub struct MaterialBakeOutput {
     pub resolution: u32,
     /// The four maps in write order.
     pub maps: Vec<MaterialBakeMap>,
+    /// The coverage set when `coverage` was on: the five channel maps then the
+    /// two packed sheets (`coverage`: wetness/dirt/blood/strain in RGBA,
+    /// `coverage_heat`: heat in red). Empty when the bake skipped coverage.
+    pub coverage: Vec<MaterialBakeMap>,
+    /// Warning rows: channels that came out flat on every sample, by map name.
+    /// A flat coverage channel is written and reported, never refused.
+    pub warnings: Vec<String>,
     /// Look digest of the folded record (hex).
     pub record_digest: String,
     /// Texture references the folded record now names.
@@ -610,24 +634,21 @@ fn material_bake(
     })?;
     let mut maps = Vec::with_capacity(baked.maps.len());
     for map in &baked.maps {
-        let path = dir.join(format!("{}_{}.png", graph.material, map.name));
-        std::fs::write(&path, &map.png).map_err(|error| {
-            McpToolError::new(
-                "bake_io",
-                format!(
-                    "cannot write `{}`: {error}; next: name a writable out_dir",
-                    path.display()
-                ),
+        maps.push(write_map(dir, &graph.material, map)?);
+    }
+    let mut coverage = Vec::new();
+    let mut warnings = Vec::new();
+    if args.coverage {
+        let set = graph.bake_coverage(resolution).map_err(bad_graph)?;
+        for map in set.maps.iter().chain(set.sheets.iter()) {
+            coverage.push(write_map(dir, &graph.material, map)?);
+        }
+        warnings.extend(set.flat.iter().map(|name| {
+            format!(
+                "{name} is flat on every sample: the graph drives it with nothing; \
+                 next: point output.channels at a node for that channel, or leave it flat"
             )
-        })?;
-        maps.push(MaterialBakeMap {
-            name: map.name.to_owned(),
-            path: path.to_string_lossy().into_owned(),
-            digest: format!("{:016x}", map.digest),
-            bytes: u64::try_from(map.png.len()).unwrap_or(u64::MAX),
-            min: map.min,
-            max: map.max,
-        });
+        }));
     }
     let textures: Vec<String> = [
         record.look.textures.base_color.clone(),
@@ -643,9 +664,83 @@ fn material_bake(
         material: graph.material.clone(),
         resolution,
         maps,
+        coverage,
+        warnings,
         record_digest: format!("{:016x}", record.look_digest()),
         textures,
     })
+}
+
+/// Write one baked map as `{material}_{name}.png` and receipt it.
+fn write_map(
+    dir: &std::path::Path,
+    material: &str,
+    map: &engine_material::graph::BakeMap,
+) -> Result<MaterialBakeMap, McpToolError> {
+    let path = dir.join(format!("{material}_{}.png", map.name));
+    std::fs::write(&path, &map.png).map_err(|error| {
+        McpToolError::new(
+            "bake_io",
+            format!(
+                "cannot write `{}`: {error}; next: name a writable out_dir",
+                path.display()
+            ),
+        )
+    })?;
+    let ktx2 = ktx2_receipt(map)?;
+    Ok(MaterialBakeMap {
+        name: map.name.to_owned(),
+        path: path.to_string_lossy().into_owned(),
+        digest: format!("{:016x}", map.digest),
+        bytes: u64::try_from(map.png.len()).unwrap_or(u64::MAX),
+        min: map.min,
+        max: map.max,
+        ktx2_bytes: ktx2.as_ref().map(|(bytes, _)| *bytes),
+        ktx2_digest: ktx2.map(|(_, digest)| digest),
+    })
+}
+
+/// The KTX2 copy of one map, when this build carries the cook path.
+///
+/// The cook is `engine_assets::ktx2_cook::cook_ktx2`: BC blocks, mips and the
+/// KTX2 container, all CPU and deterministic. It rides the `intake` feature
+/// because `engine-assets` is only a dependency of the door under that
+/// feature; a plain `mcp` build reports `None` for both KTX2 fields.
+#[cfg(feature = "intake")]
+fn ktx2_receipt(
+    map: &engine_material::graph::BakeMap,
+) -> Result<Option<(u64, String)>, McpToolError> {
+    use engine_assets::ktx2_cook::{cook_ktx2, MapKind};
+    // The cook knows the look shapes; the coverage and emissive maps are plain
+    // color data, so they take the base-color shape.
+    let kind = match map.name {
+        "normal" => MapKind::Normal,
+        "orm" => MapKind::Orm,
+        _ => MapKind::BaseColor,
+    };
+    let bytes = cook_ktx2(&map.rgba, map.width, map.height, kind, 0).map_err(|error| {
+        McpToolError::new(
+            "bake_io",
+            format!(
+                "cannot cook `{}` to KTX2: {error}; next: bake at 512 or 1024, \
+                 the sizes the cook accepts",
+                map.name
+            ),
+        )
+    })?;
+    let digest = format!("{:016x}", engine_core::hash_bytes(&bytes));
+    Ok(Some((
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        digest,
+    )))
+}
+
+/// No cook path in this build: the KTX2 fields stay empty.
+#[cfg(not(feature = "intake"))]
+fn ktx2_receipt(
+    _map: &engine_material::graph::BakeMap,
+) -> Result<Option<(u64, String)>, McpToolError> {
+    Ok(None)
 }
 
 fn info_of(set: &MaterialSet, record: &MaterialRecord) -> MaterialInfo {
@@ -1058,7 +1153,7 @@ crate::e2_tool!(
     /// `material.bake`: write the four maps of a graph.
     MaterialBakeTool,
     name = TOOL_MATERIAL_BAKE,
-    description = "Bake a material graph (by id or inline text) at 512 or 1024 into four PNGs: base_color, orm, normal, emissive, written into out_dir. Returns each map's path, digest, bytes and per-channel min/max, plus the record digest. The same graph twice gives equal digests and equal bytes; a map that is flat on every channel is refused.",
+    description = "Bake a material graph (by id or inline text) at 512 or 1024 into four PNGs: base_color, orm, normal, emissive, written into out_dir. Returns each map's path, digest, bytes and per-channel min/max, plus the record digest. The same graph twice gives equal digests and equal bytes; a look map that is flat on every channel is refused. `coverage: true` also writes the five coverage channel maps and the packed sheets (`coverage`: wetness, dirt, blood, strain in RGBA; `coverage_extra`: heat in red), and a flat coverage channel becomes a warning row, not a refusal.",
     readonly = false,
     args = MaterialBakeArgs,
     output = MaterialBakeOutput,
@@ -1573,6 +1668,7 @@ mod tests {
                     id: Some(set.id.clone()),
                     graph: None,
                     resolution: Some(512),
+                    coverage: false,
                     out_dir: out.to_string_lossy().into_owned(),
                 },
             )
@@ -1603,12 +1699,129 @@ mod tests {
                         .to_owned(),
                 ),
                 resolution: Some(512),
+                coverage: false,
                 out_dir: out.to_string_lossy().into_owned(),
             },
         )
         .expect_err("a flat bake is refused");
         assert_eq!(flat.code, "bad_graph");
         assert!(flat.message.contains("flat"), "{}", flat.message);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn bake_coverage_writes_five_channels_and_two_sheets() {
+        let server = server();
+        let set = MaterialGraphSetTool::invoke(
+            &server,
+            MaterialGraphSetArgs {
+                graph: BRICK.to_owned(),
+            },
+        )
+        .expect("graph sets");
+        let out = scratch("bake-coverage");
+        let ask = |coverage: bool| {
+            MaterialBakeTool::invoke(
+                &server,
+                MaterialBakeArgs {
+                    id: Some(set.id.clone()),
+                    graph: None,
+                    resolution: Some(512),
+                    coverage,
+                    out_dir: out.to_string_lossy().into_owned(),
+                },
+            )
+        };
+        let first = ask(true).expect("bakes coverage");
+        let names: Vec<&str> = first.coverage.iter().map(|map| map.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "coverage_wetness",
+                "coverage_dirt",
+                "coverage_blood",
+                "coverage_strain",
+                "coverage_heat",
+                "coverage",
+                "coverage_extra",
+            ]
+        );
+        for map in &first.coverage {
+            let path = std::path::Path::new(&map.path);
+            assert!(path.exists(), "{} written", map.name);
+            let bytes = std::fs::read(path).expect("map reads back");
+            assert_eq!(u64::try_from(bytes.len()).unwrap_or(0), map.bytes);
+        }
+        let find = |name: &str| {
+            first
+                .coverage
+                .iter()
+                .find(|map| map.name == name)
+                .expect("map named")
+        };
+        // The brick graph drives wetness, dirt and heat; blood is flat, and a
+        // flat channel is a warning row, never a refusal.
+        assert!(find("coverage_dirt").max[0] > find("coverage_dirt").min[0]);
+        assert!(find("coverage_wetness").max[0] > find("coverage_wetness").min[0]);
+        let blood = find("coverage_blood");
+        assert_eq!(blood.min[0], blood.max[0]);
+        assert!(
+            first
+                .warnings
+                .iter()
+                .any(|row| row.contains("coverage_blood")),
+            "{:?}",
+            first.warnings
+        );
+        // Twice: equal digests and equal bytes.
+        let second = ask(true).expect("bakes coverage twice");
+        assert_eq!(second.coverage, first.coverage);
+        assert_eq!(second.warnings, first.warnings);
+        // Coverage off: a plain bake writes four maps and no coverage set.
+        let plain = ask(false).expect("bakes four");
+        assert!(plain.coverage.is_empty());
+        assert!(plain.warnings.is_empty());
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[cfg(feature = "intake")]
+    #[test]
+    fn every_baked_map_cooks_the_same_ktx2_bytes_twice() {
+        let server = server();
+        let out = scratch("bake-ktx2");
+        let ask = || {
+            MaterialBakeTool::invoke(
+                &server,
+                MaterialBakeArgs {
+                    id: None,
+                    graph: Some(BRICK.to_owned()),
+                    resolution: Some(512),
+                    coverage: true,
+                    out_dir: out.to_string_lossy().into_owned(),
+                },
+            )
+            .expect("bakes")
+        };
+        let receipts = |bake: &MaterialBakeOutput| -> Vec<(String, Option<u64>, Option<String>)> {
+            bake.maps
+                .iter()
+                .chain(bake.coverage.iter())
+                .map(|map| (map.name.clone(), map.ktx2_bytes, map.ktx2_digest.clone()))
+                .collect()
+        };
+        let first = ask();
+        let rows = receipts(&first);
+        assert_eq!(rows.len(), 11, "four look maps and seven coverage maps");
+        for (name, bytes, digest) in &rows {
+            assert!(bytes.unwrap_or(0) > 0, "{name} cooked");
+            assert_eq!(digest.as_ref().map(String::len), Some(16), "{name}");
+        }
+        let second = ask();
+        assert_eq!(
+            receipts(&second),
+            rows,
+            "the same graph twice cooks equal bytes"
+        );
         let _ = std::fs::remove_dir_all(&out);
     }
 

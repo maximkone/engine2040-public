@@ -2390,10 +2390,6 @@ mod tests {
             first.surface_chars,
             first.budget_chars
         );
-        eprintln!(
-            "MEASURE surface {} budget {} tools {}",
-            first.surface_chars, first.budget_chars, first.tools
-        );
         assert!(first.surface_chars > 0);
         assert!(first.tools > 0);
         assert_eq!(first.audit_head, None, "the first call sees an empty chain");
