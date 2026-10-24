@@ -37,6 +37,10 @@ profile = ["app", "engine-perf/profile"]
 # golden tape keep the std-only graph; `cargo test -p engine-game --features
 # minidump --lib crash` proves the dump parses.
 minidump = ["dep:minidump-writer"]
+# SW32: look knobs reloaded from a dev-built dylib while the arena runs. The
+# watcher is std + libloading (a leaf crate), so the headless default graph stays
+# external-free; `live` alone is enough for the lib test.
+live = ["dep:engine-live"]
 
 # WIN1: the `arena` window binary, gated on `app` so the headless default
 # stays std-only. winit is already wired (MIT/Apache, window stack).
@@ -125,6 +129,8 @@ winit = { workspace = true, optional = true }
 # MIT (crates.io API 2026-10-24; rust-minidump/minidump-writer). Windows is the
 # only leg the writer is wired to; it calls the system MiniDumpWriteDump.
 minidump-writer = { version = "=0.13.0", optional = true }
+# SW32: the live knob dylib watcher (presentation only; `live` feature).
+engine-live = { workspace = true, optional = true }
 # Pad device poll on the windowed leg only (optional, so the headless default
 # graph stays std-only); Apache-2.0/MIT passes the deny allow-list.
 gilrs = { version = "=0.11.2", optional = true }
