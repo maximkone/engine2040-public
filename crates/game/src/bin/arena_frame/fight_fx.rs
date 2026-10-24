@@ -23,8 +23,8 @@ pub(super) const REACH_M: f32 = 0.3;
 const BLOOD_BASE: u32 = 8;
 const BLOOD_PER: u32 = 25;
 const BLOOD_MAX: u32 = 48;
-/// Sparks for a held block (plus the chip) and for a parry (the louder one).
-const SPARKS_BLOCK: u32 = 14;
+/// Sparks for a parry, the loudest ring (a block's ring is
+/// [`engine_game::shield_spark`]'s 6..=10 at the shield rim).
 const SPARKS_PARRY: u32 = 30;
 /// Dust where a downed body lands, and the blood of the finishing blow.
 const DUST_KNOCKDOWN: u32 = 24;
@@ -65,9 +65,15 @@ struct Contact {
 }
 
 /// Every burst the tick's cues ask for, in cue order, handed to `emit` one by
-/// one (no per-tick allocation). A cue whose fighters are not in `views` (a
-/// slot that left) throws nothing.
-pub(super) fn bursts_for(cues: &[FightCue], views: &[FighterView], mut emit: impl FnMut(Burst)) {
+/// one (no per-tick allocation). `tick` stamps a block's rim sparks with the
+/// tick that resolved it. A cue whose fighters are not in `views` (a slot that
+/// left) throws nothing.
+pub(super) fn bursts_for(
+    cues: &[FightCue],
+    views: &[FighterView],
+    tick: u32,
+    mut emit: impl FnMut(Burst),
+) {
     for cue in cues {
         match *cue {
             FightCue::Hit {
@@ -95,18 +101,15 @@ pub(super) fn bursts_for(cues: &[FightCue], views: &[FighterView], mut emit: imp
                     });
                 }
             }
-            FightCue::Blocked {
-                attacker,
-                victim,
-                chip,
-            } => {
-                if let Some(at) = contact(views, attacker, victim) {
-                    let count = SPARKS_BLOCK + u32::from(chip) / BLOOD_PER;
+            FightCue::Blocked { .. } => {
+                // SW172: the ring leaves the shield rim facing the attacker,
+                // stamped with this tick: not a chest hit.
+                if let Some(spark) = engine_game::shield_spark::rim_spark_for(cue, tick, views) {
                     emit(Burst {
                         kind: EmitterKind::Sparks,
-                        at_m: at.chest_m,
-                        dir: lift(at.toward, 0.6),
-                        count,
+                        at_m: spark.at_m,
+                        dir: spark.dir,
+                        count: spark.count,
                         splat: None,
                     });
                 }
@@ -193,7 +196,7 @@ impl ArenaApp {
         let Some(presenter) = self.presenter.as_mut() else {
             return;
         };
-        bursts_for(&self.tick_scratch.cues, self.app.fighter_views(), |b| {
+        bursts_for(&self.tick_scratch.cues, self.app.fighter_views(), self.tick_scratch.tick, |b| {
             presenter.fight_burst(b.kind, b.at_m, b.dir, b.count);
             if let Some(splat) = b.splat {
                 presenter.fight_splat(splat.at_m, splat.radius_m);
@@ -248,7 +251,7 @@ mod tests {
 
     fn collect(cues: &[FightCue]) -> Vec<Burst> {
         let mut out = Vec::new();
-        bursts_for(cues, &views(), |b| out.push(b));
+        bursts_for(cues, &views(), 0, |b| out.push(b));
         out
     }
 
