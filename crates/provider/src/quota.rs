@@ -456,6 +456,197 @@ impl QuotaBook {
     pub fn session_usage(&self, session: SessionId) -> Option<QuotaUsage> {
         self.sessions.get(&session).map(|row| row.row.usage)
     }
+
+    /// Write every counter as deterministic integer text, one row per line in
+    /// id order. The same book always writes the same bytes, and the text
+    /// holds no request body, prompt or key: a restart reloads it through
+    /// [`QuotaBook::decode`] and keeps its budget exactly where it stopped.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        let mut text = String::from(QUOTA_STATE_HEADER);
+        text.push('\n');
+        text.push_str(&format!("next {}\n", self.next_session));
+        let mut players: Vec<(&PlayerId, &QuotaRow)> = self.players.iter().collect();
+        players.sort_by_key(|(id, _)| id.0);
+        for (id, row) in players {
+            text.push_str(&row_line("player", id.0, None, row));
+        }
+        let mut sessions: Vec<(&SessionId, &SessionRow)> = self.sessions.iter().collect();
+        sessions.sort_by_key(|(id, _)| id.0);
+        for (id, session) in sessions {
+            text.push_str(&row_line(
+                "session",
+                id.0,
+                Some(session.owner.0),
+                &session.row,
+            ));
+        }
+        text
+    }
+
+    /// Load a book written by [`QuotaBook::encode`] under `plan`. The plan is
+    /// the caller's, so a save from one build reloads under the same limits;
+    /// counters, rate windows and the next session id come back as written.
+    ///
+    /// Errors: [`QuotaStateError`] for a foreign version, oversized text, a
+    /// malformed line, a repeated id, an orphan session or too many rows.
+    pub fn decode(plan: QuotaPlan, text: &str) -> Result<Self, QuotaStateError> {
+        if text.len() > MAX_STATE_BYTES {
+            return Err(QuotaStateError::TooLong);
+        }
+        let mut lines = text.split('\n');
+        if lines.next() != Some(QUOTA_STATE_HEADER) {
+            return Err(QuotaStateError::UnknownVersion);
+        }
+        let mut book = Self::new(plan);
+        let mut next_session: Option<u64> = None;
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let mut fields = line.split(' ');
+            match fields.next() {
+                Some("next") => {
+                    if next_session.is_some() {
+                        return Err(QuotaStateError::Malformed);
+                    }
+                    next_session = Some(state_u64(fields.next())?);
+                    state_end(fields)?;
+                }
+                Some("player") => {
+                    if book.players.len() >= MAX_TRACKED_PLAYERS {
+                        return Err(QuotaStateError::TooManyRows);
+                    }
+                    let id = PlayerId(state_u64(fields.next())?);
+                    let row = QuotaRow {
+                        usage: QuotaUsage {
+                            requests: state_u32(fields.next())?,
+                            tokens: state_u64(fields.next())?,
+                            spend: state_u64(fields.next())?,
+                        },
+                        rate_start_ms: state_u64(fields.next())?,
+                        rate_count: state_u32(fields.next())?,
+                    };
+                    state_end(fields)?;
+                    if book.players.insert(id, row).is_some() {
+                        return Err(QuotaStateError::DuplicateId);
+                    }
+                }
+                Some("session") => {
+                    if book.sessions.len() >= MAX_TRACKED_SESSIONS {
+                        return Err(QuotaStateError::TooManyRows);
+                    }
+                    let id = SessionId(state_u64(fields.next())?);
+                    let owner = PlayerId(state_u64(fields.next())?);
+                    let row = QuotaRow {
+                        usage: QuotaUsage {
+                            requests: state_u32(fields.next())?,
+                            tokens: state_u64(fields.next())?,
+                            spend: state_u64(fields.next())?,
+                        },
+                        rate_start_ms: state_u64(fields.next())?,
+                        rate_count: state_u32(fields.next())?,
+                    };
+                    state_end(fields)?;
+                    if book
+                        .sessions
+                        .insert(id, SessionRow { owner, row })
+                        .is_some()
+                    {
+                        return Err(QuotaStateError::DuplicateId);
+                    }
+                }
+                _ => return Err(QuotaStateError::Malformed),
+            }
+        }
+        let next_session = next_session.ok_or(QuotaStateError::Malformed)?;
+        if book.sessions.keys().any(|id| id.0 > next_session) {
+            return Err(QuotaStateError::Malformed);
+        }
+        if book
+            .sessions
+            .values()
+            .any(|session| !book.players.contains_key(&session.owner))
+        {
+            return Err(QuotaStateError::OrphanSession);
+        }
+        book.next_session = next_session;
+        Ok(book)
+    }
+}
+
+/// First line of an encoded book. A later format bumps it and old text is
+/// refused instead of guessed at.
+pub const QUOTA_STATE_HEADER: &str = "quota-v1";
+/// Longest accepted encoded book, in bytes.
+pub const MAX_STATE_BYTES: usize = 256 * 1024;
+
+/// Why an encoded book would not load. Labels only, no caller text.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum QuotaStateError {
+    /// The text does not open with [`QUOTA_STATE_HEADER`].
+    UnknownVersion,
+    /// The text is longer than [`MAX_STATE_BYTES`].
+    TooLong,
+    /// A line is not a known kind with the right number of integer fields.
+    Malformed,
+    /// Two rows share a player or a session id.
+    DuplicateId,
+    /// A session names an owner with no player row.
+    OrphanSession,
+    /// More rows than [`MAX_TRACKED_PLAYERS`] or [`MAX_TRACKED_SESSIONS`].
+    TooManyRows,
+}
+
+impl fmt::Display for QuotaStateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            QuotaStateError::UnknownVersion => "quota state: unknown version",
+            QuotaStateError::TooLong => "quota state: longer than the limit",
+            QuotaStateError::Malformed => "quota state: malformed line",
+            QuotaStateError::DuplicateId => "quota state: duplicate id",
+            QuotaStateError::OrphanSession => "quota state: session without its player",
+            QuotaStateError::TooManyRows => "quota state: too many rows",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for QuotaStateError {}
+
+/// One player or session row as text: kind, id, optional owner, counters.
+fn row_line(kind: &str, id: u64, owner: Option<u64>, row: &QuotaRow) -> String {
+    let usage = row.usage;
+    let counters = format!(
+        "{} {} {} {} {}",
+        usage.requests, usage.tokens, usage.spend, row.rate_start_ms, row.rate_count
+    );
+    match owner {
+        Some(owner) => format!("{kind} {id} {owner} {counters}\n"),
+        None => format!("{kind} {id} {counters}\n"),
+    }
+}
+
+fn state_u64(field: Option<&str>) -> Result<u64, QuotaStateError> {
+    field
+        .ok_or(QuotaStateError::Malformed)?
+        .parse::<u64>()
+        .map_err(|_| QuotaStateError::Malformed)
+}
+
+fn state_u32(field: Option<&str>) -> Result<u32, QuotaStateError> {
+    field
+        .ok_or(QuotaStateError::Malformed)?
+        .parse::<u32>()
+        .map_err(|_| QuotaStateError::Malformed)
+}
+
+fn state_end<'a>(mut fields: impl Iterator<Item = &'a str>) -> Result<(), QuotaStateError> {
+    if fields.next().is_none() {
+        Ok(())
+    } else {
+        Err(QuotaStateError::Malformed)
+    }
 }
 
 fn rate_window(row: &QuotaRow, now_ms: u64, rate: Option<RateLimit>) -> Option<(u64, u32)> {
@@ -1643,5 +1834,131 @@ mod tests {
         assert!(!report.is_clean());
         assert_eq!(report.findings[0].kind, KeyKind::PrivateKeyPem);
         fs::remove_dir_all(&root).expect("temp cleanup");
+    }
+
+    fn savings_plan() -> QuotaPlan {
+        QuotaPlan::new(
+            QuotaLimits {
+                requests: 4,
+                tokens: 1_000,
+                spend: Some(500),
+                rate: None,
+            },
+            QuotaLimits {
+                requests: 3,
+                tokens: 400,
+                spend: Some(200),
+                rate: Some(RateLimit {
+                    max_requests: 2,
+                    window_ms: 1_000,
+                }),
+            },
+        )
+        .expect("savings plan validates")
+    }
+
+    #[test]
+    fn a_saved_book_reloads_with_the_same_budget_left() {
+        let plan = savings_plan();
+        let player = PlayerId(7);
+        let mut book = QuotaBook::new(plan);
+        let first = book.open_session(player).expect("first session");
+        let second = book.open_session(player).expect("second session");
+        book.charge(0, player, first, QuotaCharge::new(100, 10))
+            .expect("charge one");
+        book.charge(10, player, first, QuotaCharge::new(50, 5))
+            .expect("charge two");
+        book.charge(20, player, second, QuotaCharge::new(30, 5))
+            .expect("charge three");
+        assert!(!book.close_session(SessionId(99)), "unknown session");
+
+        let saved = book.encode();
+        assert!(saved.starts_with(QUOTA_STATE_HEADER), "{saved}");
+        assert_eq!(saved, book.encode(), "one book writes one text");
+
+        let mut reloaded = QuotaBook::decode(plan, &saved).expect("reload");
+        assert_eq!(reloaded.encode(), saved, "the round trip is stable");
+        assert_eq!(reloaded.plan(), book.plan(), "the plan rides along");
+        assert_eq!(reloaded.player_usage(player), book.player_usage(player));
+        assert_eq!(reloaded.session_usage(first), book.session_usage(first));
+        assert_eq!(reloaded.session_usage(second), book.session_usage(second));
+        assert_eq!(
+            reloaded.player_usage(player),
+            Some(QuotaUsage {
+                requests: 3,
+                tokens: 180,
+                spend: 20,
+            })
+        );
+
+        // Ids are never reused after a restart: the next session is the third.
+        let third = reloaded.open_session(player).expect("third session");
+        assert_eq!(third, SessionId(3));
+
+        // The session rate window came back too: two charges inside its
+        // second, so the next one is refused on rate, not reset by the load.
+        let refused = reloaded
+            .charge(30, player, first, QuotaCharge::new(1, 0))
+            .expect_err("the rate window survived the load");
+        assert_eq!(refused.scope, QuotaScope::Session);
+        assert_eq!(refused.limit, QuotaLimit::Rate);
+        assert_eq!((refused.allowed, refused.used), (2, 2));
+        assert!(refused.message().contains("remaining=0"), "{refused:?}");
+
+        // One window later the same charge fits, and so does the reloaded
+        // book's spend cap arithmetic.
+        reloaded
+            .charge(2_000, player, first, QuotaCharge::new(10, 1))
+            .expect("a fresh window admits it");
+        assert_eq!(
+            reloaded.session_usage(first).map(|usage| usage.requests),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_damaged_save_is_refused_by_name() {
+        let plan = savings_plan();
+        let cases = [
+            (String::new(), QuotaStateError::UnknownVersion),
+            (
+                String::from("quota-v0\nnext 0\n"),
+                QuotaStateError::UnknownVersion,
+            ),
+            (String::from("quota-v1\n"), QuotaStateError::Malformed),
+            (
+                String::from("quota-v1\nnext 1\nplayer 1 x 0 0 0 0\n"),
+                QuotaStateError::Malformed,
+            ),
+            (
+                String::from("quota-v1\nnext 1\nplayer 1 0 0 0 0 0\n\nplayer 1 0 0 0 0 0\n"),
+                QuotaStateError::DuplicateId,
+            ),
+            (
+                String::from("quota-v1\nnext 1\nsession 1 2 0 0 0 0 0\n"),
+                QuotaStateError::OrphanSession,
+            ),
+            (
+                String::from("quota-v1\nnext 0\nplayer 1 0 0 0 0 0\nsession 1 1 0 0 0 0 0\n"),
+                QuotaStateError::Malformed,
+            ),
+            (
+                format!("quota-v1\nnext 0\n{}", "x".repeat(MAX_STATE_BYTES)),
+                QuotaStateError::TooLong,
+            ),
+        ];
+        for (text, expected) in cases {
+            let error = QuotaBook::decode(plan, &text).expect_err("the damaged save is refused");
+            assert_eq!(error, expected, "{text:?}");
+        }
+
+        let mut crowded = String::from("quota-v1\nnext 0\n");
+        for id in 0..=MAX_TRACKED_PLAYERS {
+            crowded.push_str(&format!("player {id} 0 0 0 0 0\n"));
+        }
+        assert_eq!(
+            QuotaBook::decode(plan, &crowded).expect_err("too many players"),
+            QuotaStateError::TooManyRows
+        );
     }
 }
