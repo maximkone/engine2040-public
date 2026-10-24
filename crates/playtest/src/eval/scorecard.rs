@@ -1,6 +1,6 @@
-//! AG1 agent scorecard: pass rate and tokens per task for each suite, by
-//! model tier, written as one dated markdown card; a drop against the last
-//! card is a red line.
+//! AG1 agent scorecard: pass rate, cost per row and tokens per task for each
+//! suite, by model tier, written as one dated markdown card; a drop against
+//! the last card is a red line.
 //!
 //! One command writes the card and prints it:
 //! `SCORECARD_DATE=2026-10-18 cargo test -p engine-playtest --lib scorecard_command -- --ignored --nocapture`.
@@ -60,7 +60,7 @@ impl Tier {
     }
 }
 
-/// One card line: a suite at a tier with its pass count and token spend.
+/// One card line: a suite at a tier with its pass count, cost and token spend.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CardLine {
     /// Suite name.
@@ -71,6 +71,9 @@ pub struct CardLine {
     pub passed: u32,
     /// Tasks run; `0` means the suite is unbuilt.
     pub total: u32,
+    /// Cost of one row in minor units; `None` when no row reports a cost or
+    /// any row's cost is unknown, which is never counted as zero.
+    pub cost_per_row: Option<u64>,
     /// Tokens per task; `None` is unknown, never zero.
     pub tokens_per_task: Option<u64>,
 }
@@ -162,13 +165,16 @@ impl Scorecard {
         let reds = last.map(|last| self.reds(last)).unwrap_or_default();
         let mut out = format!("# Agent scorecard {}\n\n", self.date);
         out.push_str(
-            "| suite | tier | passed | total | pass rate | tokens per task | vs last card |\n",
+            "| suite | tier | passed | total | pass rate | cost per row | tokens per task | vs last card |\n",
         );
-        out.push_str("|---|---|---|---|---|---|---|\n");
+        out.push_str("|---|---|---|---|---|---|---|---|\n");
         for line in &self.lines {
             let rate = line
                 .rate_permille()
                 .map_or_else(|| "unbuilt".to_owned(), percent);
+            let cost = line
+                .cost_per_row
+                .map_or_else(|| "unknown".to_owned(), |cost| cost.to_string());
             let tokens = line
                 .tokens_per_task
                 .map_or_else(|| "unknown".to_owned(), |tokens| tokens.to_string());
@@ -177,12 +183,13 @@ impl Scorecard {
                 Some(last) => self.against(line, last, &reds),
             };
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 line.suite,
                 line.tier.name(),
                 line.passed,
                 line.total,
                 rate,
+                cost,
                 tokens,
                 against,
             ));
@@ -244,22 +251,36 @@ impl Scorecard {
     }
 }
 
-/// One table row back into a line; `None` when a cell does not read.
+/// One table row back into a line; `None` when a cell does not read. An old
+/// card has 7 cells and no cost column; a new one has 8.
 fn read_row(row: &str) -> Option<CardLine> {
     let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
-    let [suite, tier, passed, total, _rate, tokens, _against] = cells[..] else {
+    if cells.len() != 7 && cells.len() != 8 {
         return None;
-    };
+    }
+    let tokens_at = cells.len() - 2;
+    let cost_at = cells.len() - 3;
     Some(CardLine {
-        suite: suite.to_owned(),
-        tier: Tier::parse(tier)?,
-        passed: passed.parse().ok()?,
-        total: total.parse().ok()?,
-        tokens_per_task: match tokens {
-            "unknown" => None,
-            other => Some(other.parse().ok()?),
+        suite: cells[0].to_owned(),
+        tier: Tier::parse(cells[1])?,
+        passed: cells[2].parse().ok()?,
+        total: cells[3].parse().ok()?,
+        cost_per_row: if cells.len() == 8 {
+            optional_count(cells[cost_at])?
+        } else {
+            None
         },
+        tokens_per_task: optional_count(cells[tokens_at])?,
     })
+}
+
+/// `unknown` or a plain number; `None` when the cell is neither.
+fn optional_count(cell: &str) -> Option<Option<u64>> {
+    if cell == "unknown" {
+        Some(None)
+    } else {
+        Some(Some(cell.parse().ok()?))
+    }
 }
 
 fn line(suite: &str, tier: Tier, passed: usize, total: usize) -> CardLine {
@@ -268,8 +289,26 @@ fn line(suite: &str, tier: Tier, passed: usize, total: usize) -> CardLine {
         tier,
         passed: u32::try_from(passed).unwrap_or(u32::MAX),
         total: u32::try_from(total).unwrap_or(u32::MAX),
+        cost_per_row: None,
         tokens_per_task: None,
     }
+}
+
+/// Cost of one row in minor units: the mean of the rows that report a cost.
+/// `None` when there are no rows or any row's cost is unknown, so an unknown
+/// is never counted as zero.
+fn cost_per_row(rows: &[&EvalRow]) -> Option<u64> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut sum = 0u64;
+    for row in rows {
+        match row.cost {
+            Cost::Units(units) => sum = sum.saturating_add(units),
+            Cost::Unknown => return None,
+        }
+    }
+    Some(sum / u64::try_from(rows.len()).unwrap_or(1))
 }
 
 /// Run the suites and collect their lines: EV1, the mirrors and the spatial
@@ -286,7 +325,10 @@ pub fn collect() -> Result<Vec<CardLine>, CardError> {
             .iter()
             .filter(|row| EvalReport::row_is_green(row))
             .count();
-        lines.push(line("EV1", tier, green, rows.len()));
+        let cost = cost_per_row(&rows);
+        let mut ev1_line = line("EV1", tier, green, rows.len());
+        ev1_line.cost_per_row = cost;
+        lines.push(ev1_line);
         lines.push(line("mirror", tier, mirror.solved(label), mirror.tasks()));
     }
     let spatial = crate::spatial_eval::proof_gate()
@@ -359,16 +401,59 @@ mod tests {
     }
 
     #[test]
+    fn the_scorecard_prints_the_cost_of_one_row() {
+        let mut card = fixture(25);
+        card.lines[0].cost_per_row = Some(7);
+        let text = card.to_markdown(None);
+        assert!(
+            text.contains("| EV1 | free | 25 | 25 | 100.0% | 7 | unknown | - |"),
+            "{text}"
+        );
+        let back = Scorecard::from_markdown(&text).expect("a card reads back");
+        assert_eq!(back.lines[0].cost_per_row, Some(7));
+        assert_eq!(back.lines[1].cost_per_row, None, "no cost stays unknown");
+    }
+
+    #[test]
+    fn cost_per_row_never_counts_an_unknown_as_zero() {
+        let a = row_with_cost("local", Cost::Units(4));
+        let b = row_with_cost("local", Cost::Units(6));
+        assert_eq!(cost_per_row(&[&a, &b]), Some(5), "mean of the known costs");
+        let unknown = row_with_cost("mock", Cost::Unknown);
+        assert_eq!(
+            cost_per_row(&[&a, &unknown]),
+            None,
+            "one unknown makes the line unknown, never zero"
+        );
+        assert_eq!(cost_per_row(&[]), None, "an unbuilt suite has no cost");
+    }
+
+    /// One report row carrying only what the cost column reads.
+    fn row_with_cost(backend: &'static str, cost: Cost) -> EvalRow {
+        EvalRow {
+            task: "ev1-place",
+            flow: "place",
+            backend,
+            completed: true,
+            rejected: false,
+            latency_ms: 1,
+            cost,
+            privacy_failure: false,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
     fn scorecard_table_is_the_same_twice_on_fixture_results() {
         let card = fixture(24);
         let text = card.to_markdown(None);
         assert_eq!(text, fixture(24).to_markdown(None), "same table x2");
         let want = "# Agent scorecard 2026-10-18\n\n\
-| suite | tier | passed | total | pass rate | tokens per task | vs last card |\n\
-|---|---|---|---|---|---|---|\n\
-| EV1 | free | 24 | 25 | 96.0% | unknown | - |\n\
-| EV1 | strong | 25 | 25 | 100.0% | 1200 | - |\n\
-| BreakBench | replay | 0 | 0 | unbuilt | unknown | - |\n\
+| suite | tier | passed | total | pass rate | cost per row | tokens per task | vs last card |\n\
+|---|---|---|---|---|---|---|---|\n\
+| EV1 | free | 24 | 25 | 96.0% | unknown | unknown | - |\n\
+| EV1 | strong | 25 | 25 | 100.0% | unknown | 1200 | - |\n\
+| BreakBench | replay | 0 | 0 | unbuilt | unknown | unknown | - |\n\
 \nRED lines: 0\n";
         assert_eq!(text, want);
     }
@@ -378,12 +463,12 @@ mod tests {
         let last = fixture(25);
         let text = fixture(24).to_markdown(Some(&last));
         assert!(
-            text.contains("| EV1 | free | 24 | 25 | 96.0% | unknown | RED |"),
+            text.contains("| EV1 | free | 24 | 25 | 96.0% | unknown | unknown | RED |"),
             "{text}"
         );
         assert!(text.contains("RED lines: 1\nRED EV1 free: 100.0% -> 96.0%\n"));
         // The other lines did not drop, so they are not red.
-        assert!(text.contains("| EV1 | strong | 25 | 25 | 100.0% | 1200 | same |"));
+        assert!(text.contains("| EV1 | strong | 25 | 25 | 100.0% | unknown | 1200 | same |"));
         // Negative control: the same rate is not red, a better one is up.
         assert!(fixture(25)
             .to_markdown(Some(&last))
@@ -406,7 +491,7 @@ mod tests {
             ("EV1", None)
         );
         let text = now.to_markdown(Some(&last));
-        assert!(text.contains("| mirror | replay | 30 | 30 | 100.0% | unknown | new |"));
+        assert!(text.contains("| mirror | replay | 30 | 30 | 100.0% | unknown | unknown | new |"));
         assert!(text.contains("RED EV1 strong: 100.0% -> lost\n"));
     }
 

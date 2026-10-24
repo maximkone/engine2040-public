@@ -450,31 +450,17 @@ pub struct MaterialBakeOutput {
     pub textures: Vec<String>,
 }
 
+/// This session's graphs: material id to graph id to graph.
+type GraphTable =
+    std::collections::BTreeMap<u64, std::collections::BTreeMap<u64, engine_material::graph::Graph>>;
+
 /// This session's graphs by id, so `graph.get` and `bake` can name one.
-fn graphs() -> &'static std::sync::Mutex<
-    std::collections::BTreeMap<u64, std::collections::BTreeMap<u64, engine_material::graph::Graph>>,
-> {
-    static GRAPHS: std::sync::OnceLock<
-        std::sync::Mutex<
-            std::collections::BTreeMap<
-                u64,
-                std::collections::BTreeMap<u64, engine_material::graph::Graph>,
-            >,
-        >,
-    > = std::sync::OnceLock::new();
+fn graphs() -> &'static std::sync::Mutex<GraphTable> {
+    static GRAPHS: std::sync::OnceLock<std::sync::Mutex<GraphTable>> = std::sync::OnceLock::new();
     GRAPHS.get_or_init(std::sync::Mutex::default)
 }
 
-fn lock_graphs() -> Result<
-    std::sync::MutexGuard<
-        'static,
-        std::collections::BTreeMap<
-            u64,
-            std::collections::BTreeMap<u64, engine_material::graph::Graph>,
-        >,
-    >,
-    McpToolError,
-> {
+fn lock_graphs() -> Result<std::sync::MutexGuard<'static, GraphTable>, McpToolError> {
     graphs().lock().map_err(|_| {
         McpToolError::new(
             "lock_poisoned",
@@ -1648,7 +1634,6 @@ mod tests {
             TOOL_MATERIAL_GRAPH_SET,
             TOOL_MATERIAL_BAKE,
         ] {
-            let verb = registry.verb(name).expect("registered");
             let verb = registry.verb(name).expect("registered");
             assert_eq!(verb.card(), CapabilityCard::Commit, "{name}");
             assert!(!verb.readonly(), "{name}");

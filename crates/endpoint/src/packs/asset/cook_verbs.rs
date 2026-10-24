@@ -25,9 +25,10 @@
 //! Feature gate: built only with both the `intake` (glTF import, bundle cook) and `geo`
 //! (mesh tools) features; both are off by default.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use engine_anim::clip_rot::{bake_rot_track, rot_blob_hash, write_rot_blob, RotBlob, RotTrack};
 use engine_assets::bundle_cook::{cook_bundle_bytes, verify_bundle_bytes, StagedCooked};
 use engine_assets::mesh_cook::{
     tri_count, MeshClass, MAX_HULL_VERTS, MAX_LOD_LEVELS, PROP_MAX_TRIS,
@@ -366,6 +367,12 @@ pub struct CookOutput {
     pub bundle_bytes: u64,
     /// Lowercase hex digest of the bundle bytes.
     pub bundle_digest: String,
+    /// Rotation sidecar path, when the GLB has skinned rotation channels.
+    pub rot_path: Option<String>,
+    /// Rotation sidecar size in bytes (0 when the GLB has no rotation channels).
+    pub rot_bytes: u64,
+    /// Rotation sidecar digest, lowercase hex (empty when there is none).
+    pub rot_digest: String,
     /// Triangles per LOD against its budget.
     pub lod: Vec<LodBudgetRow>,
     /// Hull parts staged (`COL_` meshes).
@@ -678,6 +685,225 @@ fn build_bundle(
     Ok((bytes, built))
 }
 
+/// GLB JSON and BIN chunks, when `bytes` is a GLB.
+fn glb_chunks(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    if bytes.get(0..4)? != b"glTF" {
+        return None;
+    }
+    let mut at = 12usize;
+    let mut json = None;
+    let mut bin: &[u8] = &[];
+    while at.checked_add(8)? <= bytes.len() {
+        let len = usize::try_from(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+            .unwrap_or(usize::MAX);
+        let kind = bytes.get(at + 4..at + 8)?;
+        let body = bytes.get(at + 8..at.checked_add(8)?.checked_add(len)?)?;
+        match kind {
+            b"JSON" => json = Some(body),
+            b"BIN\0" => bin = body,
+            _ => {}
+        }
+        at = at.checked_add(8)?.checked_add(len)?;
+    }
+    Some((json?, bin))
+}
+
+/// Read one float accessor (SCALAR, VEC3 or VEC4) as a flat list.
+fn accessor_f32(doc: &Value, bin: &[u8], index: u64) -> Option<Vec<f32>> {
+    let accessors = doc.get("accessors")?.as_array()?;
+    let accessor = accessors.get(usize::try_from(index).ok()?)?;
+    if accessor.get("componentType")?.as_u64()? != 5126 {
+        return None;
+    }
+    let components = match accessor.get("type")?.as_str()? {
+        "SCALAR" => 1,
+        "VEC3" => 3,
+        "VEC4" => 4,
+        _ => return None,
+    };
+    let count = usize::try_from(accessor.get("count")?.as_u64()?).ok()?;
+    let view_index = usize::try_from(accessor.get("bufferView")?.as_u64()?).ok()?;
+    let view = doc.get("bufferViews")?.as_array()?.get(view_index)?;
+    let base = usize::try_from(view.get("byteOffset").and_then(Value::as_u64).unwrap_or(0)).ok()?
+        + usize::try_from(
+            accessor
+                .get("byteOffset")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        )
+        .ok()?;
+    let stride = view
+        .get("byteStride")
+        .and_then(Value::as_u64)
+        .and_then(|s| usize::try_from(s).ok())
+        .filter(|s| *s >= components * 4)
+        .unwrap_or(components * 4);
+    let mut out = Vec::with_capacity(count.checked_mul(components)?);
+    for i in 0..count {
+        let start = base.checked_add(i.checked_mul(stride)?)?;
+        for c in 0..components {
+            let at = start.checked_add(c * 4)?;
+            out.push(f32::from_le_bytes(bin.get(at..at + 4)?.try_into().ok()?));
+        }
+    }
+    Some(out)
+}
+
+/// Bake the rotation sidecar beside the bundle: one lane per skin joint, from the
+/// first animation's rotation channels. `None` when the GLB has no skinned
+/// rotation channel, so a static mesh writes no `.rot` file and the bundle bytes
+/// stay exactly what they were before this verb knew about rotations.
+fn rot_sidecar(
+    bytes: &[u8],
+    name: &str,
+    folder: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<Option<(PathBuf, u64, String)>, McpToolError> {
+    let Some((json, bin)) = glb_chunks(bytes) else {
+        return Ok(None);
+    };
+    let Ok(doc) = rmcp::serde_json::from_slice::<Value>(json) else {
+        return Ok(None);
+    };
+    let mut joints: Vec<u64> = Vec::new();
+    for skin in doc
+        .get("skins")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for joint in skin
+            .get("joints")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(node) = joint.as_u64() {
+                joints.push(node);
+            }
+        }
+    }
+    joints.sort_unstable();
+    joints.dedup();
+    if joints.is_empty() {
+        return Ok(None);
+    }
+    let Some((rotations, translated)) = rot_channels(&doc, bin, &joints) else {
+        return Ok(None);
+    };
+    if rotations.is_empty() {
+        return Ok(None);
+    }
+    let (lanes, end) = bake_lanes(&joints, &rotations, &translated, warnings);
+    let blob = RotBlob {
+        joints: u16::try_from(lanes.len()).unwrap_or(u16::MAX),
+        lanes,
+        sockets: Vec::new(),
+        ticks_len: end,
+    };
+    let blob_bytes = write_rot_blob(&blob);
+    let path = folder.join(format!("{name}.rot"));
+    std::fs::write(&path, &blob_bytes).map_err(|e| io_failed("write", &path, &e))?;
+    let digest = format!("{:016x}", rot_blob_hash(&blob));
+    Ok(Some((path, wide(blob_bytes.len()), digest)))
+}
+
+/// Rotation tracks and translation nodes of the first animation, kept only for
+/// nodes that are skin joints.
+fn rot_channels(
+    doc: &Value,
+    bin: &[u8],
+    joints: &[u64],
+) -> Option<(BTreeMap<u64, (Vec<f32>, Vec<[f32; 4]>)>, BTreeSet<u64>)> {
+    let animation = doc
+        .get("animations")
+        .and_then(Value::as_array)
+        .and_then(|list| list.first())?;
+    let samplers = animation.get("samplers").and_then(Value::as_array)?;
+    let channels = animation.get("channels").and_then(Value::as_array)?;
+    let mut rotations: BTreeMap<u64, (Vec<f32>, Vec<[f32; 4]>)> = BTreeMap::new();
+    let mut translated: BTreeSet<u64> = BTreeSet::new();
+    for channel in channels {
+        let Some(target) = channel.get("target") else {
+            continue;
+        };
+        let (Some(node), Some(path)) = (
+            target.get("node").and_then(Value::as_u64),
+            target.get("path").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if !joints.contains(&node) {
+            continue;
+        }
+        if path == "translation" {
+            translated.insert(node);
+            continue;
+        }
+        if path != "rotation" {
+            continue;
+        }
+        let Some(sampler) = channel
+            .get("sampler")
+            .and_then(Value::as_u64)
+            .and_then(|i| samplers.get(usize::try_from(i).ok()?))
+        else {
+            continue;
+        };
+        let times = sampler
+            .get("input")
+            .and_then(Value::as_u64)
+            .and_then(|i| accessor_f32(doc, bin, i));
+        let quats = sampler
+            .get("output")
+            .and_then(Value::as_u64)
+            .and_then(|i| accessor_f32(doc, bin, i));
+        let (Some(times), Some(quats)) = (times, quats) else {
+            continue;
+        };
+        if quats.len() % 4 != 0 {
+            continue;
+        }
+        let values: Vec<[f32; 4]> = quats
+            .chunks_exact(4)
+            .map(|q| [q[0], q[1], q[2], q[3]])
+            .collect();
+        if values.len() != times.len() {
+            continue;
+        }
+        rotations.insert(node, (times, values));
+    }
+    Some((rotations, translated))
+}
+
+/// One lane per joint in joint order; a joint with rotation but no translation
+/// track still bakes, with one warning row.
+fn bake_lanes(
+    joints: &[u64],
+    rotations: &BTreeMap<u64, (Vec<f32>, Vec<[f32; 4]>)>,
+    translated: &BTreeSet<u64>,
+    warnings: &mut Vec<String>,
+) -> (Vec<RotTrack>, f32) {
+    let mut lanes = Vec::with_capacity(joints.len());
+    let mut end = 0.0f32;
+    for node in joints {
+        if let Some((times, values)) = rotations.get(node) {
+            for t in times {
+                end = end.max(*t);
+            }
+            lanes.push(bake_rot_track(times.clone(), values.clone()));
+            if !translated.contains(node) {
+                warnings.push(format!(
+                    "joint node {node} has rotation but no translation track in the first animation; its lane bakes alone (a warning row, not a fail)"
+                ));
+            }
+        } else {
+            lanes.push(RotTrack::default());
+        }
+    }
+    (lanes, end)
+}
+
 fn cook(args: &CookArgs) -> Result<CookOutput, McpToolError> {
     if !name_ok(&args.name) {
         return Err(bad(format!(
@@ -708,6 +934,7 @@ fn cook(args: &CookArgs) -> Result<CookOutput, McpToolError> {
     let bundle_path = folder.join(format!("{}.e204bndl", args.name));
     std::fs::write(&bundle_path, &first).map_err(|e| io_failed("write", &bundle_path, &e))?;
     let mut warnings = built.warnings.clone();
+    let rot = rot_sidecar(&bytes, &args.name, &folder, &mut warnings)?;
     let rows = budget_rows(&built.triangles, &ratios, &mut warnings);
     if built.overlaps > 0 {
         warnings.push(format!(
@@ -720,6 +947,11 @@ fn cook(args: &CookArgs) -> Result<CookOutput, McpToolError> {
         bundle_path: bundle_path.display().to_string(),
         bundle_bytes: wide(first.len()),
         bundle_digest: digest_hex(&first),
+        rot_path: rot.as_ref().map(|(path, _, _)| path.display().to_string()),
+        rot_bytes: rot.as_ref().map_or(0, |(_, bytes, _)| *bytes),
+        rot_digest: rot
+            .as_ref()
+            .map_or_else(String::new, |(_, _, digest)| digest.clone()),
         lod: rows,
         hulls: built.hulls,
         overlapping_chart_pairs: built.overlaps,
@@ -776,7 +1008,7 @@ crate::e2_tool!(
     /// `asset.cook`: the whole mesh chain over one GLB, with a budget table.
     CookTool,
     name = TOOL_ASSET_COOK,
-    description = "Cook one .glb/.gltf to an E204BNDL: optional xatlas unwrap, a seam-locked LOD chain, collision hulls, an object-space normal map, then the assets bundle cook. Returns triangles per LOD against a budget, hull count, UV overlapping pairs, map bytes, draw calls and one warning per budget miss. Two cooks of one input are byte-equal.",
+    description = "Cook one .glb/.gltf to an E204BNDL: optional xatlas unwrap, a seam-locked LOD chain, collision hulls, an object-space normal map, then the assets bundle cook. When the GLB has skinned rotation channels it also writes a R204 rotation sidecar (<name>.rot) and reports rot_bytes and rot_digest; a joint with rotation but no translation track is a warning row, never a fail. Returns triangles per LOD against a budget, hull count, UV overlapping pairs, map bytes, draw calls and one warning per budget miss. Two cooks of one input are byte-equal.",
     readonly = false,
     args = CookArgs,
     output = CookOutput,
@@ -1611,5 +1843,136 @@ mod tests {
         )
         .expect_err("refused");
         assert!(refused.message.contains("not both"), "{}", refused.message);
+    }
+
+    /// A GLB whose first animation turns one skin joint, with no translation track.
+    fn rotated_glb() -> Vec<u8> {
+        let json = r#"{"asset":{"version":"2.0"},
+            "buffers":[{"byteLength":84}],
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":36},
+                {"buffer":0,"byteOffset":36,"byteLength":6},
+                {"buffer":0,"byteOffset":44,"byteLength":8},
+                {"buffer":0,"byteOffset":52,"byteLength":32}],
+            "accessors":[
+                {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                {"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"},
+                {"bufferView":2,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},
+                {"bufferView":3,"componentType":5126,"count":2,"type":"VEC4"}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],
+            "nodes":[{"mesh":0,"skin":0},{"name":"joint"}],
+            "skins":[{"joints":[1]}],
+            "animations":[{"samplers":[{"input":2,"output":3}],
+                "channels":[{"sampler":0,"target":{"node":1,"path":"rotation"}}]}],
+            "scenes":[{"nodes":[0,1]}],"scene":0}"#;
+        let mut bin = Vec::new();
+        for v in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+        for i in [0u16, 1, 2] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        bin.extend_from_slice(&[0, 0]);
+        for t in [0.0f32, 1.0] {
+            bin.extend_from_slice(&t.to_le_bytes());
+        }
+        for q in [[0.0f32, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0]] {
+            for v in q {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let mut json_bytes = json.as_bytes().to_vec();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut bin_bytes = bin;
+        while bin_bytes.len() % 4 != 0 {
+            bin_bytes.push(0);
+        }
+        let total = 12 + 8 + json_bytes.len() + 8 + bin_bytes.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json_bytes);
+        out.extend_from_slice(&(bin_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin_bytes);
+        out
+    }
+
+    #[test]
+    fn a_rotated_glb_writes_the_r204_sidecar_and_warns_without_a_translation_track() {
+        let out = StdPath::new(env!("CARGO_MANIFEST_DIR")).join("../../target/asset-cook-rot");
+        std::fs::create_dir_all(&out).expect("out dir");
+        let glb = out.join("spinner.glb");
+        std::fs::write(&glb, rotated_glb()).expect("fixture");
+        let server = server();
+        let cooked = CookTool::invoke(
+            &server,
+            CookArgs {
+                name: "spinner".to_owned(),
+                glb_path: glb.display().to_string(),
+                options: CookOptions {
+                    uv: UvMode::Keep,
+                    lod: vec![1.0],
+                    collision: CollisionMode::None,
+                    bake: BakeMode::None,
+                    atlas: None,
+                },
+                out_dir: Some(out.display().to_string()),
+            },
+        )
+        .expect("cooks");
+        assert!(
+            cooked.rot_bytes > 0,
+            "a rotation channel writes the sidecar"
+        );
+        assert_eq!(cooked.rot_digest.len(), 16, "{}", cooked.rot_digest);
+        let path = cooked.rot_path.as_ref().expect("rot path reported");
+        let bytes = std::fs::read(path).expect("rot written");
+        assert_eq!(&bytes[0..4], b"R204", "the magic names the format");
+        assert_eq!(wide(bytes.len()), cooked.rot_bytes);
+        assert!(
+            cooked
+                .warnings
+                .iter()
+                .any(|w| w.contains("no translation track")),
+            "warning rows {:?}",
+            cooked.warnings
+        );
+        assert!(cooked.identical_twice);
+    }
+
+    #[test]
+    fn a_static_glb_writes_no_rot_file_and_its_bundle_stays_equal() {
+        let out = StdPath::new(env!("CARGO_MANIFEST_DIR")).join("../../target/asset-cook-static");
+        std::fs::create_dir_all(&out).expect("out dir");
+        let server = server();
+        let args = CookArgs {
+            name: "static_crate".to_owned(),
+            glb_path: crate_glb(),
+            options: CookOptions {
+                uv: UvMode::Keep,
+                lod: vec![1.0],
+                collision: CollisionMode::None,
+                bake: BakeMode::None,
+                atlas: None,
+            },
+            out_dir: Some(out.display().to_string()),
+        };
+        let first = CookTool::invoke(&server, args.clone()).expect("cooks");
+        assert_eq!(first.rot_bytes, 0);
+        assert!(first.rot_path.is_none());
+        assert!(first.rot_digest.is_empty());
+        assert!(
+            !out.join("static_crate.rot").exists(),
+            "no rotation channel writes no sidecar"
+        );
+        let second = CookTool::invoke(&server, args).expect("cooks again");
+        assert_eq!(second.bundle_digest, first.bundle_digest);
+        assert_eq!(second.bundle_bytes, first.bundle_bytes);
     }
 }

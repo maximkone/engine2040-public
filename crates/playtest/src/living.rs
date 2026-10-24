@@ -926,6 +926,7 @@ fn request_wiring(
         privacy,
         base_revision: index,
         body: None,
+        image: None,
     };
     let policy = AiSessionPolicy {
         adapters: vec![adapter],

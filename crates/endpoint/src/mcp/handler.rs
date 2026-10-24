@@ -58,9 +58,11 @@ impl McpServer {
             let Ok(mut state) = self.state.lock() else {
                 return;
             };
+            // A reborrow keeps `packs_pushed` and `loaded_packs` disjoint fields.
+            let state = &mut *state;
             let list_changed = state.packs_pushed != state.loaded_packs;
             if list_changed {
-                state.packs_pushed = state.loaded_packs.clone();
+                state.packs_pushed.clone_from(&state.loaded_packs);
             }
             let watching = state.scene_subscribed || !state.scene_subscribers.is_empty();
             let scene_moved = watching && state.scene_pushed.is_some() && {

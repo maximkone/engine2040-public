@@ -388,9 +388,9 @@ pub use meshfile::{
     BakePreviewOutput, BakePreviewTool, HullApplyArgs, HullApplyOutput, HullApplyTool, HullMeshOut,
     HullPreviewArgs, HullPreviewOutput, HullPreviewTool, LodApplyArgs, LodApplyOutput,
     LodApplyTool, LodLevelOut, LodPreviewArgs, LodPreviewOutput, LodPreviewTool, UvApplyArgs,
-    UvApplyOutput, UvApplyTool, UvMeshOut, UvPreviewArgs, UvPreviewOutput, UvPreviewTool,
-    DEFAULT_OUT_DIR as FILE_PAYLOAD_DIR, MAX_ATLAS, MAX_BAKE_SAMPLES as FILE_MAX_BAKE_SAMPLES,
-    MAX_FILE_TRIANGLES, MAX_HULLS, MIN_ATLAS,
+    UvApplyOutput, UvApplyTool, UvMeshOut, UvPartOut, UvPreviewArgs, UvPreviewOutput,
+    UvPreviewTool, UvScoreOut, DEFAULT_OUT_DIR as FILE_PAYLOAD_DIR, MAX_ATLAS,
+    MAX_BAKE_SAMPLES as FILE_MAX_BAKE_SAMPLES, MAX_FILE_TRIANGLES, MAX_HULLS, MIN_ATLAS,
 };
 
 /// Stand-in for `kernel` in a build without the `geo` feature: every modeling op refuses with
@@ -1611,6 +1611,30 @@ mod tests {
             );
             assert_eq!(preview.digest.len(), 16);
             assert!(preview.texels_per_unit > 0.0);
+            assert_eq!(preview.score.parts.len(), 7, "seven named parts");
+            let names: Vec<&str> = preview
+                .score
+                .parts
+                .iter()
+                .map(|p| p.part.as_str())
+                .collect();
+            for part in [
+                "distortion",
+                "overlap",
+                "flipped",
+                "fill",
+                "outside01",
+                "density_spread",
+                "seam",
+            ] {
+                assert!(names.contains(&part), "part {part} in {names:?}");
+            }
+            assert!(
+                preview.score.total_permille > 700,
+                "a clean unwrap scores {} ({:?})",
+                preview.score.total_permille,
+                preview.score.parts
+            );
             // Same file, same numbers twice; a preview writes nothing.
             assert_eq!(
                 preview,

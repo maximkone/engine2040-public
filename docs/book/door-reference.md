@@ -3712,16 +3712,17 @@ Listed in a fresh session: no, call `api.load` with `codex`. Source: `crates/end
 - **Scope:** `observe` · read-only · pack `codex` is listed after `api.load`
 - **Undo:** none: read-only
 - **Source:** `crates/endpoint/src/packs/codex.rs`
-- **Returns:** `SearchOutput` with `query`, `topic`, `index`, `passages`, `matched`, `truncated`
+- **Returns:** `SearchOutput` with `rows`, `total`, `mode`, `palette_max_delta`
 
 **Arguments** (`SearchArgs`):
 
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
-| `query` | `String` | yes |  | The words to look for; the passage ref, title and text are searched. |
-| `topic` | `Option<String>` | no |  | Topic filter: march, camp, tool, bridge, road, siege, craft, place, year. |
-| `limit` | `Option<u32>` | no |  | Most passages to answer (1..=32, default 8). |
-| `root` | `Option<String>` | no |  | The project root that holds the codex (default: the repo the door was built in). |
+| `text` | `Option<String>` | no |  | Text to match against names and tags (mutually exclusive with `kind` and `palette`). |
+| `kind` | `Option<String>` | no |  | Keep one kind: `gltf`, `png`, `mesh`, `material`, `clip`, `texture`, `bundle` or `map`. |
+| `palette` | `Option<[u8; 6]>` | no |  | Mean colour to match, three 16-bit little-endian sRGB channels. |
+| `limit` | `Option<usize>` | no |  | Rows to return, 1..=64 (default 16). |
+| `index_json` | `Option<String>` | no |  | Report JSON to index (default `content/maps/report.json`). |
 
 **Typed refusals:** none found in the handler source (see Coverage at the end of the page).
 

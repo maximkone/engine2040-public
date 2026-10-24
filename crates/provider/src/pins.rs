@@ -346,11 +346,20 @@ impl RequestPins {
     pub(crate) fn chat_fields(&self, request: &AiRequest) -> Map<String, Value> {
         let mut body = Map::new();
         body.insert("model".into(), json!(request.model.model));
+        // A request with a frame carries the prompt as text plus one image
+        // block; a text-only request keeps the plain string, byte for byte.
+        let content = match &request.image {
+            Some(image) => json!([
+                {"type": "text", "text": prompt_text(request)},
+                {"type": "image_url", "image_url": {"url": image.data_url()}},
+            ]),
+            None => json!(prompt_text(request)),
+        };
         body.insert(
             "messages".into(),
             json!([
                 {"role": "system", "content": self.system_for(request.kind)},
-                {"role": "user", "content": prompt_text(request)},
+                {"role": "user", "content": content},
             ]),
         );
         body.insert("max_tokens".into(), json!(request.budget.max_output_tokens));
@@ -486,11 +495,20 @@ impl RequestPins {
     pub(crate) fn ollama_fields(&self, request: &AiRequest) -> Map<String, Value> {
         let mut body = Map::new();
         body.insert("model".into(), json!(request.model.model));
+        // A request with a frame carries the prompt as text plus one image
+        // block; a text-only request keeps the plain string, byte for byte.
+        let content = match &request.image {
+            Some(image) => json!([
+                {"type": "text", "text": prompt_text(request)},
+                {"type": "image_url", "image_url": {"url": image.data_url()}},
+            ]),
+            None => json!(prompt_text(request)),
+        };
         body.insert(
             "messages".into(),
             json!([
                 {"role": "system", "content": self.system_for(request.kind)},
-                {"role": "user", "content": prompt_text(request)},
+                {"role": "user", "content": content},
             ]),
         );
         body.insert("stream".into(), json!(false));
@@ -955,5 +973,35 @@ mod tests {
             assert_eq!(ollama["options"]["seed"], PINNED_SEED, "ollama");
             tool(&ollama, "/tools/0/function/name");
         }
+    }
+
+    #[test]
+    fn an_image_part_reaches_the_rendered_chat_body() {
+        let pins = RequestPins::default();
+        let plain = crate::transport::chat_body(&request(71, 4), &pins);
+        assert!(
+            !plain.contains("image_url"),
+            "a text-only request has no image block: {plain}"
+        );
+        let mut framed = request(71, 4);
+        // The PNG signature plus one payload byte: the media check reads the
+        // signature, the wire only needs bounded bytes.
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.push(0x2a);
+        framed.image = Some(
+            crate::image::ImagePart::new(crate::image::ImageMedia::Png, png)
+                .expect("a bounded png"),
+        );
+        let body = crate::transport::chat_body(&framed, &pins);
+        assert!(body.contains("\"image_url\""), "{body}");
+        assert!(body.contains("data:image/png;base64,"), "{body}");
+        assert!(
+            body.contains("\"type\":\"text\""),
+            "the prompt is still text"
+        );
+        assert!(
+            !plain.contains("data:"),
+            "the text-only body stays a plain string: {plain}"
+        );
     }
 }

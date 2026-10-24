@@ -287,6 +287,34 @@ pub struct UvPreviewArgs {
     pub atlas: Option<u32>,
 }
 
+/// One named part of the UV quality score.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UvPartOut {
+    /// Part name: distortion, overlap, flipped, fill, outside01, density_spread, seam.
+    pub part: String,
+    /// Weight out of 100.
+    pub weight: u32,
+    /// Part score, 0 (worst) to 1000 (best).
+    pub score_permille: u32,
+    /// Measured value the part score came from.
+    pub measured: f32,
+}
+
+/// UV quality score: named parts plus the weighted total.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UvScoreOut {
+    /// Weighted total, 0..=1000; over 700 is a good unwrap.
+    pub total_permille: u32,
+    /// True when the mesh has no 3D area or the unwrap no atlas area.
+    pub collapsed: bool,
+    /// The seven parts in weight-table order.
+    pub parts: Vec<UvPartOut>,
+}
+
 /// Unwrap facts of one primitive.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
 #[serde(crate = "rmcp::serde")]
@@ -308,6 +336,8 @@ pub struct UvMeshOut {
     pub fill: f32,
     /// Spread of per-triangle texel density (`(max - min) / mean`, 0 is even).
     pub density_spread: f32,
+    /// The weighted UV quality score of this primitive.
+    pub score: UvScoreOut,
 }
 
 /// Result of `geo.uv.preview`.
@@ -327,6 +357,8 @@ pub struct UvPreviewOutput {
     pub atlas: [u32; 2],
     /// Mean texels per meter over the primitives.
     pub texels_per_unit: f32,
+    /// Weighted UV quality score over the primitives (triangle-weighted, 0..=1000).
+    pub score: UvScoreOut,
     /// Lowercase hex digest of the unwrapped payload.
     pub digest: String,
 }
@@ -388,6 +420,7 @@ fn uv_all(loaded: &Loaded, atlas: u32) -> Result<(Vec<GeoMesh>, Vec<UvMeshOut>),
             &unwrapped.chart_of_triangle,
         );
         let quality = geo_uv::quality(&unwrapped, source);
+        let uv_score = geo_uv::score(&unwrapped, source);
         rows.push(UvMeshOut {
             mesh: count(index),
             triangles: count(unwrapped.mesh.indices.len() / 3),
@@ -397,10 +430,63 @@ fn uv_all(loaded: &Loaded, atlas: u32) -> Result<(Vec<GeoMesh>, Vec<UvMeshOut>),
             texels_per_unit: unwrapped.texels_per_unit,
             fill: quality.fill,
             density_spread: quality.density_spread,
+            score: score_out(&uv_score),
         });
         meshes.push(unwrapped.mesh);
     }
     Ok((meshes, rows))
+}
+
+/// One geo score in the door's shape.
+fn score_out(score: &geo_uv::UvScore) -> UvScoreOut {
+    UvScoreOut {
+        total_permille: score.total_permille,
+        collapsed: score.collapsed,
+        parts: score
+            .parts
+            .iter()
+            .map(|part| UvPartOut {
+                part: part.name.to_owned(),
+                weight: part.weight,
+                score_permille: part.score_permille,
+                measured: part.measured,
+            })
+            .collect(),
+    }
+}
+
+/// Triangle-weighted mean of the per-mesh scores, in part order.
+fn aggregate_score(rows: &[UvMeshOut]) -> UvScoreOut {
+    if rows.is_empty() {
+        return UvScoreOut::default();
+    }
+    let mut parts: Vec<UvPartOut> = rows[0].score.parts.clone();
+    let total_tris: u64 = rows.iter().map(|r| u64::from(r.triangles)).sum();
+    let tris = total_tris.max(1);
+    for (idx, part) in parts.iter_mut().enumerate() {
+        let weighted: u64 = rows
+            .iter()
+            .map(|row| {
+                let score = row.score.parts.get(idx).map_or(0, |p| p.score_permille);
+                u64::from(row.triangles) * u64::from(score)
+            })
+            .sum();
+        part.score_permille = u32::try_from(weighted / tris).unwrap_or(0);
+        part.measured = rows
+            .iter()
+            .map(|row| row.score.parts.get(idx).map_or(0.0, |p| p.measured))
+            .sum::<f32>()
+            / f32_from_f64(f64::from(count(rows.len())));
+    }
+    let mut total = 0u64;
+    for part in &parts {
+        total += u64::from(part.weight) * u64::from(part.score_permille);
+    }
+    UvScoreOut {
+        total_permille: u32::try_from(total / 100).unwrap_or(0),
+        collapsed: rows.iter().all(|row| row.score.collapsed),
+        parts,
+    }
 }
 
 fn uv_preview(_server: &McpServer, args: &UvPreviewArgs) -> Result<UvPreviewOutput, McpToolError> {
@@ -418,6 +504,7 @@ fn uv_preview(_server: &McpServer, args: &UvPreviewArgs) -> Result<UvPreviewOutp
         let sum: f32 = rows.iter().map(|r| r.texels_per_unit).sum();
         sum / f32_from_f64(f64::from(count(rows.len())))
     };
+    let score = aggregate_score(&rows);
     Ok(UvPreviewOutput {
         path: args.path.clone(),
         meshes: rows,
@@ -425,6 +512,7 @@ fn uv_preview(_server: &McpServer, args: &UvPreviewArgs) -> Result<UvPreviewOutp
         overlapping_chart_pairs: overlaps,
         atlas: [width, height],
         texels_per_unit: density,
+        score,
         digest,
     })
 }

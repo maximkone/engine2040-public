@@ -37,6 +37,8 @@ pub const TOOL_ASSET_COOK: &str = "asset.cook";
 pub const TOOL_ASSET_LINT: &str = "asset.lint";
 /// Verb: per-asset cost row, and a level total over a placement JSON.
 pub const TOOL_ASSET_BUDGET: &str = "asset.budget";
+/// Verb: ranked lookup over the committed kit report (text, kind or palette).
+pub const TOOL_ASSET_SEARCH: &str = "asset.search";
 
 /// The center command that runs the generator on the free GPU lane.
 pub const GENERATE_COMMAND: &str =
@@ -107,6 +109,16 @@ mod intake_verb;
 #[cfg(feature = "intake")]
 pub use intake_verb::{IntakeArgs, IntakeOutputDoc, IntakeTool, ModelArg};
 
+/// `asset.search`: ranked lookup over the committed kit report (text, kind or
+/// palette). Needs `intake` for the cooked-GLB mean colour a palette query reads.
+#[cfg(feature = "intake")]
+mod search;
+#[cfg(feature = "intake")]
+pub use search::{
+    SearchArgs, SearchOutput, SearchRow, SearchTool, MAX_SEARCH_LIMIT, PALETTE_MAX_DELTA,
+    SEARCH_KINDS,
+};
+
 /// The artist's import loop over a GLB (card S3, W1, W6): `asset.cook` runs the whole mesh
 /// chain and reports a budget table, `asset.lint` checks an import, `asset.budget` prices a
 /// cooked asset or a whole placement. Built only with both `intake` (glTF) and `geo` (mesh
@@ -154,6 +166,12 @@ pub fn pack() -> Result<PackDef, PackError> {
         TOOL_ASSET_INTAKE,
         PACK,
         CapabilityCard::Commit,
+    )?);
+    #[cfg(feature = "intake")]
+    pack.add(VerbSpec::of::<search::SearchTool>(
+        TOOL_ASSET_SEARCH,
+        PACK,
+        CapabilityCard::Observe,
     )?);
     #[cfg(all(feature = "intake", feature = "geo"))]
     {

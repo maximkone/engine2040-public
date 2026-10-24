@@ -237,7 +237,7 @@ impl ServerState {
                 let id = marked_id(mark, &snap.actors)?;
                 let actor = &snap.actors[usize::try_from(id).unwrap_or(usize::MAX)];
                 let mut out = project_output(&camera, actor, &label(id))?;
-                out.kind = "mark".to_owned();
+                "mark".clone_into(&mut out.kind);
                 out.entity = Some(label(id));
                 out
             }

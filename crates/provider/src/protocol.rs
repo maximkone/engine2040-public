@@ -4,6 +4,7 @@
 //! canonical little-endian bytes (no serde dependency); strings are
 //! `u16`-length-prefixed and bound-checked, never echoed unbounded.
 
+use super::image::ImagePart;
 use super::{MAX_BODY_BYTES, MAX_CONTEXT_REFS, MAX_TEXT_LEN, PROTOCOL_VERSION};
 
 /// Request identity, echoed by every event for the request.
@@ -133,6 +134,10 @@ pub struct AiRequest {
     /// digest-only request. This is data the model may read; it is never a
     /// second instruction channel. [`check_body`] owns the bounds.
     pub body: Option<String>,
+    /// One bounded frame the model may look at, or `None` for a text-only
+    /// request. [`ImagePart`] owns the size cap and the media check; the chat
+    /// wires render it as one `image_url` block.
+    pub image: Option<ImagePart>,
 }
 
 /// Token usage; `None` fields mean usage is unknown, never zero-claimed.
@@ -540,6 +545,9 @@ pub fn decode_request(bytes: &[u8]) -> Result<AiRequest, ProtocolError> {
         privacy,
         base_revision,
         body,
+        // The canonical wire image carries text only: an image part rides on
+        // the vendor body and is never written to a tape.
+        image: None,
     })
 }
 
@@ -619,6 +627,7 @@ mod tests {
             privacy: PrivacyMode::LocalOnly,
             base_revision: 12,
             body: None,
+            image: None,
         }
     }
 

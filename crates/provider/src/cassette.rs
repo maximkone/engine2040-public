@@ -2232,4 +2232,85 @@ mod tests {
             "the refused write leaves no file behind"
         );
     }
+
+    /// The one committed model x task set: the mock model, three task kinds.
+    /// Ids and revisions are fixed, so the recorded bytes are stable.
+    fn committed_requests() -> Vec<AiRequest> {
+        let mut inspect = fixtures::request(9101, 5);
+        inspect.kind = TaskKind::Inspect;
+        let mut diagnose = fixtures::request(9102, 6);
+        diagnose.kind = TaskKind::Diagnose;
+        let propose = fixtures::request(9103, 7);
+        vec![inspect, diagnose, propose]
+    }
+
+    /// Regenerate `fixtures/cassettes` from the mock backend. Run once when
+    /// the task set or the wire grammar changes, then commit the files:
+    /// `cargo test -p engine-provider --lib record_the_committed_cassette -- --ignored`.
+    #[test]
+    #[ignore = "writes fixtures/cassettes; run once to regenerate the committed set"]
+    fn record_the_committed_cassette() {
+        let store = CassetteStore::new(CassetteStore::default_dir());
+        for request in committed_requests() {
+            let mut adapter = CassetteAdapter::new(
+                MockAdapter::new(vec![MockStep::Succeed]),
+                CassetteStore::new(store.dir()),
+                CassetteMode::Record,
+                "mock",
+            )
+            .expect("record wiring");
+            let outcome = adapter.call(&request, &fixtures::policy(), &fixtures::caps());
+            assert!(
+                outcome.result.is_ok(),
+                "request {} records: {:?}",
+                request.id.0,
+                outcome.result
+            );
+        }
+    }
+
+    #[test]
+    fn the_committed_cassette_replays_byte_equal_offline() {
+        // No network, no key: replay reads the committed entry and refuses to
+        // touch the inner mock when the entry is missing.
+        let committed = CassetteStore::new(CassetteStore::default_dir());
+        let dir = TempDir::new("committed");
+        let policy = fixtures::policy();
+        let caps = fixtures::caps();
+        let mut replayed_requests = 0;
+        for request in committed_requests() {
+            let mut adapter = CassetteAdapter::new(
+                MockAdapter::new(vec![MockStep::Succeed]),
+                CassetteStore::new(committed.dir()),
+                CassetteMode::Replay,
+                "mock",
+            )
+            .expect("replay wiring");
+            let replayed = adapter.call(&request, &policy, &caps);
+            assert!(
+                replayed.result.is_ok(),
+                "request {} replays from the committed set: {:?}",
+                request.id.0,
+                replayed.result
+            );
+            replayed_requests += 1;
+            let answer = Answer::from_outcome(&replayed).expect("a recordable answer");
+            let image = RequestImage::of(&request, None);
+            let key = CassetteKey::new("mock", &request, &image).expect("key");
+            let committed_path = committed.path_for(&key);
+            let want = fs::read(&committed_path).unwrap_or_else(|error| {
+                panic!(
+                    "{} is missing ({error}); run the ignored record test",
+                    committed_path.display()
+                )
+            });
+            // Byte-equal: saving the replayed answer under the same key writes
+            // exactly the entry bytes the committed file holds.
+            let written = dir.store().save(&key, request.id, &image, &answer);
+            let written = written.expect("temp save");
+            let got = fs::read(&written).expect("written entry");
+            assert_eq!(got, want, "entry bytes {}", committed_path.display());
+        }
+        assert_eq!(replayed_requests, 3, "the whole task set replayed");
+    }
 }

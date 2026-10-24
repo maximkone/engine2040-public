@@ -594,6 +594,7 @@ fn compare_frames_in(
 
 /// Whole-frame score: [`compare_frames_in`] over every pixel, the answer a
 /// caller that names no region gets.
+#[cfg(test)]
 fn compare_frames(left: &Frame, right: &Frame) -> Result<ViewCompareOutput, McpToolError> {
     compare_frames_in(left, right, CompareRegion::Full, Region::Full)
 }

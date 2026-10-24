@@ -531,6 +531,229 @@ pub fn quality(unwrap: &Unwrap, source: &GeoMesh) -> UvQuality {
     }
 }
 
+/// Weight table of the UV quality score: seven named parts, weights sum to 100.
+///
+/// `total_permille` is `sum(weight * score_permille) / 100`, so 1000 is a perfect
+/// unwrap. A good unwrap lands over 700; a collapsed one (no 3D area or no atlas
+/// area) scores every part 0.
+pub const UV_SCORE_WEIGHTS: [(&str, u32); 7] = [
+    ("distortion", 20),
+    ("overlap", 20),
+    ("flipped", 20),
+    ("fill", 15),
+    ("outside01", 10),
+    ("density_spread", 10),
+    ("seam", 5),
+];
+
+/// One named part of a [`UvScore`]: its weight, the measured value and 0..=1000.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UvScorePart {
+    /// Part name, one row of [`UV_SCORE_WEIGHTS`].
+    pub name: &'static str,
+    /// Weight out of 100.
+    pub weight: u32,
+    /// Measured value the score came from (see the part's rule in [`score`]).
+    pub measured: f32,
+    /// Part score, 0 (worst) to 1000 (best).
+    pub score_permille: u32,
+}
+
+/// UV quality of one unwrap, as named parts and a weighted total.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UvScore {
+    /// The seven parts in [`UV_SCORE_WEIGHTS`] order.
+    pub parts: Vec<UvScorePart>,
+    /// Weighted total, 0..=1000.
+    pub total_permille: u32,
+    /// True when the mesh has no 3D area or the unwrap no atlas area.
+    pub collapsed: bool,
+}
+
+fn clamp_score(value: f64) -> u32 {
+    let permille = (value.clamp(0.0, 1.0) * 1000.0).round();
+    u32::try_from(engine_core::checked::saturating_f64_to_u64(permille)).unwrap_or(1000)
+}
+
+fn signed_uv_area(p: [[f64; 2]; 3]) -> f64 {
+    0.5 * ((p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]))
+}
+
+/// Per-triangle measurements one [`UvScore`] is built from.
+struct Measured {
+    texel_area: f64,
+    area_3d: f64,
+    outside: usize,
+    flipped: usize,
+    edges: usize,
+    total_edges: usize,
+    densities: Vec<f64>,
+    overlap_pairs: usize,
+    triangles: usize,
+}
+
+/// Walk the unwrap once: area, winding, atlas range, seam edges and per-triangle density.
+fn measure(unwrap: &Unwrap, source: &GeoMesh) -> Measured {
+    let [w, h] = unwrap.atlas_size.map(|n| f64::from(n.max(1)));
+    let atlas = w * h;
+    let (uvs, indices) = (&unwrap.mesh.uvs, &unwrap.mesh.indices);
+    let triangles = indices.len() / 3;
+    let (mut texel_area, mut area_3d, mut outside) = (0.0, 0.0, 0usize);
+    let mut per_chart: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
+    let mut used: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    let mut densities: Vec<f64> = Vec::with_capacity(triangles);
+    for t in 0..triangles {
+        let p = uv_triangle(uvs, indices, t);
+        let signed = signed_uv_area(p);
+        let uv_area = signed.abs();
+        texel_area += uv_area * atlas;
+        let seen = per_chart
+            .entry(unwrap.chart_of_triangle[t])
+            .or_insert((0, 0));
+        if signed <= 0.0 {
+            seen.1 += 1;
+        } else {
+            seen.0 += 1;
+        }
+        if p.iter().any(|c| c.iter().any(|v| !(0.0..=1.0).contains(v))) {
+            outside += 1;
+        }
+        let corner = |k: usize| {
+            let out = ix(indices[3 * t + k]);
+            let input = ix(unwrap
+                .source_vertex
+                .get(out)
+                .copied()
+                .unwrap_or(indices[3 * t + k]));
+            source.positions.get(input).map(|v| v.map(f64::from))
+        };
+        if let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) {
+            let a3 = triangle_area(a, b, c);
+            area_3d += a3;
+            if a3 > 1e-9 {
+                densities.push(uv_area * atlas / a3);
+            }
+        }
+        for k in 0..3 {
+            let (a, b) = (indices[3 * t + k], indices[3 * t + (k + 1) % 3]);
+            *used.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+    }
+    let flipped = per_chart
+        .values()
+        .map(|&(positive, negative)| positive.min(negative))
+        .sum();
+    Measured {
+        texel_area,
+        area_3d,
+        outside,
+        flipped,
+        edges: used.values().filter(|&&count| count == 1).count(),
+        total_edges: used.len().max(1),
+        densities,
+        overlap_pairs: overlapping_chart_pairs(uvs, indices, &unwrap.chart_of_triangle),
+        triangles,
+    }
+}
+
+/// Score `unwrap` (made from `source`) on seven parts.
+///
+/// Rules, each mapped to 0..=1000: `distortion` = mean `|density / mean - 1|`
+/// (full at 0, zero at 0.5); `overlap` = `1000 / (1 + chart pairs sharing area)`;
+/// `flipped` = the minority winding of each chart counted as flipped triangles,
+/// `1 - flipped / triangles`; `fill` = texel area over atlas area, full at 0.4;
+/// `outside01` = `1 - triangles with a corner outside 0..=1`; `density_spread` =
+/// `(max - min) / mean` of texel density, full at 0, zero at 0.4; `seam` = chart
+/// boundary edges over all edges, full at 0, zero at 0.25. A chart may be
+/// mirrored as a whole (xatlas does this), so only the minority winding of a
+/// chart counts as flipped.
+#[must_use]
+pub fn score(unwrap: &Unwrap, source: &GeoMesh) -> UvScore {
+    let m = measure(unwrap, source);
+    let atlas = f64::from(unwrap.atlas_size[0].max(1)) * f64::from(unwrap.atlas_size[1].max(1));
+    let collapsed = m.area_3d < 1e-12 || m.texel_area < 1e-9 || m.triangles == 0;
+    if collapsed {
+        let parts = UV_SCORE_WEIGHTS
+            .iter()
+            .map(|&(name, weight)| UvScorePart {
+                name,
+                weight,
+                measured: 0.0,
+                score_permille: 0,
+            })
+            .collect();
+        return UvScore {
+            parts,
+            total_permille: 0,
+            collapsed: true,
+        };
+    }
+    let fill = m.texel_area / atlas;
+    let count = f64::from(u32::try_from(m.densities.len()).unwrap_or(u32::MAX));
+    let mean = if m.densities.is_empty() {
+        0.0
+    } else {
+        m.densities.iter().sum::<f64>() / count
+    };
+    let distortion = if mean > 0.0 {
+        m.densities
+            .iter()
+            .map(|d| (d / mean - 1.0).abs())
+            .sum::<f64>()
+            / count
+    } else {
+        0.0
+    };
+    let (lo, hi) = m
+        .densities
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &d| {
+            (lo.min(d), hi.max(d))
+        });
+    let spread = if m.densities.is_empty() || mean <= 0.0 {
+        0.0
+    } else {
+        (hi - lo) / mean
+    };
+    let tris = m.triangles.max(1);
+    let frac_tri = |n: usize| frac(n, tris);
+    let seam = frac(m.edges, m.total_edges);
+    let measured = [
+        distortion,
+        frac(m.overlap_pairs, 1),
+        frac_tri(m.flipped),
+        fill,
+        frac_tri(m.outside),
+        spread,
+        seam,
+    ];
+    let scored = [
+        clamp_score(1.0 - distortion / 0.5),
+        1000 / (1 + u32::try_from(m.overlap_pairs).unwrap_or(u32::MAX)),
+        clamp_score(1.0 - frac_tri(m.flipped)),
+        clamp_score(fill / 0.4),
+        clamp_score(1.0 - frac_tri(m.outside)),
+        clamp_score(1.0 - spread / 0.4),
+        clamp_score(1.0 - seam / 0.25),
+    ];
+    let mut parts = Vec::with_capacity(UV_SCORE_WEIGHTS.len());
+    let mut total = 0u64;
+    for (idx, &(name, weight)) in UV_SCORE_WEIGHTS.iter().enumerate() {
+        total += u64::from(weight) * u64::from(scored[idx]);
+        parts.push(UvScorePart {
+            name,
+            weight,
+            measured: narrow(measured[idx]),
+            score_permille: scored[idx],
+        });
+    }
+    UvScore {
+        parts,
+        total_permille: u32::try_from(total / 100).unwrap_or(0),
+        collapsed: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +974,82 @@ mod tests {
             q.min_gap_texels
         );
         assert_eq!(q, quality(&u, &source));
+    }
+
+    #[test]
+    fn a_cube_unwrap_scores_over_700_with_named_parts() {
+        let source = cuboid([1.0, 2.0, 3.0]);
+        let u = unwrap(&source, &UnwrapOptions::default()).unwrap();
+        let uv_score = score(&u, &source);
+        assert!(!uv_score.collapsed);
+        assert_eq!(uv_score.parts.len(), UV_SCORE_WEIGHTS.len());
+        let names: Vec<&str> = uv_score.parts.iter().map(|p| p.name).collect();
+        for (name, _) in UV_SCORE_WEIGHTS {
+            assert!(names.contains(&name), "part {name} missing in {names:?}");
+        }
+        let sum: u32 = uv_score.parts.iter().map(|p| p.weight).sum();
+        assert_eq!(sum, 100, "weights sum to 100");
+        assert!(
+            uv_score.total_permille > 700,
+            "a clean cube scores {} (parts {:?})",
+            uv_score.total_permille,
+            uv_score.parts
+        );
+        assert_eq!(
+            uv_score,
+            score(&u, &source),
+            "one unwrap scores the same twice"
+        );
+    }
+
+    #[test]
+    fn a_collapsed_mesh_scores_under_300() {
+        // All positions at one point: no 3D area, so every part is 0.
+        let mut source = cuboid([1.0; 3]);
+        for position in &mut source.positions {
+            *position = [0.0, 0.0, 0.0];
+        }
+        let u = unwrap(&source, &UnwrapOptions::default()).unwrap();
+        let score = score(&u, &source);
+        assert!(score.collapsed);
+        assert!(
+            score.total_permille < 300,
+            "collapsed scores {}",
+            score.total_permille
+        );
+        assert!(score.parts.iter().all(|p| p.score_permille == 0));
+    }
+
+    #[test]
+    fn a_flipped_triangle_loses_flipped_and_distortion_points() {
+        // A two-triangle strip with one triangle wound the other way: the minority
+        // winding of the chart is one of two, so half the flipped part is lost.
+        let source = GeoMesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 3, 1],
+        };
+        let unwrap = Unwrap {
+            mesh: source.clone(),
+            source_vertex: vec![0, 1, 2, 3],
+            chart_of_triangle: vec![0, 0],
+            chart_count: 1,
+            atlas_size: [128, 128],
+            texels_per_unit: 64.0,
+        };
+        let score = score(&unwrap, &source);
+        let flipped = score
+            .parts
+            .iter()
+            .find(|p| p.name == "flipped")
+            .expect("flipped part");
+        assert_eq!(flipped.measured, 0.5);
+        assert_eq!(flipped.score_permille, 500);
     }
 }

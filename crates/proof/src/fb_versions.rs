@@ -162,8 +162,8 @@ pub const VERSION_ROWS: &[VersionRow] = &[
         id: "save",
         owner: "editor/src/save.rs",
         constant: "SAVE_VERSION",
-        expr: "4",
-        value: 4,
+        expr: "5",
+        value: 5,
         role: Role::Current,
     },
     VersionRow {

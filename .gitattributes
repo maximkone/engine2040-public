@@ -12,6 +12,9 @@ fixtures/gltf/*.gltf -text
 fixtures/spatial-gold/** -text
 # engine-geo vendored xatlas: byte-exact, never converted.
 crates/geo/vendor/** -text
+# LG8 committed provider cassettes: the replay test compares the recorded entry
+# bytes with a fresh write, so a CRLF checkout would drift them.
+fixtures/cassettes/** -text
 # Gap 7: git runs tools/hooks/* in place through sh, so a CRLF checkout
 # (core.autocrlf=true on Windows) can break the shebang. Keep them LF everywhere.
 tools/hooks/* text eol=lf

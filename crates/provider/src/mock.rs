@@ -197,6 +197,7 @@ pub mod fixtures {
             privacy: PrivacyMode::LocalOnly,
             base_revision,
             body: None,
+            image: None,
         }
     }
 

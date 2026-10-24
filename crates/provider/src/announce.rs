@@ -466,6 +466,7 @@ pub fn announce_request(
         privacy: PrivacyMode::LocalOnly,
         base_revision: obs.tick,
         body: None,
+        image: None,
     }
 }
 

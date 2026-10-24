@@ -10,7 +10,10 @@
 //! integers only; no key value appears in any error, notice or `Debug`.
 //!
 //! A quota overrun converts to the shared [`ScriptedFallback`] with the
-//! quota reason and a ring-ready notice. A shipped build holds no provider
+//! quota reason and a ring-ready notice. [`QuotaBook::admit_request`] is the
+//! adapter-facing gate: it charges a request's own [`AiRequest::budget`] and a
+//! refusal names the limit with what is left of it.
+//! A shipped build holds no provider
 //! key: [`KeyRoute`] has no inline variant, player keys live behind
 //! [`OsKeyStore`], and [`scan_package`] fails the release when a key-shaped
 //! string is found in the package tree.
@@ -160,6 +163,15 @@ impl QuotaCharge {
     pub const fn new(tokens: u64, spend: u64) -> Self {
         Self { tokens, spend }
     }
+
+    /// Charge one request from its own budget: tokens are the most output it
+    /// may ask for, spend is the cap it names (zero when it names none).
+    pub fn of_request(request: &AiRequest) -> Self {
+        Self {
+            tokens: u64::from(request.budget.max_output_tokens),
+            spend: request.budget.spend_limit.unwrap_or(0),
+        }
+    }
 }
 
 /// Which scope refused.
@@ -240,15 +252,22 @@ impl QuotaRefusal {
         Self::new(scope, QuotaLimit::Sessions, 0, 0, subject)
     }
 
+    /// What the scope still allows in the refused limit's unit: `allowed`
+    /// minus `used`, never negative.
+    pub const fn remaining(&self) -> u64 {
+        self.allowed.saturating_sub(self.used)
+    }
+
     /// Ring-ready text for the notice path: fixed labels and integers only.
     pub fn message(&self) -> String {
         format!(
-            "scope={} subject={} limit={} allowed={} used={}",
+            "scope={} subject={} limit={} allowed={} used={} remaining={}",
             self.scope.label(),
             self.subject,
             self.limit.label(),
             self.allowed,
-            self.used
+            self.used,
+            self.remaining()
         )
     }
 
@@ -413,6 +432,19 @@ impl QuotaBook {
             player: player_row.usage,
             session: session_row.row.usage,
         })
+    }
+
+    /// Gate one [`AiRequest`] before an adapter sees it: the charge comes from
+    /// the request's own budget, and a refusal names the limit and what is
+    /// left of it ([`QuotaRefusal::remaining`]). `charge` stays the primitive.
+    pub fn admit_request(
+        &mut self,
+        now_ms: u64,
+        player: PlayerId,
+        session: SessionId,
+        request: &AiRequest,
+    ) -> Result<QuotaReceipt, QuotaRefusal> {
+        self.charge(now_ms, player, session, QuotaCharge::of_request(request))
     }
 
     /// Player usage so far, or `None` when the player has no row.
@@ -1437,6 +1469,29 @@ mod tests {
             "proposal records the overrun"
         );
         assert_eq!(served.proposal.request, request.id);
+    }
+
+    #[test]
+    fn an_over_budget_request_is_refused_by_name_with_its_remaining_budget() {
+        // Session tokens are 60, player tokens 100.
+        let mut book = QuotaBook::new(plan());
+        let player = PlayerId(11);
+        let session = book.open_session(player).expect("session opens");
+        let mut request = fixtures::request(31, 4);
+        request.budget.max_output_tokens = 50;
+        request.budget.spend_limit = Some(3);
+        book.admit_request(0, player, session, &request)
+            .expect("first request fits");
+        request.budget.max_output_tokens = 20;
+        let refusal = book
+            .admit_request(1, player, session, &request)
+            .expect_err("20 tokens do not fit the 10 left");
+        assert_eq!(refusal.scope, QuotaScope::Session);
+        assert_eq!(refusal.limit, QuotaLimit::Tokens);
+        assert_eq!(refusal.remaining(), 10, "the refusal names what is left");
+        let message = refusal.message();
+        assert!(message.contains("limit=tokens"), "{message}");
+        assert!(message.contains("remaining=10"), "{message}");
     }
 
     #[test]

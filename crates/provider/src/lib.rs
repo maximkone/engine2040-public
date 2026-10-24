@@ -38,6 +38,7 @@ pub mod config;
 pub mod core;
 pub mod fallback;
 pub mod gemini;
+pub mod image;
 pub mod ladder;
 pub mod local;
 pub mod mock;

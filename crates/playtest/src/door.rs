@@ -284,6 +284,7 @@ fn door_request(call: &DoorCall<'_>) -> (AiRequest, AiSessionPolicy, ProviderCap
         privacy,
         base_revision: call.base_revision,
         body: call.body.map(str::to_owned),
+        image: None,
     };
     (request, policy, caps)
 }

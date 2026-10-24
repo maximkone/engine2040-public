@@ -726,7 +726,7 @@ mod tests {
             // The screened entry runs `check_before_run` before the op: the
             // hostile string refuses with its own code and the op never runs.
             let refused = server
-                .dispatch_screened(*tool, &hostile, |_| -> Result<(), McpToolError> {
+                .dispatch_screened(tool, &hostile, |_| -> Result<(), McpToolError> {
                     panic!("`{tool}` op ran under hostile text")
                 })
                 .expect_err("hostile text must refuse before the op");
