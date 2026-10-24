@@ -114,3 +114,31 @@ fn fs_hw_srgb(in: BOut) -> @location(0) vec4<f32> {
     let px = vec2<u32>(u32(in.pos.x), u32(in.pos.y));
     return vec4<f32>(graded + vec3<f32>(dither4(px.x, px.y)), lit.a);
 }
+// Live entries (GS34): the window frame leaves the fog pair neutral (factor
+// 0), and mix(hdr, color, 0) is exactly hdr, so the composite is hdr times
+// exposure and the fog texel is never read. A caller picks these only while
+// the pair is neutral; on those frames they write the same bytes as `fs` and
+// `fs_hw_srgb`. The rest of the chain is shared with those entries.
+fn live_lit(in: BOut) -> vec4<f32> {
+    let hdr = textureSample(hdr_tex, hdr_smp, in.uv);
+    return vec4<f32>(hdr.rgb * fog.exposure, hdr.a);
+}
+@fragment
+fn fs_live(in: BOut) -> @location(0) vec4<f32> {
+    let lit = live_lit(in);
+    let bloomed = blit_bloom(lit.rgb, in.uv);
+    let toned = display_tonemap(bloomed);
+    let graded = blit_grade(toned);
+    let px = vec2<u32>(u32(in.pos.x), u32(in.pos.y));
+    let dithered = graded + vec3<f32>(dither4(px.x, px.y));
+    return vec4<f32>(linear_to_srgb_term(dithered), lit.a);
+}
+@fragment
+fn fs_hw_srgb_live(in: BOut) -> @location(0) vec4<f32> {
+    let lit = live_lit(in);
+    let bloomed = blit_bloom(lit.rgb, in.uv);
+    let toned = display_tonemap(bloomed);
+    let graded = blit_grade(toned);
+    let px = vec2<u32>(u32(in.pos.x), u32(in.pos.y));
+    return vec4<f32>(graded + vec3<f32>(dither4(px.x, px.y)), lit.a);
+}
