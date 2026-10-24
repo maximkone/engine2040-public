@@ -456,7 +456,7 @@ pub fn gpu_submit() -> Result<(), ExecError> {
 // The pass executor's own tests still call these; production code in this file
 // does not, so the glob is test-only (graph calls `crate::timing` directly).
 #[cfg(test)]
-pub(crate) use crate::timing::*;
+pub(crate) use crate::present::timing::*;
 
 // ----- GX1: window submit through the graph submitter (one encode owner) -----
 // The encode (pass pipeline, look bind groups, RA2-aliased slot targets)

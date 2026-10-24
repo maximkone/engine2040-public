@@ -1,0 +1,25 @@
+{
+  "bounds_m": {
+    "max": [
+      1.1677,
+      0.3102,
+      0.8331
+    ],
+    "min": [
+      -1.6368,
+      -0.3102,
+      0.0
+    ]
+  },
+  "budget": 5000,
+  "faces": 151,
+  "materials": [
+    "iron",
+    "wood"
+  ],
+  "preset": "ballista",
+  "seed": "7",
+  "sha256": "6e14a9d228b1d39e9e15346104c7e1a54022bb4c00c2ab58ca806a7ebf77f0cd",
+  "tris": 302,
+  "verts": 356
+}
