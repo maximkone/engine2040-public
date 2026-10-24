@@ -252,6 +252,13 @@ impl Role {
     }
 }
 
+// Ambush hold lives in depth/ambush.rs (directory child module so the
+// workspace module gate resolves it): the held nest, its timeout and the
+// memory-evidence gate.
+#[path = "depth/ambush.rs"]
+mod ambush;
+pub use ambush::{AmbushExpiry, AmbushHold, AMBUSH_TIMEOUT_TICKS};
+
 /// Duel tier from designer rows: skill-first enemy kinds.
 ///
 /// Consumer: the arena duel builds one [`DepthBrain`] per foe and installs
