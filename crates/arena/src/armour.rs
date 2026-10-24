@@ -10,7 +10,7 @@
 //! guard. Unworn matches never read a worn bit, and `fold` writes no bytes
 //! for them, so rules v1 and unarmoured v2 bouts keep every byte.
 
-use crate::{authority, FighterState, Sim, FIGHT_RULES_V2};
+use crate::{authority, geometry_rules, FighterState, Sim};
 use engine_combat::{
     Cut, FightEvent, ARMOR_GALEA, ARMOR_GREAVE, ARMOR_LORICA, ARMOR_MANICA, ARMOR_SCUTUM,
 };
@@ -91,7 +91,7 @@ impl Sim {
     /// 0, the kit count is not the fighter count, or a piece is unknown;
     /// nothing is worn then.
     pub fn wear_armour(&mut self, kit: &[&[&str]]) -> Result<(), ArmourError> {
-        if self.tick != 0 || self.rules.version != FIGHT_RULES_V2 {
+        if self.tick != 0 || !geometry_rules(self.rules.version) {
             return Err(ArmourError::Closed);
         }
         if kit.len() != self.fighters {

@@ -42,6 +42,9 @@ banner_west: west mark use, cloth that calls the crowd side. Past event: the wes
 banner_east: east mark use, cloth that calls the crowd side. Past event: the east banner faded in the sun and looked grey on capture, so the dyer re-dipped it red. Goal: explore.
 crate_a: ring-band cover use, the bumper that starts in spawn A's own quarter, inside the ring band 7.07 m out that blocks swords and sight. Past event: a recruit hid behind it and lived, so veterans kick it aside first. Goal: unknown place.
 debris_field: ring-band cover use, a mound inside the ring band 7.07 m out that slows feet and breaks lines, standing at the crate's 100 cm so both spawns start beside cover of the same height. Past event: a champion tripped on rubble and lost the bout, so sweepers leave half the stones. Goal: moral choice.
+machine_ballista: west dressing use, a siege engine parked off the duel floor so the bowl reads as a working arena between bouts. Past event: a loose ballista bolt rolled onto the sand and tripped a fighter, so the crew now wedges the frame. Goal: unknown place.
+machine_crane: west dressing use, a treadwheel crane standing beside the gate where the crew lifts the awning. Past event: the crane's rope snapped over the wall and dropped a beam on the stands, so the gate crew re-splices it nightly. Goal: explore.
+machine_cart: east dressing use, a supply cart parked by the service wall where the sand crew unloads rakes and buckets. Past event: an unbraked cart rolled into the gate tunnel and blocked the entrance, so the wheels now carry chocks. Goal: explore.
 
 ## Cover and the entrance (2026-10-17)
 

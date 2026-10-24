@@ -424,6 +424,8 @@ fn check_latency_ms(latency_ms: u32) -> Result<(), FeelError> {
 /// The shipped feel rows as one versioned row.
 pub const FEEL_V1: FeelPreset = FeelPreset::v1();
 
+/// The shipped presentation row (SW24): the look layers read it, the tick never does.
+pub use crate::presentation::{PresentationFeel, PRESENTATION_V1};
 /// Presentation-side amplification for one tick: frozen ticks past the sim
 /// row, trauma and flash in permille/ticks. Integer only; the sim never
 /// reads this back, so replays cannot fork on juice.
@@ -1029,7 +1031,7 @@ fn absorb_kill(report: &mut BalanceReport, move_byte: u8) {
     );
 }
 
-fn range(field: &'static str, value: u32, min: u32, max: u32) -> Result<(), FeelError> {
+pub(crate) fn range(field: &'static str, value: u32, min: u32, max: u32) -> Result<(), FeelError> {
     if value < min || value > max {
         return Err(FeelError::BadValue { field, value });
     }
