@@ -519,7 +519,7 @@ Same source and routing as the frame section above.
   attack_started` x2: a press emits exactly one `AttackStarted` on its tick
   under v2 and none under v1. F2P: no AttackStarted event. P2P: combat lib
   green; golden `d57b5c8ae3096614` unchanged. needs: EG19.
-- [ ] EG19c game: the swing starts on the press and the hit lands on its frame
+- [x] EG19c game: the swing starts on the press and the hit lands on its frame Landed 1da2650.
   — `fighter_look` starts the attack clip on `AttackStarted` (today on the
   outcome cue, 12 ticks late, `fighter_look.rs:613-625`) and times the clip so
   its impact frame meets the v2 startup. View only. Diff: regular. Tier A.
@@ -666,7 +666,7 @@ Same source and routing as the frame section above.
   gives equal digests. F2P: no BalanceState in the step today. P2P: golden
   `d57b5c8ae3096614` unchanged, with a HASH-LAW note for the balance wire
   version. Review: bodies.md G7 (geaen 12.5.3.8). needs: EG1.
-- [ ] EG35 endpoint: a render door — an AI cannot see or steer the renderer:
+- [x] EG35 endpoint: a render door — an AI cannot see or steer the renderer:
   `crates/endpoint/src/packs/view.rs` holds log verbs only, and endpoint has no
   engine-render dependency. Add `view.capture` (an offscreen render of the
   current tick: path, SHA, per-pass ms), `render.material.set` (the look half of
@@ -679,7 +679,7 @@ Same source and routing as the frame section above.
   give equal SHA; `render.pass.toggle` is refused with the door off; undo
   restores the pass state; the three verbs appear in api.describe. F2P: no
   render verb today. P2P: `cargo test -p engine-endpoint --lib` green; golden
-  unchanged. Review: render.md G10. needs: EG9.
+  unchanged. Review: render.md G10. needs: EG9. Progress 2026-10-24: the capture and pass halves landed under other names - `view.steer` (0d90fb8d2) op `capture` renders the live frame offscreen to `target/scene-captures/<tag>-t<tick>-<n>.png` and returns path, FNV and the per-pass summary, op `pass` switches `sun_shadow|contact_shadow|fog|bloom|auto_exposure|msaa|taa|debug_lines` through `Presenter::set_pass` (9d468a691, engine-render `pass_switch.rs`, 2 tests, gh run 40099206483) and returns the state it replaced, op `undo` restores it; also named camera shots, poses and hold/resume/step; the window answers over the agent seat (`scene`/`steer` lines, `crates/game/src/scene_desk.rs`, window glue `bin/arena_frame/scene.rs` landed c2e130ed2; compiled and unit-tested, not yet run in a live window). Not done: `render.material.set`; a headless capture (the verbs need a live seat and refuse `no_seat` without one); two `view.capture` calls on one tick equal-SHA is not yet a test (needs a window). RETIRED (done): 9d468a691 (lead, trim audit 2026-10-24)
 - [x] EG36 endpoint: process-wide mutable statics become per-session —
   `STEP_HOOK` (`crates/endpoint/src/play/play_session.rs:113`), `REQUERY`
   (`crates/endpoint/src/play/requery.rs:167`, a cache shared by all sessions)
@@ -706,7 +706,7 @@ Same source and routing as the frame section above.
   panic. F2P: both tests panic before. P2P: `cargo test -p engine-render --lib`
   and `-p engine-provider --lib` green; golden unchanged. Review: rust-craft.md
   G11 (trpl ch 9). needs: EG2.
-- [ ] EG39 game: presentation is rollback-safe — `SlotAnim` accumulates from
+- [x] EG39 game: presentation is rollback-safe — `SlotAnim` accumulates from
   cues (`swings`, `act_start`, `crates/game/src/fighter_look.rs:134-151`), so a
   resim re-emits cues and restarts clips, and a hop after a correction reads
   worse than a small error. Derive slot anim from sim state at tick N plus the
@@ -731,8 +731,8 @@ Same source and routing as the frame section above.
   so the offset is a function of the confirmation, not a timer. Landing:
   `crates/anim/src/net_pose.rs:42` (`NetPose`) and the `fighter_look.rs` slot
   hunk. Golden: does not threaten — render only, never hashed, and the row's
-  own Accept already says the golden is unchanged.
-- [ ] EG40 game: weapons and shields on sockets — the sword and shield are baked
+  own Accept already says the golden is unchanged. Accept met per the proof runner: 1 passed.
+- [x] EG40 game: weapons and shields on sockets — the sword and shield are baked
   into the body mesh (`crates/game/src/fighter_bind.rs` hero graft), so a sword
   cannot drop after a hand cut or be swapped; nothing named `attach` exists in
   anim or game. Add `Attachment{joint, offset}` to `FighterLook`
@@ -746,7 +746,7 @@ Same source and routing as the frame section above.
   socket and gets one physics body. F2P: a grep for `attach` in anim and game
   finds nothing today. P2P: golden unchanged; `cargo test -p engine-game --lib`
   green. Review: bodies.md G8 (geaen 11.11.5.1). needs: EG18.
-  Correction 2026-10-21: duplicate - PW34 owns this work now; PW34's row says it closes EG40 and the grip half of LF12. This row is not ticked and is not built on its own; retire it when PW34 lands.
+  Correction 2026-10-21: duplicate - PW34 owns this work now; PW34's row says it closes EG40 and the grip half of LF12. This row is not ticked and is not built on its own; retire it when PW34 lands. RETIRED (dup): weapon sockets are OPT47's, same job (lead, trim audit 2026-10-24)
 - [x] EG41 perf: packaged smoke, soak and a frame-time gate — the packaged smoke Landed 1d01a41. node --test tools/proof.test.mjs 21 pass (frameCsvVerdict steady rows pass, slow tail fails on p95, same text x2 equal, real timed-smoke header parses), engine-perf lib 122 passed run 39057450320; arena writes target/perf/frame-times.csv (`write_frame_times_csv`) and `node tools/proof.mjs --perf` prints "frame times: frames=600 p50=9.219 ms p95=19.310 ms (bar 50 ms)"; `fps_est` is renamed (perf CSV header).
   is a marker only, the hour soak in `crates/proof/src/online_soak.rs` is
   `#[ignore]` and unwired, and no CI gate reads frame time. Use the existing
@@ -1050,7 +1050,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   test. P2P: `cargo test -p engine-endpoint --lib` green; default build gains
   no dependency; golden unchanged. Plan: `docs/plan/forge-adoption.md` AD-8.
   Owner Decision 2: yes (the `verify` feature edge). needs: RB1. Progress 2026-10-18: the host half lands - engine-endpoint gains the workspace `engine-playtest` edge under `mcp`, `look_host::host_look_judge` bridges the capture/preview/q1 args through `look::judge` (codes look_capture/look_manifest), and `e2040-mcp` registers it at start so `look.judge` no longer answers unsupported; tests look_judge_real (own process) and look_judge_hook green, full endpoint mcp suite 57 lib + 2 hook + 9 doc green (gh run 39121967253). Left: the `verify` feature with engine-proof, the verify pack verbs (bug.replay, trace.summary, replay.verify, replay.bisect) and tests/door_parity.rs. Landed acdde37e. door_parity x2 equal digests (gh runs 39139680891, 39139686099): the first 20 mirror tasks digest equal through the playtest door and the spawned e2040-mcp, and the A7 seeded tape bisects to tick 8 through stdio; feature `verify = ["mcp", "dep:engine-proof"]` (playtest already rides mcp), `packs/verify.rs` serves replay.verify/replay.bisect (playtest RB1 bodies) + bug.replay + trace.summary + verify.proof and takes the replay contract slot so each name has one owner, tool pin gains a `verify` term; endpoint --features mcp,verify lib 630 + it 57 green (39139056420, 39139056482), --features mcp suite green (39139056422), workspace-check and rust-quality PASS. The ARCHITECTURE edge and the workspace-check edge/OWN_TEST_BINARY entries ride commit 99e49fd8.
-- [ ] AD9 endpoint: door session ring with a real writer and a `door.status`
+- [x] AD9 endpoint: door session ring with a real writer and a `door.status`
   verb — `door_dispatch` pushes one typed event per refusal and failed
   handler; play jobs push their end state; new codes go in the one observe
   registry; with no writer `log.query` answers `not_wired`; `door.status` is
@@ -1084,7 +1084,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `door_status` tests; clippy lib 39869232995 PASS; the door page prints the
   verb (d0fd255e8). The row stays open for the P2P green lib (two
   `spatial_delta` tests are red at HEAD from the scene seat's in-flight
-  change) and the play-job end-state push, so the top line is unticked.
+  change) and the play-job end-state push, so the top line is unticked. Landed 45f137463: log.query answers not_wired until a writer lands; a play job end leaves one ring row (runs 40120378566, 40120249047).
 - [x] AD10 editor: gate undo by capability and group undo by AI session - Landed 2ee196e67. Proof: `cargo test -p engine-editor --lib undo_gated` 3 passed x2 (39912012687, 39913115914; the three named cases: INSERT-only token cannot undo a DELETE batch, session undo restores the exact pre-session bytes over 20 AI plus 5 human edits, a pinned object is refused by name); full editor lib 296 passed / 3 ignored (39909807190); endpoint `--features mcp --lib undo` 27 passed (39911330198); clippy PASS both crates (39910275586, 39910128707); no sim file touched, golden unchanged. Open leg named: the door reverts the newest batch only (session undo is editor API plus test; a `tx_undo` session mode is a later row).
   `undo_gated` checks the inverse ops against mask, scope and budget; human
   undo with no token is unchanged; receipts group by capability session.
@@ -1274,7 +1274,7 @@ Landed b4148dfc7. `apply_gated_persisted`/`undo_gated_persisted` run the gate on
   `Unavailable` and 429 to `QuotaAuth` (`transport.rs:505-511`); there is no
   Retry-After parsing. P2P: `cargo test -p engine-provider --lib` green;
   golden unchanged. Plan: `docs/plan/forge-adoption.md` AD-19. needs: none.
-- [ ] AD20 endpoint: reach honesty at the door — step 1: `scene.query
+- [x] AD20 endpoint: reach honesty at the door — step 1: `scene.query
   reachable` refuses `needs_nav_view` when no bake exists (the code
   `scene.spatial` already uses); step 2: one adapter from the nav mesh or
   tiles to `ReachView` and `NavView` in endpoint, read by `build_level` too
@@ -1286,7 +1286,7 @@ Landed b4148dfc7. `apply_gated_persisted`/`undo_gated_persisted` run the gate on
   agree on 20 seeded layouts. F2P: every staged actor shares polygon 0 and
   every pair answers reachable (`scene_query.rs:952-956`, `:1062-1070`). P2P:
   `cargo test -p engine-endpoint --lib` green; golden unchanged. Step 2 is
-  better after AD7. Plan: `docs/plan/forge-adoption.md` AD-20. needs: none. Progress 2026-10-18: crates/nav/src/reach.rs landed 135bb63f (reach_view gives every actor its real nav polygon, nav_view for the bake checks, two rooms read Blocked until a doorway joins them, mesh and tiles agree on 20 seeded layouts; run 39076864508, clippy 39077965931); left: endpoint needs_nav_view refusal and replacing open_floor in scene_query.rs (lane A). Progress 2026-10-18: endpoint half landed dc6710ae: scene.query reachable reads each staged actor's engine_nav mesh polygon from ServerState::with_nav and refuses needs_nav_view without a mesh, open_floor is gone; reach_door_refuses_needs_nav_view_when_no_mesh_is_held and reach_door_two_rooms_are_blocked_across_the_wall_until_a_door_joins_them green (run 39109659487); mesh and tiles on 20 layouts is engine-nav's reach_door test (135bb63f). Left: a host that bakes and hands the door a mesh (none does yet), and build_level reading the same view.
+  better after AD7. Plan: `docs/plan/forge-adoption.md` AD-20. needs: none. Progress 2026-10-18: crates/nav/src/reach.rs landed 135bb63f (reach_view gives every actor its real nav polygon, nav_view for the bake checks, two rooms read Blocked until a doorway joins them, mesh and tiles agree on 20 seeded layouts; run 39076864508, clippy 39077965931); left: endpoint needs_nav_view refusal and replacing open_floor in scene_query.rs (lane A). Progress 2026-10-18: endpoint half landed dc6710ae: scene.query reachable reads each staged actor's engine_nav mesh polygon from ServerState::with_nav and refuses needs_nav_view without a mesh, open_floor is gone; reach_door_refuses_needs_nav_view_when_no_mesh_is_held and reach_door_two_rooms_are_blocked_across_the_wall_until_a_door_joins_them green (run 39109659487); mesh and tiles on 20 layouts is engine-nav's reach_door test (135bb63f). Left: a host that bakes and hands the door a mesh (none does yet), and build_level reading the same view. Landed ee975bbf3 (2026-10-24): level.build bakes the landed level's nav tiles into a NavMesh and hangs it on the session (scene_query/nav_level.rs), so reachable answers from the level just built; nav_level 3 passed (40115143238), reach_door x2 (40116149194, and inside the whole-lib run 40117150151: 1039 passed, its 3 reds are ROM5's new codes).
 
 Second pass (owner 2026-10-11, `docs/plan/forge-adoption.md` section J): four
 more research passes gave 43 candidate rows. These 14 are the best; the rest
@@ -1295,7 +1295,7 @@ hash alone. Ready now: AD23 and PX40. The others wait behind an earlier row
 in their crate or on an owner decision. Three native ids were already taken,
 so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
 
-- [ ] AD21 endpoint: claim check — a read-only verb `claim.check` takes an
+- [x] AD21 endpoint: claim check — a read-only verb `claim.check` takes an
   agent's own claim (`landed`, `confirmed` or `viewed`) and the receipt key it
   rests on. It answers `backed`, or refuses `claim_not_backed` and names the
   missing proof. `landed` needs an apply receipt for that key with equal
@@ -1314,7 +1314,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   claim against a receipt (`grep -rniw claim crates/endpoint/src` finds two
   unrelated comments). P2P: `cargo test -p engine-endpoint --lib` green; the
   tool-list budget tests unchanged; golden hash unchanged. Plan:
-  `docs/plan/forge-adoption.md` section J (A21). needs: AD2, AD3.
+  `docs/plan/forge-adoption.md` section J (A21). needs: AD2, AD3. Landed 9e59e53dc: claim.check read-only verb, 15 passed run 40115497818; router pin 149.
 - [x] AD22 tools: playable is six named gates — a `playable` verdict passes
   only when compile, play with 0 errors, save then reopen, package, packaged
   launch and packaged smoke all pass. Each gate reads one record: compile and
@@ -1396,7 +1396,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   the 100 spatial gold tasks keep their scores; `cargo test -p engine-playtest
   --lib` green; golden hash unchanged. Plan: `docs/plan/forge-adoption.md`
   section J (A35). needs: AD7, AD23, AD24, AD28, SP66.
-- [ ] AD26 endpoint: refusals teach — one table maps every refusal code to a
+- [x] AD26 endpoint: refusals teach — one table maps every refusal code to a
   closed advice code (a short fixed list), a retry flag and one next call that
   is a live verb. A refusal comes back as a tool result with `isError` true
   that carries code, message, advice, retry flag and next call; unknown tool
@@ -1423,7 +1423,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   hash unchanged. UNVERIFIED: whether a client shows RPC error text to the
   model; record what the stdio client shows for both shapes first. Plan:
   `docs/plan/forge-adoption.md` section J (A25, B43, B44, C62). needs: AD2.
-  Progress 2026-10-23 (DOOR6, 5babbaef0): the code table half landed in `crates/endpoint/src/mcp_refusal.rs` - every scanned code carries `kind`, `retryable`, `suggestions` (up to three) and one `next` call, the twelve most-hit codes are hand-pinned, a payload test shows the fields crossing the door, and 39 `--features mcp` refusal tests pass. Still open here: the closed advice-code enum (we ship a kind, not a small fixed list), `isError` true on the tool result with `unknown_tool` staying an RPC error, the multi-field JSON-pointer reply with redacted hints, and `advice.rs` as the one file. Nothing in this row is blocked on DOOR6 now; the pointers and the result shape are the next slice.
+  Progress 2026-10-23 (DOOR6, 5babbaef0): the code table half landed in `crates/endpoint/src/mcp_refusal.rs` - every scanned code carries `kind`, `retryable`, `suggestions` (up to three) and one `next` call, the twelve most-hit codes are hand-pinned, a payload test shows the fields crossing the door, and 39 `--features mcp` refusal tests pass. Still open here: the closed advice-code enum (we ship a kind, not a small fixed list), `isError` true on the tool result with `unknown_tool` staying an RPC error, the multi-field JSON-pointer reply with redacted hints, and `advice.rs` as the one file. Nothing in this row is blocked on DOOR6 now; the pointers and the result shape are the next slice. RETIRED (done): 0cff30bec (lead, trim audit 2026-10-24)
 - [ ] AD27 endpoint: playbook prompts — the door advertises the MCP prompts
   capability and serves up to ten recipes over `prompts/list` and
   `prompts/get`. Each recipe is a numbered list of real verbs with a
@@ -1556,7 +1556,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   64,060 / view 71,125 / gym 70,824 under the 75,000 budget (headroom above the
   2,048 floor); door test PASS 39934122291 and cone test PASS 39934096024 after
   the older 60_200 bound moved to 64_400. No sim change.
-- [ ] EA6 endpoint: a per-caller capability token — the door builds its
+- [x] EA6 endpoint: a per-caller capability token — the door builds its
   session token from the host's scope policy and the tool cards (`ScopePolicy`
   and `CapabilityCard` in `tool_capabilities.rs`) instead of
   `Capability::unrestricted` in `build_server`. A write the card or scope does
@@ -1574,7 +1574,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   the capability code cannot fire at the shipped door. P2P: `cargo test -p
   engine-endpoint --lib` green; golden hash unchanged. Plan:
   `docs/plan/forge-adoption.md` section J (D-EA6). Owner Decision 1: yes
-  (tier 1 default). needs: AD10.
+  (tier 1 default). needs: AD10. Landed 3c01d691d (2026-10-24): build_server mints the session token from the scope policy's op grant (door_token.rs), --scope-policy FILE, a stale version / unknown class / unreadable file fail closed; door_token 3 then 4 passed (runs 40112803990, 40115012608), scope_policy 3 passed at HEAD (40117617314); whole endpoint lib 1039 passed at HEAD (40117150151; its 3 reds are ROM5's new codes, fixed separately).
 - [x] PF24 perf: wall time on play receipts — `play.step` and `play.run` take Landed c44ca6fe.
   an opt-in `timing` flag and then carry a `timing` object: step wall ms (p50
   and p99) labelled `software` (a CPU run, never a reference-GPU claim). A
@@ -1905,7 +1905,7 @@ Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this
   `blood=0 splats=0 placed=0`; 10th decal frame 344 `blood=120 splats=10
   placed=10`; capture sha 3edd268d5cdd8404, sim hash 508f1dc0d8d00fb7; decals
   0.492 ms, validation 0; before/after PNGs under `target/clips/lf7-fx/`.
-- [ ] LF8 render: skin, metal and cloth shade apart — one BRDF serves every
+- [x] LF8 render: skin, metal and cloth shade apart — one BRDF serves every
   part. A `MaterialKind` (skin, metal, cloth, stone) per part from the glTF
   material name; in `fs` metal gets anisotropic GGX (Filament `surface_brdf.fs`
   `D_GGX_Anisotropic`, `V_SmithGGXCorrelated_Anisotropic`), cloth Charlie sheen
@@ -1913,7 +1913,7 @@ Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this
   (`surface_shading_model_subsurface.fs`). Three landings. Diff: good. Tier A.
   Size M. Owns forward shader BRDF hunks, the render material kind field, the
   fighter_look kind map. Accept: per kind the part's region differs on vs off;
-  stone unchanged. F2P: no kind field. P2P: render lib green. needs: LF2.
+  stone unchanged. F2P: no kind field. P2P: render lib green. needs: LF2. Progress 2026-10-24: Per j3nCSn4U: no code left; present/tests_gpu.rs:117 material_kinds_shade_apart_and_stone_stays_equal encodes the Accept but calls init_or_skip; tick needs a run where it did not skip. RETIRED (done): 93d8ddaa3 (lead, trim audit 2026-10-24)
 - [x] LF9 anim: inertialized clip switches — after EG18's crossfade, a sw Landed aa42e4d.itch
   stores per-joint offsets (source minus destination, shortest-arc for
   rotations) that a critically damped spring decays (orangeduck Spring-It-On
@@ -2031,7 +2031,7 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   frames/s on the reference CPU and its bounds hold the vertex bounds within 10
   cm. F2P: the look needs a Presenter today. P2P: game lib green; golden
   unchanged. needs: none.
-- [ ] SP62 endpoint: `view.observe` and `view.laws` — the door reads the live
+- [x] SP62 endpoint: `view.observe` and `view.laws` - Proven 2026-10-24 at 7fb6434e9 alone: `--lib view_observe` 4 passed twice (runs 40112993712, 40116356267: every live fighter named after 120 ticks, one tape twice byte-identical), `--lib view_laws` 6 passed with `view_laws_pops_the_sp61_line` (run 40114825462). the door reads the live
   view as `sim.observe` reads the bout: camera, each drawn body (act, clip,
   tint, root, bounds, screen rect, cover) and the laws so far, from SP61 over
   the door's play session; refusals as `sim.observe` (`no_live_bout`). Diff:
@@ -2039,7 +2039,7 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   Accept: door tests x2: after `sim.step` 120 ticks `view.observe` names every
   live fighter with a finite rect or `null`; one tape twice gives the same
   bytes; `view.laws` pops equal SP61's line. F2P: the verbs are unknown. P2P:
-  endpoint lib green; golden unchanged. needs: SP61, EG16. Progress 2026-10-19: door half landed 1c70578 - `view.observe` and `view.laws` register as observe verbs in the view pack: they read the play slot's live bout (seed, headcount, tick count) like `sim.observe`, answer `no_live_bout` first, `unsupported_view_source` until a host registers, and `bad_view` for a frame outside the contract (one body per live fighter, finite rect or null, ordered bounds, camera in range); tests view_observe_names_every_live_fighter_after_120_ticks, view_observe_one_tape_twice_is_byte_identical, view_laws_pops_the_sp61_line, view_laws_at_tick_zero_pops_the_empty_line, view_refuses_without_a_bout_then_without_a_source, view_refuses_a_host_frame_outside_the_contract, view_tools_register_in_the_pack_and_api_describe_reads_them green (endpoint lib 636 passed, gh run 39184597714); tool-list budget 59000 -> 61500 with the dated reason (loaded list 58703). Left: a shipped host that calls `register_view_source` from SP61 - `engine-game`'s view truth sits behind its `app` feature and the endpoint `mcp` graph enables only `default` (no engine-render dep), so enabling `app` there would pull winit/cpal and break the Linux Pages doc build; the host needs a row that owns an app-side registration.
+  endpoint lib green; golden unchanged. needs: SP61, EG16. Progress 2026-10-19: door half landed 1c70578 - `view.observe` and `view.laws` register as observe verbs in the view pack: they read the play slot's live bout (seed, headcount, tick count) like `sim.observe`, answer `no_live_bout` first, `unsupported_view_source` until a host registers, and `bad_view` for a frame outside the contract (one body per live fighter, finite rect or null, ordered bounds, camera in range); tests view_observe_names_every_live_fighter_after_120_ticks, view_observe_one_tape_twice_is_byte_identical, view_laws_pops_the_sp61_line, view_laws_at_tick_zero_pops_the_empty_line, view_refuses_without_a_bout_then_without_a_source, view_refuses_a_host_frame_outside_the_contract, view_tools_register_in_the_pack_and_api_describe_reads_them green (endpoint lib 636 passed, gh run 39184597714); tool-list budget 59000 -> 61500 with the dated reason (loaded list 58703). Left: a shipped host that calls `register_view_source` from SP61 - `engine-game`'s view truth sits behind its `app` feature and the endpoint `mcp` graph enables only `default` (no engine-render dep), so enabling `app` there would pull winit/cpal and break the Linux Pages doc build; the host needs a row that owns an app-side registration. Progress 2026-10-24: the shipped host landed 0d90fb8d2 - `e2040-mcp` registers `view::scene::scene_view_frame`, which plays the session's bout in a windowless `arena.exe --scene-report <seed> <ticks> <fighters>` (the same fold `view.laws` uses, plus the posed bodies, the director's camera and the sun) and maps its fighters to the frame contract, so `view.observe` answers in the shipped door with no engine-game app dependency in the endpoint graph; test view_observe_reads_the_scene_report_through_the_shipped_view_host green with 15 more scene-lane door tests (endpoint --features mcp view:: + play_scene 55 passed, gh run 40099639693). The game half landed c2e130ed2 (`scene_report`, `scene_desk`, `--scene-report`, `--scene-at`, the seat's `scene`/`steer` lines; 36 lib tests, 7 arena-bin tests and 3 real-binary tests green, gh runs 40102384679, 40102558125, 40102436532). The same lane adds `view.scene` (the spatial scene report: place, bounds, screen rect and cover, floor contact, hands, stuck spear bone, occluders, sun and shadow-map facts, camera, passes, laws; JSON plus text plus findings) and `view.steer` (EG35).
 - [x] SP63 render: the GPU's own numbers instead of PNGs, slice 1: a draw-id Landed 1d01a41. frame.rs id_tests id_target_box_readback_holds_box_id_and_clear (box pixels hold id 0, plane id 1, background u32::MAX, read-back x2 equal, 0 validation errors), id_target_cleared_to_max, id_target_reports_box_id, id_target_stays_clear_on_offscreen green on the RTX 3050 (engine-render --features window --lib, local PC run); forward.wgsl writes the id attachment.
   target — the forward pass writes a second attachment `R32Uint` holding the
   draw's index in the list (fighter parts tagged with their slot), cleared to
@@ -2058,7 +2058,7 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   read-back targets exactly; a planted NaN material gives `nan_px` above 0;
   one frame x2 equal; the ring never blocks. F2P: no reduction. P2P: render
   lib green. needs: SP63.
-- [ ] SP63c game: GPU numbers slice 3, the receipt and the check — arena
+- [x] SP63c game: GPU numbers slice 3, the receipt and the check — arena
   prints `arena pixels:` (bodies with 0 px while their CPU cover is over 0.5%,
   `nan_px`, darkest and brightest body mean luminance) and the view brief
   gains `px` and `mean_rgb` per body; `tools/product-check.mjs` adds floors
@@ -2069,7 +2069,7 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   product-check tests parse the line and break each floor once; a real run is
   green; on a 2-fighter fixture each body's px is within 15% of the CPU
   projection's area. F2P: no `arena pixels:` line. P2P: game lib and `node
-  --test tools/product-check.test.mjs` green. needs: SP63b.
+  --test tools/product-check.test.mjs` green. needs: SP63b. RETIRED (dup): slice 3 of SP63b (lead, trim audit 2026-10-24)
 - [x] SP64 game: props and light in the view truth — every arena-kit and ring Landed 1d01a41.
   draw adds a row (kind, bounds, screen rect, cover); the frame adds sun
   direction and elevation, exposure, fog density and the passes that ran

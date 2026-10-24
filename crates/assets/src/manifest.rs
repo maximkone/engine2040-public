@@ -9,7 +9,7 @@
 //! changed input or setting is the only thing that shows up as stale.
 //!
 //! Two hashes, both existing canons: [`crate::registry::content_hash`]
-//! (FNV-1a, the registry identity) and [`content_digest`] (blake3, the digest
+//! (FNV-1a, the registry identity) and [`content_digest`](crate::asset_source::content_digest) (blake3, the digest
 //! the bundle format uses). This module adds no new hash.
 //!
 //! The format is canonical: LF endings only, one line per field, records
