@@ -12,6 +12,7 @@
 //! marked synthetic. Non-commercial licenses are refused, never baked.
 
 use super::locomotion::{contacts_for_phase, loco_skeleton};
+use super::motion_bake::{bake_foot_weights, FootWeights, FOOT_TICK_HZ};
 use super::motion_match::{
     bake as bake_db, db_hash, make_feature, predict_linear, Entry, MatchError, MotionDb, PoseSample,
 };
@@ -325,6 +326,9 @@ pub struct BakedClip {
     pub root_motion: bool,
     /// True for in-code synthetic stand-ins.
     pub synthetic: bool,
+    /// The clip's planted-foot lane at 30 Hz (SW25): the permille of each window each foot
+    /// spent down, so the IK starts from a per-clip plant instead of a live contact solve.
+    pub ik_weight: FootWeights,
     /// Stable digest over the clip name plus its entry features.
     pub digest: u64,
 }
@@ -482,9 +486,25 @@ pub fn bake_loco_set(specs: &[ClipSpec]) -> Result<LocoSet, BakeError> {
     let mut clips: Vec<BakedClip> = Vec::with_capacity(specs.len());
     for (index, spec) in specs.iter().enumerate() {
         let base = entries.len();
+        let mut planted: Vec<[bool; 2]> = Vec::with_capacity(usize::from(spec.frames));
         for frame in 0..spec.frames {
             entries.push(frame_entry(spec, index as u16, frame)?);
+            let phase = f32::from(frame) / f32::from(spec.frames);
+            let mask = contact_mask(phase, frame);
+            planted.push([mask & 1 != 0, mask & 2 != 0]);
         }
+        // SW25: the clip's own plant lane, baked beside its entries.
+        let ik_weight =
+            bake_foot_weights(&planted, FOOT_TICK_HZ).map_err(|err| BakeError::BadSpec {
+                clip: bound(spec.name),
+                reason: match err {
+                    super::motion_bake::FootWeightError::Empty => "no frames to bake a plant",
+                    super::motion_bake::FootWeightError::BadTickHz(_) => {
+                        "the bake rate misses 30 Hz"
+                    }
+                    super::motion_bake::FootWeightError::TooLong(_) => "clip passes the bake cap",
+                },
+            })?;
         clips.push(BakedClip {
             name: spec.name,
             source: sources[index],
@@ -493,6 +513,7 @@ pub fn bake_loco_set(specs: &[ClipSpec]) -> Result<LocoSet, BakeError> {
             looped: spec.looped,
             root_motion: spec.root_motion,
             synthetic: spec.synthetic,
+            ik_weight,
             digest: clip_digest(spec, &entries[base..]),
         });
     }
@@ -529,6 +550,30 @@ pub fn bake_hero_set() -> Result<LocoSet, BakeError> {
 mod tests {
     use super::super::motion_match::{build_query, cost_units, default_weights, search, NO_HIST};
     use super::*;
+
+    #[test]
+    fn every_baked_clip_carries_its_foot_plant_lane() {
+        // SW25: the caller fills the lane from the clip's own contact masks, one sample per two
+        // frames, and a walk cycle plants a foot somewhere in it.
+        let set = bake_hero_set().expect("hero set bakes");
+        for clip in &set.clips {
+            assert_eq!(clip.ik_weight.hz, 30, "{} samples at 30 Hz", clip.name);
+            assert_eq!(clip.ik_weight.tick_hz, FOOT_TICK_HZ, "{}", clip.name);
+            let want = usize::from(clip.frames).div_ceil(2);
+            assert_eq!(clip.ik_weight.ik_weight.len(), want, "{}", clip.name);
+            let planted = clip
+                .ik_weight
+                .ik_weight
+                .iter()
+                .filter(|pair| pair.iter().any(|w| *w >= 900))
+                .count();
+            assert!(planted > 0, "{} plants a foot in {want} samples", clip.name);
+            println!(
+                "loco bake: {} frames {} samples {} whole plants {planted}",
+                clip.name, clip.frames, want
+            );
+        }
+    }
 
     #[test]
     fn hero_set_bakes_with_counts_and_tags() {
