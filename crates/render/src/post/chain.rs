@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::godray::GodrayConfig;
 use engine_core::Fnv64;
 
 // ---------------------------------------------------------------------------
@@ -239,6 +240,9 @@ pub struct PostChain {
     /// RCAS sharpen strength on the graded display image, `0..=1`
     /// ([`FSR_SHARPEN_MAX`]); 0 is the identity.
     pub sharpen: f32,
+    /// Sun shafts on the fogged HDR frame, before exposure (SW91). Off adds
+    /// nothing, so a chain with shafts off keeps its exact bytes.
+    pub godray: GodrayConfig,
 }
 
 impl Default for PostChain {
@@ -249,6 +253,7 @@ impl Default for PostChain {
             aces_white: 11.2,
             grade: GradeConfig::default(),
             sharpen: DEFAULT_CHAIN_SHARPEN,
+            godray: GodrayConfig::off(),
         }
     }
 }
@@ -265,6 +270,11 @@ impl PostChain {
             )));
         }
         self.grade.validate()?;
+        if !self.godray.is_off() {
+            self.godray
+                .validate()
+                .map_err(|e| PostError::Invalid(format!("godray: {e}")))?;
+        }
         if !self.sharpen.is_finite() || !(FSR_SHARPEN_MIN..=FSR_SHARPEN_MAX).contains(&self.sharpen)
         {
             return Err(PostError::Invalid(format!(
@@ -273,6 +283,15 @@ impl PostChain {
             )));
         }
         Ok(())
+    }
+
+    /// Chain with the shaft pass configured (SW91): validates the mask grid and
+    /// constants through [`Self::validate`] so the returned chain always passes.
+    /// `GodrayConfig::off()` is the default and adds nothing.
+    pub fn with_godray(&self, godray: GodrayConfig) -> Result<PostChain, PostError> {
+        let next = PostChain { godray, ..*self };
+        next.validate()?;
+        Ok(next)
     }
 
     /// Chain with the sharpen finish set: validates the strength through
@@ -977,6 +996,9 @@ pub(super) fn run_chain_core(
 
     let started = Instant::now();
     let flared = apply_bloom(hdr, width, height, &chain.bloom)?;
+    // Sun shafts (SW91) ride the fogged HDR frame before exposure and the tone
+    // map; `GodrayConfig::off()` hands the frame back untouched.
+    let flared = crate::godray::composite(flared, width, height, &chain.godray);
     let bloom_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     // Fused exposure plus ACES plus grade in one pass over the flared
@@ -1106,6 +1128,47 @@ mod tests {
             cluster_ms: 0.0,
             ibl_ms: 0.0,
         }
+    }
+
+    /// SW91 composite slice: the shaft pass sits on the fogged HDR frame
+    /// before exposure. Off keeps the chain's bytes; on adds light along rays
+    /// that reach a bright texel, and a dark frame gains nothing.
+    #[test]
+    fn chain_godray_off_keeps_the_bytes_and_on_adds_light() {
+        let plain = PostChain::default();
+        assert!(plain.godray.is_off(), "the default chain runs no shafts");
+        let cfg = crate::godray::GodrayConfig {
+            sun_px: [1.0, 1.0],
+            ..crate::godray::GodrayConfig::for_frame(4, 4, 4)
+        };
+        let shafts = plain.with_godray(cfg).expect("the config validates");
+        let dark = vec![[0.02f32, 0.02, 0.02]; 16];
+        let bright = vec![[8.0f32, 8.0, 8.0]; 16];
+        let off_dark = run_chain(&dark, 4, 4, &plain, &lights()).expect("off runs");
+        let on_dark = run_chain(&dark, 4, 4, &shafts, &lights()).expect("on runs");
+        assert_eq!(off_dark.ldr, on_dark.ldr, "a dark frame gains nothing");
+        let off_bright = run_chain(&bright, 4, 4, &plain, &lights()).expect("off runs");
+        let on_bright = run_chain(&bright, 4, 4, &shafts, &lights()).expect("on runs");
+        assert!(
+            on_bright
+                .ldr
+                .iter()
+                .zip(off_bright.ldr.iter())
+                .any(|(on, off)| on != off),
+            "a bright frame gains shafts"
+        );
+    }
+
+    #[test]
+    fn chain_godray_bad_mask_fails_loudly() {
+        let bad = crate::godray::GodrayConfig {
+            quarter_w: 0,
+            ..crate::godray::GodrayConfig::for_frame(4, 4, 4)
+        };
+        let err = PostChain::default()
+            .with_godray(bad)
+            .expect_err("an empty mask grid is refused");
+        assert!(format!("{err}").contains("godray"), "{err}");
     }
 
     /// Digest over display pixels: the replay proof for one chain run.
