@@ -185,6 +185,10 @@ fn write_fault_error(hasher: &mut Fnv64, error: &RulesError) {
         RulesError::BadWorld { .. } => hasher.write_u8(13),
         RulesError::NoScript => hasher.write_u8(14),
         RulesError::BadSpec { .. } => hasher.write_u8(15),
+        RulesError::NoEffect { cases } => {
+            hasher.write_u8(16);
+            hasher.write_usize(*cases);
+        }
     }
 }
 
@@ -297,10 +301,24 @@ impl Rules {
     }
 
     /// `rules.set`: compile, vet, run the candidate through the smoke worlds, then install.
-    /// Any failure refuses the edit and keeps the last good script untouched.
+    /// Any failure refuses the edit and keeps the last good script untouched. A
+    /// script that fires no action in any smoke world is refused
+    /// [`RulesError::NoEffect`]: it would pace nothing.
     pub fn set(&mut self, source: &str, tick: u32) -> Result<SetReceipt, RulesError> {
+        self.set_allowing_no_op(source, tick, false)
+    }
+
+    /// [`Rules::set`] with the no-op escape hatch: `no_op` true installs a
+    /// script that deliberately fires no action (a probe, a placeholder), so a
+    /// caller declares the intent instead of the door guessing it (AD13).
+    pub fn set_allowing_no_op(
+        &mut self,
+        source: &str,
+        tick: u32,
+        no_op: bool,
+    ) -> Result<SetReceipt, RulesError> {
         let outcome = self.vet(source, &smoke_worlds());
-        let (compiled, max_ops, cases) = match outcome {
+        let (compiled, max_ops, cases, actions) = match outcome {
             Ok(done) => done,
             Err(err) => {
                 self.refusals += 1;
@@ -308,6 +326,12 @@ impl Rules {
                 return Err(err);
             }
         };
+        if actions == 0 && !no_op {
+            let err = RulesError::NoEffect { cases };
+            self.refusals += 1;
+            self.last_refusal = Some(err.clone());
+            return Err(err);
+        }
         let replaced = self.script_hash();
         let rev = self.history.last().map_or(1, |last| last.rev + 1);
         let hash = compiled.hash;
@@ -515,21 +539,27 @@ impl Rules {
             },
         }
     }
-    fn vet(&self, source: &str, worlds: &[World]) -> Result<(Compiled, u64, usize), RulesError> {
+    fn vet(
+        &self,
+        source: &str,
+        worlds: &[World],
+    ) -> Result<(Compiled, u64, usize, usize), RulesError> {
         let compiled = script::compile(&self.engine, source, &self.limits)?;
         let saved = self.snapshot();
         let mut max_ops = 0;
+        let mut actions = 0;
         let mut failure = None;
         for world in worlds {
             let case = self.run_case(&compiled, world);
             max_ops = max_ops.max(case.max_ops);
+            actions += case.actions;
             if let Some((_, err)) = case.error {
                 failure = Some(err);
                 break;
             }
         }
         self.restore_unchecked(&saved);
-        failure.map_or(Ok((compiled, max_ops, worlds.len())), Err)
+        failure.map_or(Ok((compiled, max_ops, worlds.len(), actions)), Err)
     }
 }
 
@@ -709,5 +739,37 @@ mod tick_digest_tests {
             float_only.digest(),
             "fault-only report differs from clean via digest"
         );
+    }
+}
+
+#[cfg(test)]
+mod no_effect_tests {
+    //! AD13: a script that fires no action in any smoke world is refused
+    //! `NoEffect` unless the caller declares it a no-op, so an edit that paces
+    //! nothing cannot pass as a rule change.
+    use super::*;
+
+    #[test]
+    fn no_effect_script_is_refused_and_a_declared_no_op_installs() {
+        let mut rules = Rules::new(Limits::default());
+        // The row's own text: it defines a function and fires no action.
+        let refused = rules.set("fn on_tick(me){let x=1;}", 0);
+        assert!(refused.is_err(), "a do-nothing script refuses: {refused:?}");
+        // A body that compiles and still fires nothing is a typed NoEffect.
+        let err = rules.set("let x = 1;", 0).expect_err("no action fires");
+        assert!(matches!(err, RulesError::NoEffect { .. }), "{err:?}");
+        assert_eq!(rules.script_hash(), None, "a refusal installs nothing");
+        assert_eq!(rules.history().len(), 0, "no revision was spent");
+        // Declared a no-op, the same text installs.
+        let ok = rules
+            .set_allowing_no_op("let x = 1;", 0, true)
+            .expect("a declared no-op installs");
+        assert_eq!(ok.rev, 1);
+        assert!(rules.script_hash().is_some());
+        // An acting script still installs without the flag.
+        let acting = rules
+            .set("press(1);", 0)
+            .expect("an acting script installs");
+        assert_eq!(acting.rev, 2);
     }
 }

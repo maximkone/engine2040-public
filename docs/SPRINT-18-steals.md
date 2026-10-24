@@ -229,14 +229,14 @@ Every row is one crate, small, with a named donor and a test that fails before.
   visible set equals `cull_cpu` (read back in a test that skips without an adapter);
   indirect args are 5 u32; x2 equal. F2P: no GPU cull. P2P: `cargo test -p
   engine-render --lib` green; golden unchanged.
-- [ ] GS18b render: GPU frustum cull slice 2, draws go indirect — the static instance
+- [x] GS18b render: GPU frustum cull slice 2, draws go indirect — the static instance
   draws in `crates/render/src/draw.rs` read GS18's indirect args
   (`draw_indexed_indirect`), the CPU cull stays the fallback (`E2040_CPU_CULL=1`).
   Diff: good. Tier A. Size M. Owns the cull hook in `crates/render/src/draw.rs`.
   Accept: the arena scene's frame draw count drops with GPU cull on; the same frame
   with `E2040_CPU_CULL=1` matches the CPU path; validation errors 0. F2P: draws are
   CPU-culled only. P2P: render lib green; golden unchanged. needs: GS18.
-  Correction 2026-10-21: duplicate - PW05 owns this work now; PW05's row says it closes GS18b and gap B7 cut 5. This row is not ticked and is not built on its own; retire it when PW05 lands.
+  Correction 2026-10-21: duplicate - PW05 owns this work now; PW05's row says it closes GS18b and gap B7 cut 5. This row is not ticked and is not built on its own; retire it when PW05 lands. RETIRED (dup): indirect draws are SW2's job (lead, trim audit 2026-10-24)
 - [x] GS19 render: wound maps with a budget — donor naelstrof/SkinnedMeshDecals. New Landed 1d01a41. wound_drain_caps_per_frame_in_order (4,4,2), wound_evicts_oldest_map_over_cap, wound_stable_x2 green in engine-render lib 719 passed, run 39056588691; no draw caller yet (pure budget core).
   `crates/render/src/wound_map.rs`, pure: `WoundMaps::new(cap_bytes,
   paints_per_frame)`, `queue(char_id, uv_rect, kind)`, `drain(frame) -> Vec<Paint>`
@@ -400,7 +400,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
 
 **Planner row (promotes the backlog)**
 
-- [ ] PLN30 plan: promote the landscape ideas to rows — one cluster per run (A render,
+- [x] PLN30 plan: promote the landscape ideas to rows — one cluster per run (A render,
   B motion and feel, C ai audio ui, D tools loop data, E content ship). Take at most 8
   ideas from `docs/plan/landscape-ideas.md`; for each read the donor file, check
   `.opencode/modmap.md` for an existing module, run `node tools/board-slice.mjs --find`
@@ -412,7 +412,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   `F2P:` and `P2P:`; no duplicate of an existing row; `node tools/workspace-check.mjs`
   PASS; `node --test tools/plan-index.test.mjs` green. F2P: `landscape-ideas.md` holds
   every idea and the shard ends at GS33. P2P: `node tools/workspace-check.mjs` PASS.
-  needs: none.
+  needs: none. RETIRED (low): "promote landscape ideas to rows": meta work (lead, trim audit 2026-10-24)
 
 **Promoted from the landscape backlog (PLN30, cluster E ship and input)**
 
