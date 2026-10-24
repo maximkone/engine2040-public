@@ -16,7 +16,11 @@
 //!   bits of `engine_input::ALL_BUTTONS` (`JUMP` is `0x20`);
 //! - client: `ping` (ignored) or `quit` (closes the seat);
 //! - window: `tick <tick> <hash:016x>` after every fixed tick, and
-//!   `view <arena view: ...>` every [`VIEW_EVERY_TICKS`] ticks.
+//!   `view <arena view: ...>` every [`VIEW_EVERY_TICKS`] ticks;
+//! - client: `scene [pixels]` and `steer <op> ..` (rows SP62, EG35): the
+//!   window answers `scene <json>` or `steer <json>` on its next presented
+//!   frame. The grammar and the replies are `scene_desk`'s; the seat only
+//!   queues the raw line ([`Seat::take_requests`]) and writes the reply.
 //!
 //! Units: tick is the zero-based fixed tick the input applies before, wish
 //! and facing are the sim's own integer units. Determinism: the seat only
@@ -45,6 +49,12 @@ pub const VIEW_EVERY_TICKS: u32 = 60;
 /// Longest a publish may block on a client that stopped reading, in ms.
 #[cfg(not(target_arch = "wasm32"))]
 const WRITE_TIMEOUT_MS: u64 = 20;
+/// Request lines the seat keeps between two presented frames; the oldest drop.
+pub const MAX_REQUESTS: usize = 8;
+/// Longest a reply to a request may block, in ms: a report is tens of
+/// kilobytes, and a client that is reading takes it at once.
+#[cfg(not(target_arch = "wasm32"))]
+const REPLY_TIMEOUT_MS: u64 = 750;
 
 /// Why a seat line was refused. The line is named so the client can fix it.
 #[derive(Debug)]
@@ -127,6 +137,8 @@ impl SeatStats {
 #[derive(Default)]
 struct Shared {
     pending: VecDeque<SeatCommand>,
+    /// `scene` and `steer` lines waiting for the window's next frame.
+    requests: VecDeque<String>,
     stats: SeatStats,
     writer: Option<TcpStream>,
 }
@@ -241,6 +253,35 @@ impl Seat {
     pub fn receipt(&self) -> String {
         self.stats().line(self.port)
     }
+
+    /// The `scene` and `steer` lines that arrived since the last call, oldest
+    /// first. The window answers them on the frame it is about to present.
+    #[must_use]
+    pub fn take_requests(&self) -> Vec<String> {
+        lock(&self.shared).requests.drain(..).collect()
+    }
+
+    /// Send one reply line that may be large, waiting a moment for a client
+    /// that is reading. A tick line is short and never waits; a report is
+    /// not, and a partial write would corrupt the stream, so the write
+    /// timeout is raised for this one line and put back.
+    pub fn publish_reply(&self, line: &str) {
+        let mut shared = lock(&self.shared);
+        let Some(writer) = shared.writer.as_mut() else {
+            shared.stats.dropped = shared.stats.dropped.saturating_add(1);
+            return;
+        };
+        let _ = writer.set_write_timeout(Some(Duration::from_millis(REPLY_TIMEOUT_MS)));
+        let sent = writer
+            .write_all(line.as_bytes())
+            .and_then(|()| writer.flush())
+            .is_ok();
+        let _ = writer.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
+        if !sent {
+            shared.writer = None;
+            shared.stats.dropped = shared.stats.dropped.saturating_add(1);
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -296,6 +337,17 @@ impl Seat {
     pub fn receipt(&self) -> String {
         match self.0 {}
     }
+
+    /// Unreachable on wasm: there is no seat to ask (see [`Seat::bind`]).
+    #[must_use]
+    pub fn take_requests(&self) -> Vec<String> {
+        match self.0 {}
+    }
+
+    /// Unreachable on wasm: there is no seat to write to (see [`Seat::bind`]).
+    pub fn publish_reply(&self, _line: &str) {
+        match self.0 {}
+    }
 }
 
 /// The reader thread: one client at a time, lines into the queue. A second
@@ -334,6 +386,15 @@ fn serve(listener: TcpListener, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool
 
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_line(shared: &Mutex<Shared>, line: &str) {
+    if matches!(line.split_whitespace().next(), Some("scene" | "steer")) {
+        let mut shared = lock(shared);
+        if shared.requests.len() >= MAX_REQUESTS {
+            shared.requests.pop_front();
+            shared.stats.dropped = shared.stats.dropped.saturating_add(1);
+        }
+        shared.requests.push_back(line.trim_end().to_owned());
+        return;
+    }
     match parse_input(line) {
         Ok(Some(command)) => {
             let mut shared = lock(shared);
@@ -446,7 +507,7 @@ mod tests {
             ("input x 0 0 0 0", "tick x"),
             ("input 1 101 0 0 0", "mx 101 outside"),
             ("input 1 0 0 0 0 extra", "extra fields"),
-            ("input 1 0 0 0 128", "buttons 0x80"),
+            ("input 1 0 0 0 256", "buttons 256 outside"),
         ] {
             let err = parse_input(line).expect_err(why);
             assert!(err.to_string().contains(why), "{line}: {err}");
@@ -515,6 +576,67 @@ mod tests {
         for field in ["clients=1", "inputs=3", "late=1", "superseded=1", "held=2"] {
             assert!(receipt.contains(field), "{field} in {receipt}");
         }
+    }
+
+    #[test]
+    fn scene_and_steer_lines_queue_for_the_window_and_a_large_reply_reaches_the_client() {
+        let seat = Seat::bind(0).expect("seat binds");
+        let mut client = TcpStream::connect(("127.0.0.1", seat.port())).expect("connect");
+        client
+            .write_all(b"scene\nsteer pass fog off\ninput 1 0 0 0 0\nscene pixels\n")
+            .expect("requests send");
+        let mut got = Vec::new();
+        for _ in 0..200 {
+            got.extend(seat.take_requests());
+            if got.len() >= 3 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(got, vec!["scene", "steer pass fog off", "scene pixels"]);
+        assert!(seat.take_requests().is_empty(), "taken once");
+        let fighter = FighterId::new(0).expect("fleet slot 0");
+        assert!(
+            wait_for(|| seat.input_for_tick(1, fighter)).is_some(),
+            "an input between requests still reaches its tick"
+        );
+        assert_eq!(
+            seat.stats().invalid,
+            0,
+            "a request line is never an invalid input"
+        );
+        // A 200 KB reply crosses whole, and the short tick line after it too.
+        let big = format!("scene {}\n", "x".repeat(200_000));
+        let reader = std::thread::spawn({
+            let client = client.try_clone().expect("clone");
+            move || {
+                let mut lines = BufReader::new(client);
+                let (mut first, mut second) = (String::new(), String::new());
+                lines.read_line(&mut first).expect("reply");
+                lines.read_line(&mut second).expect("tick");
+                (first.len(), second)
+            }
+        });
+        seat.publish_reply(&big);
+        seat.publish("tick 2 00000000000000aa\n");
+        let (len, second) = reader.join().expect("reader");
+        assert_eq!(len, big.len());
+        assert_eq!(second, "tick 2 00000000000000aa\n");
+    }
+
+    #[test]
+    fn a_full_request_queue_drops_the_oldest_and_counts_it() {
+        let seat = Seat::bind(0).expect("seat binds");
+        let mut client = TcpStream::connect(("127.0.0.1", seat.port())).expect("connect");
+        let lines: String = (0..MAX_REQUESTS + 2)
+            .map(|n| format!("steer capture c{n}\n"))
+            .collect();
+        client.write_all(lines.as_bytes()).expect("requests send");
+        std::thread::sleep(Duration::from_millis(100));
+        let got = seat.take_requests();
+        assert_eq!(got.len(), MAX_REQUESTS);
+        assert_eq!(got[0], "steer capture c2", "the two oldest dropped");
+        assert_eq!(seat.stats().dropped, 2);
     }
 
     fn wait_for(mut probe: impl FnMut() -> Option<FighterInput>) -> Option<FighterInput> {
