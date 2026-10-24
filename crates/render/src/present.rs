@@ -17,6 +17,8 @@
 //! Lost keep the last-good pipeline and targets; every failure is a typed
 //! `PresentError` with a recovery action.
 
+pub(crate) mod timing;
+
 // ---------------------------------------------------------------------------
 // Bounds: every external size is validated before allocation.
 // ---------------------------------------------------------------------------

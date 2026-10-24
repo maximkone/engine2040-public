@@ -87,4 +87,5 @@ fixing the lines below and adding one line to `../archive/INDEX.md`.
 
 - `COMPARE.md` — frozen 2026-09-30 rubric with per-domain denominators; rival cells are dated reads.
 - `LADDER.md` — the big read-one-rung list of every steal and paper.
-- `speed-2026-10-06-E12-gates.md` — old E12 gate note, cited by `tools/proof.mjs`.
+- `speed-2026-10-06-E12-gates.md` - old E12 gate note, cited by `tools/proof.mjs`.
+- `worker-curve-2026-10-24.md` (+ `.csv`) - AGT19's first worker-count point: 217 rows landed in the day, 50.7% of 1000 measured CI runs red, and why the queue and not the helper count is the constraint.
