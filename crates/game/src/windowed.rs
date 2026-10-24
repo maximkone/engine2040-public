@@ -26,8 +26,8 @@ use engine_render::{
     window::{WindowShell, FIXED_DT},
 };
 use engine_ui::{
-    text::{emit_quads, feed_lines, hp_text, layout, Align, Atlas},
-    DuelOverlay, Hud, OverlayError,
+    text::{emit_quads, layout, Align, Atlas},
+    DuelOverlay, OverlayError,
 };
 
 use self::windowed_captions::{caption_strip, push_caption_tick};
@@ -46,6 +46,9 @@ use super::pad::{
 use super::window_audio_space::AudioSpace;
 use super::{App, Checkpoint, FighterView, GameConfig, GameError, TickOutcome, HUMAN_SLOT};
 
+#[path = "windowed_hud_text.rs"]
+mod windowed_hud_text;
+pub use windowed_hud_text::{hud_cells_quads, stage_hud_text};
 #[path = "windowed_captions.rs"]
 mod windowed_captions;
 #[path = "windowed_smoke.rs"]
@@ -1007,23 +1010,6 @@ pub fn feed_tick_audio(
     space.feed(tx, tick, outcome, views);
 }
 
-/// HUD text cells plus quads for one snapshot (hp line plus kill-feed lines
-/// through the UI text path: layout cells, then one quad per cell). Pure.
-pub fn hud_cells_quads(hud: &Hud) -> (usize, usize) {
-    let mut lines = vec![hp_text(hud)];
-    lines.extend(feed_lines(&hud.feed));
-    let atlas = Atlas::new();
-    let mut cells = 0usize;
-    let mut quads = 0usize;
-    for line in &lines {
-        let laid = layout(line, 32, Align::Left);
-        let (_, _, indices) = emit_quads(&laid, atlas, 1.0);
-        cells += laid.len();
-        quads += indices.len() / 6;
-    }
-    (cells, quads)
-}
-
 /// HUD text cells plus quads for the live balance verdicts (EG45): one
 /// `slot {slot}: {label}` line per slot through
 /// [`super::balance_verdict::push_verdict_line`] plus one `down {n}` summary
@@ -1100,10 +1086,32 @@ pub fn result_text(app: &App) -> String {
 /// Pure; the overlay rows stay parked.
 #[must_use]
 pub fn result_cells_quads(app: &App) -> (usize, usize) {
-    let line = result_text(app);
-    let laid = layout(&line, 32, Align::Left);
-    let (_, _, indices) = emit_quads(&laid, Atlas::new(), 1.0);
-    (laid.len(), indices.len() / 6)
+    let mut cells = 0;
+    let mut quads = 0;
+    for line in result_rows(app) {
+        let laid = layout(&line, 32, Align::Left);
+        let (_, _, indices) = emit_quads(&laid, Atlas::new(), 1.0);
+        cells += laid.len();
+        quads += indices.len() / 6;
+    }
+    (cells, quads)
+}
+
+/// Every line the result screen stages (OPT55): the result line, then the
+/// fight's scoreboard table, one row per fighter. ASCII-only for the HUD text
+/// path, and pure: the overlay rows stay parked.
+#[must_use]
+pub fn result_rows(app: &App) -> Vec<String> {
+    stage_rows(&result_text(app), app.board())
+}
+
+/// The result screen's staged lines: the result line, then the board's table.
+/// Pure, so a test can name every line the screen draws.
+#[must_use]
+pub fn stage_rows(result: &str, board: &crate::scoreboard::Scoreboard) -> Vec<String> {
+    let mut rows = vec![result.to_string()];
+    rows.extend(board.lines());
+    rows
 }
 
 /// Build the live duel overlay for one app snapshot: tick from the HUD clock,
@@ -1796,6 +1804,7 @@ fn smoke_present_once(
         .map_err(|err| WinError::Render(cap_message(&format!("{err}"))))?;
     let _ = overlay.to_bytes();
     stage_hp_bars(presenter, &overlay);
+    let _ = stage_hud_text(presenter, app.hud());
     let out = presenter.render_offscreen(&list)?;
     Ok(u32::from(out.receipt.presented))
 }
@@ -3602,6 +3611,47 @@ mod tests {
             super::duel_overlay_for_app(&app).expect("overlay builds"),
             overlay
         );
+    }
+
+    /// The result screen stages the scoreboard's own lines under the result
+    /// line: same text, same order, one row per fighter.
+    #[test]
+    fn result_screen_stages_the_table_lines() {
+        use engine_combat::fight::FightEvent;
+        let tape = [
+            FightEvent::Hit {
+                attacker: 0,
+                victim: 1,
+                damage: 120,
+            },
+            FightEvent::Blocked {
+                attacker: 1,
+                victim: 0,
+                chip: 10,
+            },
+            FightEvent::Hit {
+                attacker: 0,
+                victim: 1,
+                damage: 60,
+            },
+            FightEvent::Knockdown {
+                attacker: 0,
+                victim: 1,
+            },
+            FightEvent::Hit {
+                attacker: 1,
+                victim: 0,
+                damage: 40,
+            },
+        ];
+        let board = crate::scoreboard::Scoreboard::fold(&tape);
+        let rows = super::stage_rows("RESULT P0 ticks=600/600", &board);
+        assert_eq!(rows.len(), 1 + board.lines().len(), "one row per line");
+        assert_eq!(rows[0], "RESULT P0 ticks=600/600");
+        assert_eq!(&rows[1..], board.lines().as_slice());
+        assert_eq!(rows[1], "FIGHTER  HITS  WOUNDS  BLOCKS  KILLS  CHAIN");
+        assert_eq!(rows[2], "      0     2     180       1      1      1");
+        assert_eq!(rows[3], "      1     1      40       0      0      1");
     }
 
     #[test]

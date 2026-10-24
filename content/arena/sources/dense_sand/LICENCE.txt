@@ -1,0 +1,7 @@
+Source: https://polyhaven.com/a/dense_sand
+Licence: Creative Commons CC0 1.0 Universal (https://polyhaven.com/license ; https://creativecommons.org/publicdomain/zero/1.0/)
+Author: Dimitrios Savva (Poly Haven)
+Downloaded: 2026-10-24, 1K JPG from https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/dense_sand/
+Files kept (byte counts and md5 recorded in ../PROVENANCE.md): diff (albedo, sRGB), nor_gl (normal, OpenGL +Y up), arm (R ambient occlusion, G roughness, B metalness, linear) and rough (linear greyscale, the arm's own channel kept for the ORM receipt).
+Normal map kept: nor_gl (OpenGL, +Y up). The DirectX variant (nor_dx) was dropped; DX = GL with the green channel inverted.
+Dropped: 2K/4K/8K, png, exr, spec, displacement, blend, gltf, mtlx, previews.
