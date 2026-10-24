@@ -449,15 +449,20 @@ test("a file over the 3000-line cap cannot grow, and a file under it that crosse
     assert.deepEqual(Object.keys(filePins(fileLines)), ["crates/physics/src/big.rs"], "only the over-cap file holds a pin");
     assert.deepEqual(compareFiles({ "crates/physics/src/big.rs": 3001 }, fileLines).regressions, []);
 
-    // Grow it by one line: the tool FAILs and names the path and both counts.
-    writeFileSync(src, `${body}\npub fn grown() -> u32 { 7 }\n`);
+    // Grow it inside the slack (1% of 3001 = 30 lines): a small wiring edit passes.
+    const extra = (n) => Array.from({ length: n }, (_, i) => `pub fn grown${i}() -> u32 { 7 }`).join("\n");
+    writeFileSync(src, `${body}\n${extra(30)}\n`);
+    assert.equal(rq.pinSlack(3001), 30);
+    assert.deepEqual(compareFiles({ "crates/physics/src/big.rs": 3001 }, measure(root, null, false).fileLines).regressions, [], "+30 lines is inside the slack");
+    // One more line: the tool FAILs and names the path and both counts.
+    writeFileSync(src, `${body}\n${extra(31)}\n`);
     const grown = measure(root, null, false).fileLines;
-    assert.equal(grown.get("crates/physics/src/big.rs"), 3002);
+    assert.equal(grown.get("crates/physics/src/big.rs"), 3032);
     const { regressions } = compareFiles({ "crates/physics/src/big.rs": 3001 }, grown);
     assert.equal(regressions.length, 1, "the grown file is the one regression");
     assert.match(regressions[0], /crates\/physics\/src\/big\.rs/, "the line names the path");
     assert.match(regressions[0], /3001/, "the line names the count before");
-    assert.match(regressions[0], /3002/, "the line names the count after");
+    assert.match(regressions[0], /3032/, "the line names the count after");
     assert.ok(regressions[0].endsWith(` fix: ${rq.FILE_LINE_FIX}`), "the line names the edit that clears it");
 
     // A file that was under the cap and crosses it fails too.
@@ -475,11 +480,46 @@ test("a file over the 3000-line cap cannot grow, and a file under it that crosse
     const run = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
     const printed = `${run.stdout ?? ""}${run.stderr ?? ""}`;
     assert.equal(run.status, 1, `the grown file must fail the gate: ${printed}`);
-    assert.match(printed, /\[FAIL\] ratchet crates\/physics\/src\/big\.rs: file lines 3001 -> 3002/);
+    assert.match(printed, /\[FAIL\] ratchet crates\/physics\/src\/big\.rs: file lines 3001 -> 3032/);
     assert.match(printed, /RESULT FAIL: /);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// Owner 2026-10-24: a cast under a reasoned `#[expect(clippy::cast_...)]` is a reviewed cast.
+test("casts inside an item with a reasoned cast expect are not counted; others are", () => {
+  const kind = { crate: "engine-x", lib: true };
+  const src = [
+    '#[expect(clippy::cast_possible_truncation, reason = "clamped to +-100 first")]',
+    "fn percent(v: f32) -> i8 {",
+    "    if v.is_finite() {",
+    "        v.clamp(-100.0, 100.0).round() as i8",
+    "    } else {",
+    "        0",
+    "    }",
+    "}",
+    "",
+    "fn raw(v: f32) -> i8 {",
+    "    v as i8",
+    "}",
+    "",
+    "#[expect(",
+    "    clippy::cast_possible_truncation,",
+    '    reason = "a bearing fits i16"',
+    ")]",
+    "fn bearing(d: f32) -> i16 {",
+    "    (d * 100.0) as i16",
+    "}",
+    "",
+    '#[expect(clippy::cast_possible_truncation)]',
+    "fn unreasoned(v: f32) -> u8 {",
+    "    v as u8",
+    "}",
+    "",
+  ].join("\n");
+  const { metrics } = analyzeFile(src, kind);
+  assert.equal(metrics.casts, 2, "raw() and unreasoned() count; percent() and bearing() are reviewed");
 });
 
 // CX2 escape hatch: a file pin can be raised with a reason, the way a crate
@@ -509,13 +549,15 @@ test("a file pin can be raised with a reason, and the refusal names the escape h
 
     const tool = join(dirname(fileURLToPath(import.meta.url)), "rust-quality.mjs");
 
-    // Grow the file by one line: the gate refuses and names the escape hatch.
-    const grown = `${body}\nfn helper_grown() -> u32 { 7 }\n`;
+    // Grow the file past its slack (30 lines for a 3,001-line pin): the gate refuses and names
+    // the escape hatch.
+    const extra = Array.from({ length: 31 }, (_, i) => `fn helper_grown_${i}() -> u32 { 7 }`).join("\n");
+    const grown = `${body}\n${extra}\n`;
     writeFileSync(src, grown);
     const failed = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
     const failedOut = `${failed.stdout ?? ""}${failed.stderr ?? ""}`;
     assert.equal(failed.status, 1, `the grown file must fail the gate: ${failedOut}`);
-    assert.match(failedOut, /\[FAIL\] ratchet crates\/geo\/src\/big\.rs: file lines 3001 -> 3002/, "the refusal names the path and both counts");
+    assert.match(failedOut, /\[FAIL\] ratchet crates\/geo\/src\/big\.rs: file lines 3001 -> 3032/, "the refusal names the path and both counts");
     assert.match(failedOut, /--accept-file crates\/geo\/src\/big\.rs/, "the refusal names the escape hatch command");
     assert.match(failedOut, /--reason/, "the refusal names the reason flag");
 
@@ -531,11 +573,11 @@ test("a file pin can be raised with a reason, and the refusal names the escape h
     assert.match(acceptedOut, /ACCEPTED crates\/geo\/src\/big\.rs/);
 
     const after = JSON.parse(readFileSync(baselinePath, "utf8"));
-    assert.equal(after.files["crates/geo/src/big.rs"], 3002, "the pin holds the file's real line count");
+    assert.equal(after.files["crates/geo/src/big.rs"], 3032, "the pin holds the file's real line count");
     const log = (after.accepted ?? []).filter((a) => a.file === "crates/geo/src/big.rs");
     assert.equal(log.length, 1, "the bump is logged once");
     assert.equal(log[0].from, 3001, "the log names the old count");
-    assert.equal(log[0].to, 3002, "the log names the new count");
+    assert.equal(log[0].to, 3032, "the log names the new count");
     assert.match(log[0].reason, /the generated table/, "the log keeps the reason");
 
     // The tree run is green again: the pin matches the file.
@@ -554,15 +596,79 @@ test("a file pin can be raised with a reason, and the refusal names the escape h
     const crossed = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
     const crossedOut = `${crossed.stdout ?? ""}${crossed.stderr ?? ""}`;
     assert.equal(crossed.status, 1, "a file that crossed the cap fails");
-    assert.match(crossedOut, /crates\/geo\/src\/big\.rs: file lines 3002 \(crossed the 3000-line cap\)/);
+    assert.match(crossedOut, /crates\/geo\/src\/big\.rs: file lines 3032 \(crossed the 3000-line cap\)/);
     assert.match(crossedOut, /--accept-file crates\/geo\/src\/big\.rs/, "the crossing refusal names the escape hatch too");
     const pinned = spawnSync(process.execPath, [tool, "--no-cache", "--accept-file", "crates/geo/src/big.rs", "--reason", "the new file lands over the cap on purpose"], { cwd: root, encoding: "utf8" });
     assert.equal(pinned.status, 0, `the crossing bump must land: ${pinned.stdout ?? ""}${pinned.stderr ?? ""}`);
     const afterPin = JSON.parse(readFileSync(baselinePath, "utf8"));
-    assert.equal(afterPin.files["crates/geo/src/big.rs"], 3002, "the new file holds a pin at its real count");
+    assert.equal(afterPin.files["crates/geo/src/big.rs"], 3032, "the new file holds a pin at its real count");
     const pinLog = (afterPin.accepted ?? []).filter((a) => a.file === "crates/geo/src/big.rs").at(-1);
     assert.equal(pinLog.from, null, "the log names that the file had no pin before");
-    assert.equal(pinLog.to, 3002, "the log names the new count");
+    assert.equal(pinLog.to, 3032, "the log names the new count");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// SW11: `#[should_panic]` is a family of its own. The two receipt asserts on
+// the allowlist pass; a third one in a file nobody reviewed fails and names it.
+test("a #[should_panic] outside the allowlist fails the family; the two receipt asserts pass", () => {
+  const allowed = [
+    { rel: "crates/game/src/bin/staged_fight.rs", text: "    #[should_panic(expected = \"receipt lost the dodged ke\")]\n    fn a() {}\n" },
+    { rel: "crates/render/src/test_gpu.rs", text: "#[should_panic(expected = \"requires one\")]\nfn b() {}\n" },
+  ];
+  assert.deepEqual(rq.shouldPanicFindings(allowed), [], "the two allowlisted files pass");
+  assert.equal(rq.SHOULD_PANIC_ALLOWED.size, 2, "the allowlist holds exactly the two reviewed files");
+
+  // Every allowlist row carries a real reason, and its file still holds the assert.
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  for (const [path, reason] of rq.SHOULD_PANIC_ALLOWED) {
+    assert.ok(reason.trim().length > 20, `${path} needs a reason`);
+    assert.match(readFileSync(join(repo, path), "utf8"), /#\[\s*should_panic\b/, `${path} must still hold the assert, or its allowlist row is stale`);
+  }
+
+  // A third one, in a file nobody reviewed, fails and names the file and line.
+  const third = [...allowed, { rel: "crates/core/src/fresh_test.rs", text: "fn a() {}\n#[should_panic]\nfn b() {}\n" }];
+  const found = rq.shouldPanicFindings(third);
+  assert.equal(found.length, 1);
+  assert.match(found[0], /crates\/core\/src\/fresh_test\.rs:2:/);
+  assert.ok(found[0].endsWith(` fix: ${rq.SHOULD_PANIC_FIX}`), "the finding names the edit that clears it");
+  // A CRLF checkout and a spaced attribute are the same assert.
+  assert.equal(rq.shouldPanicFindings([{ rel: "crates/core/src/x.rs", text: "#[ should_panic ]\r\nfn t() {}\r\n" }]).length, 1);
+  // A reviewed override clears it.
+  assert.deepEqual(rq.shouldPanicFindings([{ rel: "crates/core/src/x.rs", text: "#[should_panic]\nfn t() {}\n" }], new Map([["crates/core/src/x.rs", "the panic is the contract"]])), []);
+});
+
+// SW11 gate: a tree carrying a third assert exits 1 with the FAIL line; the
+// same tree without it exits 0.
+test("the rust-quality gate refuses a tree that adds a third #[should_panic]", () => {
+  const root = mkdtempSync(join(tmpdir(), "rq-panic-"));
+  try {
+    mkdirSync(join(root, "crates", "acme", "src"), { recursive: true });
+    mkdirSync(join(root, "tools"), { recursive: true });
+    writeFileSync(join(root, "crates", "acme", "Cargo.toml"), '[package]\nname = "engine-acme"\n');
+    writeFileSync(join(root, "tools", "sim-clippy.toml"), "disallowed-types = []\n");
+    const src = join(root, "crates", "acme", "src", "lib.rs");
+    const test0 = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn plain() {}\n}\n";
+    writeFileSync(src, test0);
+    const zero = Object.fromEntries(Object.keys(rq.METRICS).map((k) => [k, 0]));
+    writeFileSync(join(root, "tools", "rust-quality.baseline.json"), `${JSON.stringify({ version: 1, crates: { "engine-acme": { ...zero, tests: 1 } }, files: {}, accepted: [] }, null, 1)}\n`);
+    const tool = join(dirname(fileURLToPath(import.meta.url)), "rust-quality.mjs");
+
+    // The clean tree passes: the family is not a metric that trips on nothing.
+    const green = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
+    const greenOut = `${green.stdout ?? ""}${green.stderr ?? ""}`;
+    assert.equal(green.status, 0, `the clean fixture must pass: ${greenOut}`);
+    assert.match(greenOut, /RESULT PASS/);
+
+    // The third assert fails, and the FAIL line names the file and the fix.
+    writeFileSync(src, test0.replace("    fn plain() {}", "    #[should_panic]\n    fn plain() {}"));
+    const red = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
+    const redOut = `${red.stdout ?? ""}${red.stderr ?? ""}`;
+    assert.equal(red.status, 1, `the third assert must fail the gate: ${redOut}`);
+    assert.match(redOut, /\[FAIL\] ratchet crates\/acme\/src\/lib\.rs:4: #\[should_panic\] is not on the allowlist/);
+    assert.match(redOut, /SHOULD_PANIC_ALLOWED/);
+    assert.match(redOut, /RESULT FAIL: /);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
