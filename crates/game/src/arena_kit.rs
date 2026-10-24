@@ -12,6 +12,7 @@
 
 use engine_arena::world::{MatchWorld, Obstacle};
 use engine_core::hash::hash_bytes;
+use engine_render::material_kind::MaterialKind;
 use engine_render::present::MeshKey;
 #[cfg(feature = "app")]
 use engine_render::present::{TextureKey, TextureSource, TextureUpload};
@@ -61,8 +62,13 @@ pub use kit_budget::{KitBudget, KitBudgetFinding};
 mod kit_zones;
 pub use kit_zones::{kit_zone_rows, KitZoneRow, KIT_ZONE_GATE_ID, KIT_ZONE_ROWS};
 
-/// Distinct kit files staged (one import per file).
-pub const KIT_ASSET_COUNT: usize = 8;
+/// Distinct kit files staged (one import per file): the 8 arena files plus the
+/// 3 machine props from the props kit (SHOW4).
+pub const KIT_ASSET_COUNT: usize = 11;
+/// The arena's own kit files (JSON glTF under `content/arena/src/`). The three
+/// machine props are binary GLB from the props kit, so the std-only headless
+/// leg counts these 8 and the `app` leg stages all 11.
+pub const KIT_ARENA_FILE_COUNT: usize = 8;
 /// Minimum source triangles over the staged kit files (the shipping kit
 /// stages well above this; an import below it is incomplete, never staged).
 ///
@@ -336,6 +342,23 @@ pub fn kit_mesh_key(actor: &KitActor) -> MeshKey {
     MeshKey::new(KIT_MESH_ID_BASE + u64::from(actor.id), digest)
 }
 
+/// LF8: the shading family of one kit mesh. Only the torch (iron) and the
+/// banner (cloth) leave the stone default; the sand, walls, stands, gate,
+/// crate and debris keep the stone path. `None` means "do not touch".
+///
+/// The three machine props keep the stone path on purpose: each machine GLB
+/// carries three slots (wood, iron, tarp) and the kit merges a file to one
+/// draw with one material, so a single kind would over-tint the timber that
+/// dominates the silhouette. Per-slot kinds are a props-draw follow-up.
+#[must_use]
+pub fn kit_material_kind(asset: KitAsset) -> Option<MaterialKind> {
+    match asset {
+        KitAsset::Torch => Some(MaterialKind::Metal),
+        KitAsset::Banner => Some(MaterialKind::Cloth),
+        _ => None,
+    }
+}
+
 /// Fit of one source mesh into its placement box: uniform scale on the
 /// largest axis, yaw about +Y, then translation grounding the mesh on the
 /// box bottom and centering it on the box XZ center.
@@ -557,6 +580,39 @@ pub struct ImportedKit {
     /// Measured mesh cost of the imported source files against the potato
     /// caps, with the files and meshes that exceed one.
     pub budget: KitBudget,
+}
+
+/// The placed actors baked into one vertex/index pair for the potato tier
+/// (SW153): every kit actor is static, so the batch is one draw instead of one
+/// per actor. The fitted meshes already carry world positions, so each takes
+/// the identity matrix, and the weld drops the corners the actors share.
+///
+/// # Errors
+///
+/// Returns [`engine_render::static_batch::BatchError`] when the actors do not
+/// share one attribute set or an index breaks its mesh.
+#[cfg(feature = "app")]
+pub fn batch_static_props(
+    kit: &ImportedKit,
+) -> Result<engine_render::static_batch::DrawItem, engine_render::static_batch::BatchError> {
+    /// Row-major identity: a fitted mesh already sits in world space.
+    const IDENTITY: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let meshes: Vec<engine_render::static_batch::MeshRef<'_>> = kit
+        .baked
+        .iter()
+        .map(|baked| engine_render::static_batch::MeshRef {
+            positions: &baked.mesh.positions,
+            normals: &baked.mesh.normals,
+            uvs: Some(&baked.mesh.uvs),
+            indices: &baked.mesh.indices,
+        })
+        .collect();
+    let matrices = vec![IDENTITY; meshes.len()];
+    let mut item = engine_render::static_batch::merge(&meshes, &matrices)?;
+    engine_render::static_batch::merge_vertices(&mut item);
+    Ok(item)
 }
 
 /// Neutral-gray fallback factors when a source material is invalid.
@@ -933,7 +989,16 @@ fn load_kit_sources(
     let mut triangles: u64 = 0;
     let mut budget = KitBudget::default();
     for (file_index, file) in files.iter().enumerate() {
-        let bytes = assets.bytes(&kit_logical_path(file))?;
+        // The arena files read through the content source; the props-kit
+        // machines are a second root (`content/generated/props`), binary GLB.
+        let prop_bytes;
+        let bytes: &[u8] = if file.ends_with(".glb") {
+            prop_bytes =
+                crate::kit_assets::kit_prop_bytes(&crate::kit_assets::kit_props_root(), file)?;
+            &prop_bytes
+        } else {
+            assets.bytes(&kit_logical_path(file))?
+        };
         let import = engine_assets::mesh_import::import_gltf_path(file, bytes)
             .map_err(|err| KitError::Import(bound_diag(&format!("{file}: {err}"))))?;
         // The base image decodes once here: the budget reads its pixels and
@@ -999,7 +1064,14 @@ pub fn import_kit_from_shape(
 ) -> Result<ImportedKit, KitError> {
     let actors = kit_actors()?;
     let files = kit_asset_files(&actors);
-    let mut assets = KitAssets::load(source, &files)?;
+    // The queue stages the arena JSON files; the props-kit machines are read
+    // from their own root in `load_kit_sources`.
+    let staged: Vec<&'static str> = files
+        .iter()
+        .copied()
+        .filter(|file| !file.ends_with(".glb"))
+        .collect();
+    let mut assets = KitAssets::load(source, &staged)?;
     let mut maps = kit_pbr::KitMaps::default();
     let textures_on = kit_textures_enabled(std::env::var(KIT_TEXTURES_ENV).ok().as_deref());
     let (sources, triangles, budget) =
@@ -1164,6 +1236,14 @@ pub fn upload_kit(
         if presenter.upload_mesh(baked.key, &baked.mesh).is_ok() {
             let base_color = baked.texture.filter(|key| tex_ok.contains(key));
             let normal_map = baked.normal_map.filter(|key| sets_ok.contains(key));
+            if let Some(kind) = kit_material_kind(baked.actor.asset) {
+                presenter.set_material_kind(baked.key, kind);
+            }
+            // RL51: only a mesh whose cooked set rode in tiles by meters.
+            if normal_map.is_some() {
+                let detail = kit_pbr::surface_detail_for_file(baked.actor.asset.file_name());
+                presenter.set_surface_detail(baked.key, detail);
+            }
             draws.push(KitDraw {
                 key: baked.key,
                 material: baked.material.clone(),
@@ -1441,7 +1521,13 @@ pub fn import_kit(root: &Path) -> Result<ImportedKit, KitError> {
 #[cfg(not(feature = "app"))]
 pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<ImportedKit, KitError> {
     let actors = kit_actors()?;
-    let files = kit_asset_files(&actors);
+    // The props-kit machines are binary GLB, which this std-only leg cannot
+    // count (no `gltf` dependency): it measures the 8 arena JSON files and
+    // leaves the machines to the `app` leg, which is the shipping path.
+    let files: Vec<&'static str> = kit_asset_files(&actors)
+        .into_iter()
+        .filter(|file| file.ends_with(".gltf"))
+        .collect();
     let mut assets = KitAssets::load(source, &files)?;
     let mut triangles = 0u64;
     for file in &files {
@@ -1460,6 +1546,9 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
     assets.unload();
     let mut baked = Vec::with_capacity(actors.len());
     for actor in &actors {
+        if actor.asset.is_prop_kit() {
+            continue;
+        }
         if !files.contains(&actor.asset.file_name()) {
             return Err(import_err(actor.asset.file_name()));
         }
@@ -1491,14 +1580,14 @@ mod tests {
     use engine_input::{Buttons, FighterId, FighterInput, FighterTape};
 
     #[test]
-    fn placement_parses_11_actors_over_8_files() {
+    fn placement_parses_14_actors_over_11_files() {
         let actors = kit_actors().expect("embedded placement parses");
         assert_eq!(actors.len(), KIT_ACTOR_COUNT);
         let files = kit_asset_files(&actors);
         assert_eq!(files.len(), KIT_ASSET_COUNT);
         let mut ids: Vec<u32> = actors.iter().map(|actor| actor.id).collect();
         ids.sort_unstable();
-        assert_eq!(ids, (1..=11).collect::<Vec<u32>>());
+        assert_eq!(ids, (1..=14).collect::<Vec<u32>>());
     }
 
     #[test]
@@ -1514,10 +1603,11 @@ mod tests {
     }
 
     /// The `physical` flag is real data, not a constant: the six walls collide
-    /// and the five dressing actors do not. Ids follow the placement file
+    /// and the eight dressing actors do not. Ids follow the placement file
     /// order (1 `sand_floor`, 2 `stands`, 3 `wall_north`, 4 `wall_south`,
     /// 5 `gate_tunnel`, 6/7 `torch_*`, 8/9 `banner_*`, 10 `crate_a`,
-    /// 11 `debris_field`), so a flip on either side fails by name.
+    /// 11 `debris_field`, 12/13/14 the machine props), so a flip on either
+    /// side fails by name.
     #[test]
     fn physical_pins_the_six_walls_and_drops_the_dressing() {
         let actors = kit_actors().expect("embedded placement parses");
@@ -1545,8 +1635,8 @@ mod tests {
             .collect();
         assert_eq!(
             dressing,
-            vec![1, 6, 7, 8, 9],
-            "the sand floor, both torches and both banners are dressing"
+            vec![1, 6, 7, 8, 9, 12, 13, 14],
+            "the sand floor, both torches, both banners and the three machines are dressing"
         );
         // The data drives the sim: the collision world is exactly those six
         // boxes, while the view keeps drawing every staged actor.
@@ -1620,6 +1710,28 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), KIT_ACTOR_COUNT);
         assert_ne!(keys[0], MeshKey::new(1, [0xA1; 32]));
+    }
+
+    #[test]
+    fn lf8_kit_kinds_name_the_torch_iron_and_the_banner_cloth() {
+        assert_eq!(
+            kit_material_kind(KitAsset::Torch),
+            Some(MaterialKind::Metal)
+        );
+        assert_eq!(
+            kit_material_kind(KitAsset::Banner),
+            Some(MaterialKind::Cloth)
+        );
+        for asset in [
+            KitAsset::SandFloor,
+            KitAsset::Stands,
+            KitAsset::Walls,
+            KitAsset::GateTunnel,
+            KitAsset::Crate,
+            KitAsset::Debris,
+        ] {
+            assert_eq!(kit_material_kind(asset), None, "{asset:?} stays stone");
+        }
     }
 
     #[test]
@@ -1718,21 +1830,83 @@ mod tests {
     }
 
     #[test]
-    fn kit_imports_8_files_over_5000_tris() {
+    fn kit_imports_the_shipping_files_over_5000_tris() {
         let kit = import_kit(&kit_content_dir()).expect("kit imports from content");
-        assert_eq!(kit.files, KIT_ASSET_COUNT);
+        // The std-only leg counts the 8 arena JSON files; the app leg (the
+        // shipping path) also stages the three props-kit machines.
+        #[cfg(feature = "app")]
+        {
+            assert_eq!(kit.files, KIT_ASSET_COUNT);
+            assert_eq!(kit.baked.len(), KIT_ACTOR_COUNT);
+        }
+        #[cfg(not(feature = "app"))]
+        {
+            assert_eq!(kit.files, KIT_ARENA_FILE_COUNT);
+            assert_eq!(kit.baked.len(), KIT_ARENA_FILE_COUNT);
+        }
         assert!(
             kit.triangles >= 5_000,
             "kit stages {} tris, want at least 5000",
             kit.triangles
         );
-        assert_eq!(kit.baked.len(), KIT_ACTOR_COUNT);
         assert!(
             kit.skipped.is_empty(),
             "kit skipped actors: {:?}",
             kit.skipped
         );
         assert_eq!(kit.material_fallbacks, 0);
+    }
+
+    /// The props manifest the SHOW4 cook writes beside the machine GLBs.
+    #[cfg(feature = "app")]
+    fn kit_manifest_text() -> String {
+        std::fs::read_to_string(
+            crate::kit_assets::kit_props_root().join("generated/props/props_built.json"),
+        )
+        .expect("props_built.json is readable")
+    }
+
+    /// `triangles` of the manifest row whose file is `file`.
+    #[cfg(feature = "app")]
+    fn manifest_tris(text: &str, file: &str) -> Option<u32> {
+        let row = text.find(&format!("\"file\": \"{file}\""))?;
+        let tail = text.get(row..)?;
+        let key = tail.find("\"triangles\":")?;
+        let rest = tail.get(key + "\"triangles\":".len()..)?;
+        let digits: String = rest
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse().ok()
+    }
+
+    #[cfg(feature = "app")]
+    #[test]
+    fn kit_stages_the_three_machine_props_at_their_manifest_tris() {
+        let kit = import_kit(&kit_content_dir()).expect("kit imports from content");
+        let manifest = kit_manifest_text();
+        for (asset, file) in [
+            (KitAsset::Ballista, "machine_ballista.glb"),
+            (KitAsset::Crane, "machine_crane.glb"),
+            (KitAsset::Cart, "machine_cart.glb"),
+        ] {
+            let baked = kit
+                .baked
+                .iter()
+                .find(|baked| baked.actor.asset == asset)
+                .unwrap_or_else(|| panic!("{asset:?} stages from {file}"));
+            let tris = u32::try_from(baked.mesh.indices.len() / 3).expect("tri count fits u32");
+            assert_eq!(
+                Some(tris),
+                manifest_tris(&manifest, file),
+                "{file} draws the triangles the props manifest recorded"
+            );
+            assert!(
+                !baked.actor.physical,
+                "{file} is look-only, never a collider"
+            );
+        }
     }
 
     // The import gate reads the real kit: every mesh is measured, and the
@@ -1742,8 +1916,14 @@ mod tests {
     fn the_shipping_kit_measures_meshes_against_the_potato_caps() {
         let kit = import_kit(&kit_content_dir()).expect("kit imports from content");
         let budget = &kit.budget;
-        assert_eq!(budget.meshes, 38, "one measured mesh per primitive");
-        assert_eq!(budget.max_tris, 512, "the floor is the largest mesh");
+        assert_eq!(
+            budget.meshes, 46,
+            "one measured mesh per primitive: 38 arena plus 8 machine slots"
+        );
+        assert_eq!(
+            budget.max_tris, 520,
+            "the cart's iron bed is the largest single mesh (the floor is 512)"
+        );
         assert_eq!(budget.max_bones, 0, "the kit is static");
         assert_eq!(budget.max_influences, 0, "no mesh is skinned");
         assert_eq!(budget.max_materials, 1, "one material per mesh");
@@ -1758,7 +1938,7 @@ mod tests {
             "no mesh is over a potato cap: the banner cloth base is 1024x986"
         );
         let line = budget.line();
-        assert!(line.contains("meshes=38"), "{line}");
+        assert!(line.contains("meshes=46"), "{line}");
         assert!(line.contains("caps=POTATO budget=PASS"), "{line}");
     }
 
@@ -1815,6 +1995,12 @@ mod tests {
             "one base-color texture per distinct kit material"
         );
         for baked in &kit.baked {
+            // The machine props are flat-colour GLBs from the props kit: no
+            // atlas, no texture, and that is their design.
+            if baked.actor.asset.is_prop_kit() {
+                assert!(baked.texture.is_none(), "a machine draws flat colour");
+                continue;
+            }
             assert!(
                 baked.texture.is_some(),
                 "actor {} draws its file's base color",
@@ -1901,6 +2087,10 @@ mod tests {
             );
         }
         for baked in &kit.baked {
+            if baked.actor.asset.is_prop_kit() {
+                assert!(baked.normal_map.is_none(), "a machine carries no maps");
+                continue;
+            }
             let set = baked
                 .normal_map
                 .and_then(|key| kit.sets.iter().find(|set| set.key == key))
@@ -2325,7 +2515,7 @@ mod tests {
         assert_eq!(
             rows.len(),
             kit_zones::KIT_ZONE_COUNT,
-            "11 actor rows plus centre"
+            "14 actor rows plus centre"
         );
         let gate = rows
             .iter()
@@ -2334,9 +2524,10 @@ mod tests {
         // 10 m on the centre lane, 2 m half-edge: the shipped gate anchor.
         assert_eq!((gate.class, gate.cx_cm, gate.cz_cm), (2, 1000, 0));
         assert_eq!(gate.radius_cm, 200);
-        // The flags are shipped data: two advantage bumper rows and exactly
-        // one holdable dominance point (the duel centre).
-        assert_eq!(rows.iter().filter(|r| r.class == 4).count(), 2);
+        // The flags are shipped data: two cover bumpers plus the three machine
+        // props (bumpers with no advantage), and exactly one holdable
+        // dominance point (the duel centre).
+        assert_eq!(rows.iter().filter(|r| r.class == 4).count(), 5);
         assert_eq!(rows.iter().filter(|r| r.dominance).count(), 1);
         assert!(rows.iter().any(|r| r.advantage && r.class == 4));
         assert!(rows.iter().any(|r| r.risk));
@@ -2356,7 +2547,7 @@ mod tests {
         let short = "table arena-zones version 1\nsand_floor class=0 cx_cm=-6000 cz_cm=0 radius_cm=1500 height_cm=20 advantage=0 dominance=0 risk=0\n";
         let err =
             kit_zones::kit_zone_rows_from_text(short).expect_err("a missing actor row refuses");
-        assert!(err.to_string().contains("12 rows, saw 1"), "{err}");
+        assert!(err.to_string().contains("15 rows, saw 1"), "{err}");
     }
 
     /// F24 fixture: a kit root with two logical blobs and the tree one patch

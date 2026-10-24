@@ -55,6 +55,10 @@ const TURN_RAD_S: f32 = 1.6;
 const PITCH_RAD_S: f32 = 1.0;
 /// The dune autopilot swings when the target tower is this close, meters.
 const AUTO_SWING_M: f32 = 40.0;
+/// The dune autopilot's drive leg (SD11): it starts at this second and runs this long, so a
+/// 900-frame capture shows the car on the same terrain the flyer cut.
+const AUTO_DRIVE_AT_S: f32 = 5.0;
+const AUTO_DRIVE_FOR_S: f32 = 7.0;
 /// Walkers and buildings around a hit are searched within this reach, meters.
 const BODY_REACH_M: f32 = 2.5;
 const WALL_REACH_M: f32 = 40.0;
@@ -194,6 +198,10 @@ pub(crate) struct SpeedDemo {
     t_s: f32,
     cuts: u32,
     top_mps: f32,
+    /// Seconds the dune autopilot spent driving and the legs it took (SD11): the capture's
+    /// proof that the car ran, not only that it exists.
+    drove_s: f32,
+    drive_legs: u32,
 }
 
 impl SpeedDemo {
@@ -263,6 +271,8 @@ impl SpeedDemo {
             t_s: 0.0,
             cuts: 0,
             top_mps: 0.0,
+            drove_s: 0.0,
+            drive_legs: 0,
         })
     }
 
@@ -351,7 +361,7 @@ impl SpeedDemo {
             if self.stage.is_nyc() {
                 self.nyc_autopilot(dt);
             } else {
-                self.autopilot();
+                self.dunes_autopilot(dt);
             }
         }
         let before = self.body().0;
@@ -556,6 +566,24 @@ impl SpeedDemo {
                 crowd.hit(at, BODY_REACH_M, v, &walls);
             }
         }
+    }
+
+    /// Dunes, no keys yet: fly and cut, then one drive leg so a capture proves the car
+    /// (SD11), then fly again. The leg is the same autopilot steering with the throttle
+    /// held; the blade rides the car's side, so it keeps cutting while it drives.
+    fn dunes_autopilot(&mut self, dt: f32) {
+        let want_drive = (AUTO_DRIVE_AT_S..AUTO_DRIVE_AT_S + AUTO_DRIVE_FOR_S).contains(&self.t_s);
+        if want_drive && self.mode != Mode::Drive {
+            // Fly -> Drive on the dunes: the car takes the flyer's place and speed.
+            self.next_mode();
+            self.drive_legs += 1;
+        } else if !want_drive && self.mode == Mode::Drive {
+            self.next_mode();
+        }
+        if self.mode == Mode::Drive {
+            self.drove_s += dt;
+        }
+        self.autopilot();
     }
 
     /// Dunes, no keys yet: fly at the nearest standing tower so its middle passes the blade,
@@ -923,6 +951,30 @@ impl SpeedDemo {
         camera.far = FAR_M;
     }
 
+    /// The demo's own HUD (SD10): the speed line and the keys, in the place the fight's
+    /// health bars would take.
+    pub(crate) fn hud(&self) -> [String; super::hud::ROWS] {
+        let mode = match self.mode {
+            Mode::Fly => "fly",
+            Mode::Swing => "swing",
+            Mode::Drive => "car",
+        };
+        let faster = if self.flight.always_faster {
+            "on"
+        } else {
+            "off"
+        };
+        [
+            format!(
+                "SPEED {:.0} m/s  TOP {:.0} m/s  MODE {mode}  CUTS {}",
+                self.speed(),
+                self.top_mps,
+                self.cuts
+            ),
+            format!("ALWAYS FASTER {faster}  |  F toggles  Tab fly/drive  E swings"),
+        ]
+    }
+
     /// The exit receipt line.
     pub(crate) fn line(&self) -> String {
         let mode = match self.mode {
@@ -937,7 +989,7 @@ impl SpeedDemo {
             .as_ref()
             .map_or((0, 0), |c| (c.woken, c.walking()));
         format!(
-            "arena speed demo: world={world} top_mps={:.0} cuts={} swings={} pieces={} buildings={buildings} groups={groups} ragdolls={ragdolls} walking={walking} cabs_hit={} bumps={} mode={mode} autopilot={}",
+            "arena speed demo: world={world} top_mps={:.0} cuts={} swings={} pieces={} buildings={buildings} groups={groups} ragdolls={ragdolls} walking={walking} cabs_hit={} bumps={} mode={mode} autopilot={} drove_s={:.1} drive_legs={}",
             self.top_mps,
             self.cuts,
             self.sword.swings,
@@ -945,6 +997,8 @@ impl SpeedDemo {
             self.cabs_hit,
             self.bumps,
             !self.touched,
+            self.drove_s,
+            self.drive_legs,
         )
     }
 }
@@ -1023,6 +1077,37 @@ mod tests {
         assert!(demo.cuts > 0, "a tower is cut within 60 s: {}", demo.line());
         assert!(!demo.pieces.is_empty(), "the cut top is falling");
         assert!(demo.top_mps > 30.0, "always-faster is on: {}", demo.top_mps);
+    }
+
+    /// The dune autopilot takes one drive leg (SD11): the car runs under throttle and the
+    /// receipt names the seconds it drove, so a capture proves the drive and not only the code.
+    #[test]
+    fn the_autopilot_drives_a_leg_and_the_receipt_names_it() {
+        let mut demo = SpeedDemo::new(false).expect("the world builds");
+        let mut fastest_car = 0.0_f32;
+        for _ in 0..60 * 15 {
+            demo.step(DT);
+            if demo.mode == Mode::Drive {
+                fastest_car = fastest_car.max(demo.car.speed_mps());
+            }
+        }
+        assert_eq!(demo.drive_legs, 1, "one drive leg: {}", demo.line());
+        assert!(
+            demo.drove_s > AUTO_DRIVE_FOR_S - 0.5,
+            "the leg ran its length: {}",
+            demo.line()
+        );
+        assert!(
+            fastest_car > 5.0,
+            "the car drove under throttle: {fastest_car}"
+        );
+        assert!(demo.line().contains("drove_s="), "{}", demo.line());
+        assert_eq!(
+            demo.mode,
+            Mode::Fly,
+            "flying again after it: {}",
+            demo.line()
+        );
     }
 
     /// Always-faster: after 20 s of flight the speed has grown; with it off it holds.

@@ -1,9 +1,9 @@
-//! recook: bounded debounced recook queue over [`Cooker`] with immutable
+//! recook: bounded debounced recook queue over `Cooker` with immutable
 //! versioned reload notices.
 //!
 //! The loop is file watch ([`crate::watcher`]) → `submit` → settled `poll`
-//! → caller-published [`ReloadNotice`]. `Recook` owns the [`Cooker`], the
-//! path-to-[`AssetId`] map (ids stay stable across recooks by construction:
+//! → caller-published `ReloadNotice`. `Recook` owns the `Cooker`, the
+//! path-to-`AssetId` map (ids stay stable across recooks by construction:
 //! the first submit mints, later submits reimport), and a per-path version
 //! counter that only moves on a successful recook.
 //!
@@ -11,24 +11,24 @@
 //! or `poll` call; no wall clock, `BTreeMap`/`VecDeque` order only):
 //!
 //! - Bounded queue: `capacity` pending jobs at most; an overflow sheds the
-//!   oldest pending job, counts it in [`Recook::dropped`], and marks its
-//!   [`JobId`] stale.
+//!   oldest pending job, counts it in `Recook::dropped`, and marks its
+//!   `JobId` stale.
 //! - Debounce: one pending job per path (a rapid second submit for the same
-//!   path merges: latest kind wins, the superseded [`JobId`] goes stale),
+//!   path merges: latest kind wins, the superseded `JobId` goes stale),
 //!   and a job cooks only once it settled for `debounce_ticks` ticks, so a
 //!   burst of edits to one file cooks once, reading the latest bytes.
-//! - Stale jobs never cook: [`Recook::is_stale`] reports superseded, shed
+//! - Stale jobs never cook: `Recook::is_stale` reports superseded, shed
 //!   and cancelled ids over a bounded recent history.
-//! - Drop: [`Recook::cancel`] removes a pending job; it never cooks.
-//! - Retry: [`Recook::retry`] requeues a failed job's path as a fresh job.
-//! - Failed cook keeps last-good: the [`Cooker`] runs the job before it
-//!   touches registry or cache, so [`RecookDone`] with
-//!   [`RecookStatus::Failed`] leaves the version and the cached payload
+//! - Drop: `Recook::cancel` removes a pending job; it never cooks.
+//! - Retry: `Recook::retry` requeues a failed job's path as a fresh job.
+//! - Failed cook keeps last-good: the `Cooker` runs the job before it
+//!   touches registry or cache, so `RecookDone` with
+//!   `RecookStatus::Failed` leaves the version and the cached payload
 //!   untouched. A path that never cooked has no id: failures there carry
-//!   [`AssetId::NIL`] and version `0`.
-//! - [`ReloadNotice`] is an immutable value (`Copy`, no handles). `Recook`
-//!   never publishes: the caller converts [`RecookDone`] at its own
-//!   boundary via [`ReloadNotice::for_done`].
+//!   `AssetId::NIL` and version `0`.
+//! - `ReloadNotice` is an immutable value (`Copy`, no handles). `Recook`
+//!   never publishes: the caller converts `RecookDone` at its own
+//!   boundary via `ReloadNotice::for_done`.
 //!
 //! Running-game latency acceptance (small-fixture edit visible within 1 s,
 //! bad reload keeps last-good in play, old tapes replay) belongs to the
