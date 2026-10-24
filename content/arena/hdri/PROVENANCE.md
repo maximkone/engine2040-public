@@ -25,6 +25,26 @@ What changed: nothing else. Geometry, textures, placement and the generator
 are untouched; only the three `hdri/*.hdr` byte blobs (plus these previews
 and `manifest.json` hashes) changed.
 
+## Potato tier: the same three skies at 1K (2026-10-24)
+
+Fetched with `node tools/fetch-content.mjs content/fetch-potato.list` (md5 of the
+served bytes recorded in that list, re-checked on disk after the copy). Same source
+pages, same author, same CC0 licence line as the 4K rows above; 1024x512 instead of
+4096x2048, so the potato tier keeps three skies in VRAM at a sixteenth of the bytes
+(1.3-1.7 MB against 22.4-28.0 MB). The 4K slots stay the comfortable tier; nothing
+was replaced or renamed.
+
+| Slot (`hdri/`) | Source | Author | File | SHA-256 | Bytes |
+|---|---|---|---|---|---|
+| `arena_day_1k.hdr` | https://polyhaven.com/a/goegap (midday desert) | Greg Zaal | `goegap_1k.hdr` (`HDRIs/hdr/1k/`) | `56bb97ac7fcbfcbc91116adfb96e26b9da54475dabb7ec2c442f41bf99cda085` | 1361485 |
+| `arena_sunset_1k.hdr` | https://polyhaven.com/a/venice_sunset (sunset) | Greg Zaal | `venice_sunset_1k.hdr` (`HDRIs/hdr/1k/`) | `92fe2b29b1957828fb8925a57633540bbba5bf380d9285ed553443e834249352` | 1440400 |
+| `arena_night_1k.hdr` | https://polyhaven.com/a/moonlit_golf (night) | Greg Zaal | `moonlit_golf_1k.hdr` (`HDRIs/hdr/1k/`) | `cff71a58efa0c06e06b54046ee877c933d74e7292be1d71511aca1a36749d60c` | 1725527 |
+
+Direct downloads used (all HTTP 200 on 2026-10-24):
+`https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/<file>`. No consumer picks a
+tier yet: the pick is the open rows QA7 (IBL mip and bytes receipt for the arena HDRI)
+and QW4 (web: coarse first, HDRI out of the wasm); BV11/RL40 wire the sky itself.
+
 Verification (2026-09-27, node stdlib only):
 - All three decode as `#?RADIANCE`, `FORMAT=32-bit_rle_rgbe`, 4096x2048.
 - Every texel finite: day mean 1.472/1.422/1.420 (hard sun), sunset mean
