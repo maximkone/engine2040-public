@@ -205,14 +205,16 @@ impl McpServer {
             (op(&state), revision, session)
         };
         let mut state = self.lock()?;
+        let mut asked = None;
         let (outcome, detail) = match &result {
             Ok(_) => (AuditOutcome::Ok, revision),
             Err(error) => {
                 note_refusal(&mut state, tool, error.code);
+                asked = crate::mcp::mcp_input::asked_state(error);
                 (AuditOutcome::Refused, code_hash(error.code))
             }
         };
-        seal_locked(&mut state, tool, session, revision, outcome, detail)?;
+        seal_locked(&mut state, tool, session, revision, outcome, detail, asked)?;
         result
     }
 
@@ -260,14 +262,16 @@ impl McpServer {
         let session = state.session;
         let result = op(&mut state);
         let revision = state.doc.revision;
+        let mut asked = None;
         let (outcome, detail) = match &result {
             Ok(_) => (AuditOutcome::Ok, revision),
             Err(error) => {
                 note_refusal(&mut state, tool, error.code);
+                asked = crate::mcp::mcp_input::asked_state(error);
                 (AuditOutcome::Refused, code_hash(error.code))
             }
         };
-        seal_locked(&mut state, tool, session, revision, outcome, detail)?;
+        seal_locked(&mut state, tool, session, revision, outcome, detail, asked)?;
         result
     }
 
@@ -285,6 +289,7 @@ impl McpServer {
         let revision = state.doc.revision;
         let detail = code_hash(refusal.code);
         note_refusal(&mut state, tool, refusal.code);
+        let asked = crate::mcp::mcp_input::asked_state(&refusal);
         match seal_locked(
             &mut state,
             tool,
@@ -292,6 +297,7 @@ impl McpServer {
             revision,
             AuditOutcome::Refused,
             detail,
+            asked,
         ) {
             Ok(()) => refusal,
             Err(error) => error,
@@ -402,11 +408,17 @@ fn seal_locked(
     revision: u64,
     outcome: AuditOutcome,
     detail: u64,
+    asked: Option<&str>,
 ) -> Result<(), McpToolError> {
     state
         .audit
         .append(session, tool, revision, outcome, detail)
         .map_err(|error| McpToolError::new("audit_exhausted", error.to_string()))?;
+    // MCP31: one ledger entry per call. An ask keys its entry by the state a
+    // retry echoes; a retry folds its record into the entry that asked.
+    state.audit.mark_ask(asked);
+    let round = state.round.clone();
+    state.audit.note_round(round.as_ref());
     Ok(())
 }
 
