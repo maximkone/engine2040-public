@@ -57,6 +57,8 @@ Start the server on a project folder with `cargo run --locked -p engine-endpoint
 
 Arguments, ranges, refusals and undo for every verb are in the [door reference](door-reference.md), printed from the source. The editing loop is: `scene.read` for the revision, `tx.preview`, `tx.apply` with the approval, `tx.undo` to revert. A refusal names the legal values and one recovery; read it before you retry.
 
+<!-- doc-pin: crates/endpoint/src/resources.rs sha256-8:107eed12dd9a5f6b -->
+
 ## When you are stuck
 
 [Troubleshooting](troubleshooting.md) lists the failures we have measured: no WebGPU adapter, a black canvas, blocked UDP, a wrong MIME type, a stale certificate. A second identical failure is a blocker: write it down (`docs/BLOCKERS.md`) and go on.

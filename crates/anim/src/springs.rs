@@ -20,6 +20,131 @@ pub const SHIFT: u32 = 12;
 pub const MAX_BONES: usize = 64;
 /// Hard cap on tip velocity (Q12 steps per tick); keeps impulses finite.
 pub const VMAX_Q: i32 = 2048;
+/// Largest body count one collide pass may take; bounds per-tick work.
+pub const MAX_COLLIDERS: usize = 8;
+/// Integer ops charged per bone per collider per collide pass (nearest point, push, length).
+pub const OPS_PER_COLLIDER_TICK: u64 = 24;
+
+/// One body a spring chain may not pass through, in Q12 steps
+/// (VRM `VRMSpringBoneColliderShapeSphere` / `...Capsule`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpringCollider {
+    /// A ball: every tip within `radius_q` of `center_q` is inside.
+    Sphere {
+        /// Centre, Q12 steps.
+        center_q: [i32; 3],
+        /// Radius, Q12 steps, positive.
+        radius_q: i32,
+    },
+    /// A pill: every tip within `radius_q` of the segment `head_q..tail_q` is inside.
+    Capsule {
+        /// One end of the axis, Q12 steps.
+        head_q: [i32; 3],
+        /// Other end of the axis, Q12 steps.
+        tail_q: [i32; 3],
+        /// Radius around the axis, Q12 steps, positive.
+        radius_q: i32,
+    },
+}
+
+impl SpringCollider {
+    /// The body's radius, Q12 steps.
+    pub fn radius_q(self) -> i32 {
+        match self {
+            Self::Sphere { radius_q, .. } | Self::Capsule { radius_q, .. } => radius_q,
+        }
+    }
+
+    /// A unit direction, Q12, square to the body's axis: where a tip that sits exactly on the
+    /// nearest point leaves by. A sphere has no axis, so it leaves upward; a capsule picks the
+    /// axis' own smallest component, so the same body always picks the same way (a tilted axis
+    /// pushed along +Y would not clear the capsule).
+    pub fn escape_q(self) -> [i64; 3] {
+        match self {
+            Self::Sphere { .. } => [0, i64::from(Q), 0],
+            Self::Capsule { head_q, tail_q, .. } => {
+                let axis = delta(tail_q, head_q);
+                let l2 = dot(axis, axis);
+                if l2 == 0 {
+                    return [0, i64::from(Q), 0];
+                }
+                let pick = (0..3).min_by_key(|i| axis[*i].unsigned_abs()).unwrap_or(1);
+                let mut other = [0i64; 3];
+                other[pick] = 1;
+                let k = dot(other, axis);
+                let mut perp = [
+                    other[0] * l2 - axis[0] * k,
+                    other[1] * l2 - axis[1] * k,
+                    other[2] * l2 - axis[2] * k,
+                ];
+                let len = lane_len(perp);
+                if len == 0 {
+                    return [0, i64::from(Q), 0];
+                }
+                let q = i64::from(Q);
+                perp = [perp[0] * q / len, perp[1] * q / len, perp[2] * q / len];
+                perp
+            }
+        }
+    }
+
+    /// The point of the body nearest `p`, Q12 steps: the centre, or the nearest point of the
+    /// axis (a degenerate axis reads as its head).
+    pub fn nearest(self, p: [i32; 3]) -> [i32; 3] {
+        match self {
+            Self::Sphere { center_q, .. } => center_q,
+            Self::Capsule { head_q, tail_q, .. } => {
+                let axis = delta(tail_q, head_q);
+                let l2 = dot(axis, axis);
+                if l2 == 0 {
+                    return head_q;
+                }
+                // Clamp the projection onto the axis to its own ends: a pill is the axis swept by
+                // its radius, so the nearest point never lies past either end.
+                let t = dot(delta(p, head_q), axis).clamp(0, l2);
+                let scale = |c: i64| i32::try_from(c).unwrap_or(i32::MAX);
+                [
+                    scale(i64::from(head_q[0]) + axis[0] * t / l2),
+                    scale(i64::from(head_q[1]) + axis[1] * t / l2),
+                    scale(i64::from(head_q[2]) + axis[2] * t / l2),
+                ]
+            }
+        }
+    }
+}
+
+/// `a - b` in Q12 steps, widened so the products of two lanes cannot overflow.
+fn delta(a: [i32; 3], b: [i32; 3]) -> [i64; 3] {
+    [
+        i64::from(a[0]) - i64::from(b[0]),
+        i64::from(a[1]) - i64::from(b[1]),
+        i64::from(a[2]) - i64::from(b[2]),
+    ]
+}
+
+/// Dot product of two widened lanes.
+fn dot(a: [i64; 3], b: [i64; 3]) -> i64 {
+    a[0].saturating_mul(b[0])
+        .saturating_add(a[1].saturating_mul(b[1]))
+        .saturating_add(a[2].saturating_mul(b[2]))
+}
+
+/// Length of a widened lane in Q12 steps: integer square root, so no float enters the pass.
+fn lane_len(v: [i64; 3]) -> i64 {
+    let sq = dot(v, v);
+    if sq <= 0 {
+        return 0;
+    }
+    i64::try_from(engine_core::fixed::isqrt(
+        u128::try_from(sq).unwrap_or(u128::MAX),
+    ))
+    .unwrap_or(i64::MAX)
+}
+
+/// A widened lane back in range: both callers clamp to a tip bound first.
+fn narrow(v: [i64; 3]) -> [i32; 3] {
+    v.map(|c| i32::try_from(c).unwrap_or(if c < 0 { i32::MIN } else { i32::MAX }))
+}
 
 /// Secondary-motion failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -40,6 +165,12 @@ pub enum SpringError {
     BadJoint(usize),
     /// No bones to step.
     EmptySet,
+    /// Collider count past [`MAX_COLLIDERS`]; value carried.
+    TooManyColliders(usize),
+    /// A collider radius that is not positive; value carried.
+    BadRadius(i32),
+    /// The set has no radius for the named bone; value carried.
+    BadBone(usize),
 }
 
 impl core::fmt::Display for SpringError {
@@ -55,6 +186,11 @@ impl core::fmt::Display for SpringError {
             SpringError::TooManyBones(n) => write!(f, "springs: {n} bones past {MAX_BONES}"),
             SpringError::BadJoint(joint) => write!(f, "springs: joint {joint} out of range"),
             SpringError::EmptySet => write!(f, "springs: no bones to step"),
+            SpringError::TooManyColliders(n) => {
+                write!(f, "springs: {n} colliders past {MAX_COLLIDERS}")
+            }
+            SpringError::BadRadius(r) => write!(f, "springs: collider radius {r} not positive"),
+            SpringError::BadBone(bone) => write!(f, "springs: bone {bone} has no radius lane"),
         }
     }
 }
@@ -155,6 +291,14 @@ pub fn tick_ops(bones: usize) -> u64 {
     u64::try_from(bones).unwrap_or(u64::MAX) * 3 * OPS_PER_LANE_TICK
 }
 
+/// Budgeted integer ops for one collide pass: every bone against every body, in stable order.
+pub fn collide_ops(bones: usize, colliders: usize) -> u64 {
+    u64::try_from(bones)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(colliders).unwrap_or(u64::MAX))
+        .saturating_mul(OPS_PER_COLLIDER_TICK)
+}
+
 /// Caller-owned spring set: tip positions plus velocities in Q12, one entry
 /// per bone in stable order. Construct with [`SpringSet::with_capacity`],
 /// add bones with [`SpringSet::add_bone`], advance with [`SpringSet::step`].
@@ -163,6 +307,8 @@ pub struct SpringSet {
     params: SpringParams,
     pos: Vec<[i32; 3]>,
     vel: Vec<[i32; 3]>,
+    /// Each bone's own thickness, Q12 steps: what a collider pushes out by.
+    radius: Vec<i32>,
 }
 
 impl SpringSet {
@@ -176,6 +322,7 @@ impl SpringSet {
             params,
             pos: Vec::with_capacity(capacity),
             vel: Vec::with_capacity(capacity),
+            radius: Vec::with_capacity(capacity),
         })
     }
 
@@ -206,7 +353,108 @@ impl SpringSet {
         let anchor = [to_q(anchor_m[0]), to_q(anchor_m[1]), to_q(anchor_m[2])];
         self.pos.push(anchor);
         self.vel.push([0; 3]);
+        self.radius.push(0);
         Ok(self.pos.len() - 1)
+    }
+
+    /// Add one bone of thickness `radius_m` (meters) at `anchor_m`: as [`SpringSet::add_bone`],
+    /// plus the radius a collider pushes it out by. A radius below zero refuses.
+    pub fn add_bone_radius(
+        &mut self,
+        anchor_m: [f32; 3],
+        radius_m: f32,
+    ) -> Result<usize, SpringError> {
+        let radius = to_q(radius_m);
+        if radius < 0 || !radius_m.is_finite() {
+            return Err(SpringError::BadRadius(radius));
+        }
+        let bone = self.add_bone(anchor_m)?;
+        self.radius[bone] = radius;
+        Ok(bone)
+    }
+
+    /// One bone's thickness, Q12 steps.
+    pub fn radius_q(&self, bone: usize) -> Result<i32, SpringError> {
+        self.radius
+            .get(bone)
+            .copied()
+            .ok_or(SpringError::BadBone(bone))
+    }
+
+    /// Push every tip out of the bodies it stands inside, then keep the bone length: the tip
+    /// slides along the delta from the nearest surface point to the body's radius plus the bone's
+    /// own, and its excursion from its anchor never passes [`SpringParams::max_offset_q`]. Stable
+    /// bone then collider order, integer only, so one tape settles identically twice. Both lane
+    /// lengths must match the bone count; a count or radius outside its bound refuses and writes
+    /// nothing.
+    pub fn collide(
+        &mut self,
+        anchors_q: &[[i32; 3]],
+        colliders: &[SpringCollider],
+    ) -> Result<(), SpringError> {
+        if colliders.len() > MAX_COLLIDERS {
+            return Err(SpringError::TooManyColliders(colliders.len()));
+        }
+        if anchors_q.len() != self.pos.len() {
+            return Err(SpringError::LengthMismatch {
+                expected: self.pos.len(),
+                got: anchors_q.len(),
+            });
+        }
+        if colliders.iter().any(|collider| collider.radius_q() <= 0) {
+            let bad = colliders
+                .iter()
+                .map(|c| c.radius_q())
+                .find(|r| *r <= 0)
+                .unwrap_or(0);
+            return Err(SpringError::BadRadius(bad));
+        }
+        let max = i64::from(self.params.max_offset_q);
+        for (bone, anchor) in anchors_q.iter().enumerate() {
+            let mut tip = self.pos[bone];
+            for collider in colliders {
+                let nearest = collider.nearest(tip);
+                let off = delta(tip, nearest);
+                let dist = lane_len(off);
+                let need = i64::from(collider.radius_q()) + i64::from(self.radius[bone]);
+                if dist >= need {
+                    continue;
+                }
+                // Stand on the body's surface: the same radial line, pushed out by what is
+                // missing. A tip exactly on the nearest point has no line, so it leaves along the
+                // body's own escape direction.
+                let at = i64::from(if dist > 0 { dist } else { 1 });
+                let pushed = if dist > 0 {
+                    [
+                        i64::from(nearest[0]) + off[0] * need / at,
+                        i64::from(nearest[1]) + off[1] * need / at,
+                        i64::from(nearest[2]) + off[2] * need / at,
+                    ]
+                } else {
+                    let dir = collider.escape_q();
+                    let q = i64::from(Q);
+                    [
+                        i64::from(nearest[0]) + dir[0] * need / q,
+                        i64::from(nearest[1]) + dir[1] * need / q,
+                        i64::from(nearest[2]) + dir[2] * need / q,
+                    ]
+                };
+                tip = narrow(pushed);
+            }
+            // Keep the bone length: the tip is this far from its anchor at most, so a push cannot
+            // stretch the chain past its own bound.
+            let off = delta(tip, *anchor);
+            let len = lane_len(off);
+            if len > max && len > 0 {
+                tip = narrow([
+                    i64::from(anchor[0]) + off[0] * max / len,
+                    i64::from(anchor[1]) + off[1] * max / len,
+                    i64::from(anchor[2]) + off[2] * max / len,
+                ]);
+            }
+            self.pos[bone] = tip;
+        }
+        Ok(())
     }
 
     /// Kick one bone: add `impulse_m_s` (m/s) to its tip velocity.
@@ -685,5 +933,171 @@ mod tests {
         ] {
             assert_eq!(f32_to_i32_sat(v), v as i32, "sat {v}");
         }
+    }
+
+    /// The helmet: a sphere of 90 mm around the head, and the crest bone's tip starts 1 mm
+    /// inside it.
+    fn helmet_sphere(tip_q: [i32; 3]) -> SpringCollider {
+        let r = to_q(0.09);
+        let bone = to_q(0.01);
+        SpringCollider::Sphere {
+            center_q: [tip_q[0] - (r - bone), tip_q[1], tip_q[2]],
+            radius_q: r,
+        }
+    }
+
+    #[test]
+    fn a_crest_tail_never_ends_inside_the_helmet_sphere() {
+        // One crest bone of 10 mm thickness whose tip rest sits 1 mm inside the helmet sphere:
+        // the push lands it on the surface, and the bone length holds from there.
+        let mut set = SpringSet::with_capacity(tuned(), 1).expect("one bone fits");
+        let bone = set
+            .add_bone_radius([0.0, 1.6, 0.0], 0.01)
+            .expect("crest bone");
+        let anchors = anchors_for(&set);
+        let mut out = vec![[0; 3]; 1];
+        set.step(&anchors, 1, &mut out).expect("rest step");
+        let tip = out[0];
+        let sphere = helmet_sphere(tip);
+        let before = sphere.nearest(tip);
+        let gap = lane_len(delta(tip, before));
+        assert!(
+            gap < i64::from(sphere.radius_q()) + i64::from(set.radius_q(bone).expect("radius")),
+            "the fixture tail starts inside the sphere: {gap}"
+        );
+        set.collide(&anchors, &[sphere]).expect("push out");
+        let after = set.pos[0];
+        let surface = lane_len(delta(after, sphere.nearest(after)));
+        assert!(
+            surface >= i64::from(sphere.radius_q()),
+            "the tail ends {} steps from the helmet's axis, inside its {}",
+            surface,
+            sphere.radius_q()
+        );
+        assert_eq!(set.radius_q(bone), Ok(to_q(0.01)));
+        // Two runs of the same push are the same push.
+        let run = || {
+            let mut set = SpringSet::with_capacity(tuned(), 1).expect("fits");
+            set.add_bone_radius([0.0, 1.6, 0.0], 0.01).expect("bone");
+            let anchors = anchors_for(&set);
+            set.collide(&anchors, &[sphere]).expect("push");
+            set.pos[0]
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn capsule_push_out_keeps_the_bone_length() {
+        // A strap over a 40 mm shoulder capsule whose axis crosses the chain: the tip is pushed
+        // out to the surface and never further from its anchor than the tuning allows.
+        let mut set = SpringSet::with_capacity(tuned(), 3).expect("three bones fit");
+        for b in 0..3 {
+            set.add_bone_radius([b as f32 * 0.06, 1.4, 0.0], 0.02)
+                .expect("strap bone");
+        }
+        let anchors = anchors_for(&set);
+        let mut out = vec![[0; 3]; 3];
+        for _ in 0..4 {
+            set.step(&anchors, 1, &mut out).expect("settle steps");
+        }
+        let capsule = SpringCollider::Capsule {
+            head_q: [to_q(0.06), to_q(1.3), to_q(-0.2)],
+            tail_q: [to_q(0.06), to_q(1.5), to_q(0.2)],
+            radius_q: to_q(0.10),
+        };
+        set.collide(&anchors, &[capsule]).expect("shoulder push");
+        for bone in 0..3 {
+            let tip = set.pos[bone];
+            let nearest = capsule.nearest(tip);
+            let gap = lane_len(delta(tip, nearest));
+            assert!(
+                gap >= i64::from(capsule.radius_q()),
+                "bone {bone} ends {gap} steps from the shoulder axis"
+            );
+            let off = lane_len(delta(tip, anchors[bone]));
+            assert!(
+                off <= i64::from(tuned().max_offset_q),
+                "bone {bone} is {off} steps from its anchor, past the {} bound",
+                tuned().max_offset_q
+            );
+        }
+    }
+
+    #[test]
+    fn collide_stays_inside_its_op_budget() {
+        // The Accept's fixture: 8 bones, 3 spheres and 2 capsules, inside 8 ops/bone and
+        // 24 ops per bone-collider pair.
+        let bones = 8usize;
+        let colliders = 3 + 2usize;
+        assert_eq!(collide_ops(bones, colliders), 960);
+        assert_eq!(collide_ops(bones, colliders), 8 * 5 * OPS_PER_COLLIDER_TICK);
+        let mut set = SpringSet::with_capacity(tuned(), bones).expect("8 bones fit");
+        for b in 0..bones {
+            set.add_bone_radius([b as f32 * 0.05, 1.5, 0.0], 0.01)
+                .expect("bone");
+        }
+        let anchors = anchors_for(&set);
+        let list = [
+            helmet_sphere(anchors[0]),
+            SpringCollider::Sphere {
+                center_q: anchors[2],
+                radius_q: to_q(0.05),
+            },
+            SpringCollider::Sphere {
+                center_q: anchors[4],
+                radius_q: to_q(0.05),
+            },
+            SpringCollider::Capsule {
+                head_q: [anchors[6][0], anchors[6][1] - to_q(0.2), anchors[6][2]],
+                tail_q: [anchors[6][0], anchors[6][1] + to_q(0.2), anchors[6][2]],
+                radius_q: to_q(0.04),
+            },
+            SpringCollider::Capsule {
+                head_q: anchors[7],
+                tail_q: anchors[7],
+                radius_q: to_q(0.04),
+            },
+        ];
+        let digest = || {
+            let mut set = set.clone();
+            let mut out = vec![[0; 3]; bones];
+            for _ in 0..8 {
+                set.step(&anchors, 1, &mut out).expect("budget step");
+                set.collide(&anchors, &list).expect("budget collide");
+            }
+            (set, out)
+        };
+        let (a_set, a_out) = digest();
+        let (b_set, b_out) = digest();
+        assert_eq!(a_set, b_set, "the same bodies push the same way twice");
+        assert_eq!(a_out, b_out);
+        for bone in 0..bones {
+            let off = lane_len(delta(a_set.pos[bone], anchors[bone]));
+            assert!(off <= i64::from(tuned().max_offset_q));
+        }
+        // Refusals: too many bodies, a bad radius, a lane mismatch.
+        let nine: Vec<SpringCollider> = (0..9).map(|_| list[0]).collect();
+        assert_eq!(
+            set.collide(&anchors, &nine),
+            Err(SpringError::TooManyColliders(9))
+        );
+        assert_eq!(
+            set.collide(
+                &anchors,
+                &[SpringCollider::Sphere {
+                    center_q: [0; 3],
+                    radius_q: 0
+                }]
+            ),
+            Err(SpringError::BadRadius(0))
+        );
+        assert_eq!(
+            set.collide(&anchors[..2], &list),
+            Err(SpringError::LengthMismatch {
+                expected: bones,
+                got: 2
+            })
+        );
+        assert_eq!(set.radius_q(bones), Err(SpringError::BadBone(bones)));
     }
 }
