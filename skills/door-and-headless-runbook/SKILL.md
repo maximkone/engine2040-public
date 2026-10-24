@@ -5,7 +5,7 @@ description: "Use when you must run engine2040 without a person or window (stage
 
 # Door and headless runbook
 
-Every line below names a binary or test that exists in this repo. Run from the repo root in pwsh. Builds share `target/`: a `Blocking waiting for file lock` line means wait (AGENTS.md, shell and search). Tests and clippy go through `node tools/gh-check.mjs` (skill `github-check`).
+Every line below names a binary or test that exists in this repo. Run from the repo root in pwsh. Builds share `target/`: a `Blocking waiting for file lock` line means wait (AGENTS.md, shell and search). Tests and clippy go through `node tools/gh-check.mjs` (skill `github-check`). Detail moved to `reference.md`: the MCP door walkthrough, receipt lines and the view-law table, the scene report, scoring, night GPU.
 
 ## Golden proof
 - Full proof: `node tools/proof.mjs`. Fixtures only: `node tools/proof.mjs --skip-build`. Other flags: `--perf`, `--mutants`.
@@ -26,116 +26,32 @@ Every line below names a binary or test that exists in this repo. Run from the r
 ## MCP door (e2040-mcp)
 - Help, headless: `cargo run --locked -p engine-endpoint --features mcp --bin e2040-mcp -- --help` (`docs/book/recipes-drive-from-mcp.md`, serve the project folder). The plain build refuses the binary without the `mcp` feature.
 - Run a copy so a rebuild cannot relink the binary under a running server: `cargo build --release --locked -p engine-endpoint --features mcp --bin e2040-mcp`, copy `target/release/e2040-mcp.exe` outside `target/`, and point the client at the copy with `--project-dir <scratch dir>`.
-- Client config: `{"command": "e2040-mcp", "args": ["--project-dir", "<dir>"]}`. Tool names: `tools/mcp-install.mjs` writes the server key `e2040`, and OpenCode shows the key as a prefix (`e2040_api_search`). The door itself answers only the bare name: a raw call to `e2040_api_search` returned `unknown_tool` (checked 2026-10-21). Use the names `rpc.discover` prints. Search before you describe a path you have not seen. Adding a verb: skill `ai-door`.
-
-### Stale copy check (run first)
-
-`.opencode/bin/e2040-mcp.exe` is a copy from `tools/mcp-install.mjs` and is gitignored. On 2026-10-21 it was dated 2026-09-26 and served 20 tools with no `api.load`, `api.call`, `game.build`, `level.build`, `scene.next` or `scene.pick`. It also sent 64-bit hashes as JSON numbers, so a JS client rounds the approval and every `tx.apply` fails with `forged_approval`. Before you build anything, check that the tool list from `rpc.discover` shows `api.load`, `game.build` and `level.build`. If it shows 20 tools, report that the copy is stale and stop. Current source sends those hashes as decimal strings (`crates/endpoint/src/mcp_dto.rs`, `u64_text`).
-
-### Build a small game through the door (verified 2026-10-21, `target\release\e2040-mcp.exe`)
-
-The door places props from a fixed catalog. It does not build a game. Catalog kinds (`crates/endpoint/src/build_level.rs::KINDS`): `altar banner barrel bench brazier crate pillar post stand torch`. There is no player, enemy, goal or floor kind; walls come from the room shell. A brief is one directive per line: `prop <kind> <name>`, `want <name> <relation> <target> [<lo>,<hi>]?` (relations `next_to facing inside on_top_of supports`; targets `wall:north|south|east|west`, `object:<name>` or `point:<x_cm>,<z_cm>`), or `spawn <name>`. English fails with `level_refused: ... unknown directive`.
-
-Edits do not survive a restart. Run the whole sequence in one process:
-
-1. `scene.read` `{"limit":64,"cursor":0}`. Note `revision` R.
-2. `level.build` `{"brief":"prop crate c1\nspawn c1","seed":2040,"expected_revision":R,"idempotency_key":8}`. Three props with two `want` lines were refused as `spatial_rejected` (`overlap`) and the message named no pair. Start with one prop and add one at a time.
-3. `scene.read` again. Its `revision` (R1) is the one to pin. Poses from `scene.read` are metres; `scene.brief` and `scene.query` report centimetres.
-4. `play.run` `{"action":"start","ticks":120,"fighters":2,"half_extent_m":10,"seed":2040,"scene_rev":R1}`, then `{"action":"poll","job_id":<id>}`. Without `scene_rev`: `unpinned_run`. At revision 0: `empty_arena`.
-5. `play.step` `{"seed":2040,"upto_tick":30,"width":480,"height":270}` returns an image. The default frame is 96x64, too small to read. `play.step` takes no `scene_rev`; the frame checked was the default two-disc duel, so do not claim your props are in it until you have looked.
-6. `tx.undo` `{}` reverts step 2 as a new revision.
-
-Other verbs, verified:
-
-- `game.build` `{"brief":"prop crate c1\nprop barrel b1\nspawn c1\nwant b1 next_to object:c1","seed":2040}` returned `verdict: pass` and `package_bytes` only. The package is not returned, so there is nothing to open or play. Read-only.
-- `sim.build_encounter` `{"brief":"one enemy guards the goal","seed":2040}` returns `solved`, `plan_id`, `rung` and no geometry.
-- No save verb exists. The project folder held no files after edits, and a fresh process starts at revision 0.
-
-## Playtest crate
+- Client config: `{"command": "e2040-mcp", "args": ["--project-dir", "<dir>"]}`. `tools/mcp-install.mjs` writes the server key `e2040`, and OpenCode shows the key as a prefix (`e2040_api_search`). The door itself answers only the bare name: a raw call to `e2040_api_search` returned `unknown_tool` (checked 2026-10-21). Use the names `rpc.discover` prints. Search before you describe a path you have not seen. Adding a verb: skill `ai-door`.
+- Run the stale-copy check first and the prop-brief walkthrough from `reference.md` before you build anything through the door.
 
 ## Playtest crate
 - Tests: `node tools/gh-check.mjs cargo test --locked -p engine-playtest keypoint` (`docs/book/recipes-drive-from-mcp.md`, the play-test section). Package `engine-playtest`, path `crates/playtest`.
 
-## Window run and the view line
-
+## Window run
 The `arena` bin (`crates/game/src/bin/arena.rs`; helpers in `arena_frame/mod.rs` and `arena_winit/mod.rs`) needs `--features app`. A short `--exit` run prints receipt lines that say what was drawn, as numbers, so you do not need to look at pixels first.
 
 ### Build and run
 - Is the exe fresh? `node tools/bins.mjs` prints the rebuild line when stale. Build (one cargo at a time): `cargo build --release -p engine-game --features app --bin arena` gives `target\release\arena.exe`.
 - Look run (what the product check does): `target\release\arena.exe --scene arena --fighters 4 --frames 300 --exit --require-framing`. It opens a real window on this GPU, runs, prints the lines and closes. Every `--exit` run has a 5-minute wall bound (`--deadline-ms <ms>` changes it) and never opens an audio device. With no display and `--frames` it falls back to a smoke run with no window.
-- Do not run it while a cargo build, a capture or another arena runs: timings and the window stall (skill `github-check`, section 4).
+- Do not run it while a cargo build, a capture or another arena runs: timings and the window stall (skill `github-check`, section 4). One window at a time: `node tools/arena-run.mjs -- <args>`.
 - stdout is mirrored into `target/logs/arena-<UTC>.log`; a crash writes `crash-<UTC>.toml` beside it.
 - Flags: `--scene arena` (the only scene), `--fighters N`, `--seed N`, `--ticks N`, `--frames N`, `--exit`, `--mute`, `--timed-smoke` (writes `target/perf/frame-times.csv`), `--require-framing` (exit 1 if a frame shows no fighter), `--view-brief <file>` (JSONL, one line per presented frame), `--no-break-look`, `--pause-at-tick N` (add `--step` to advance one tick per Space), `--staged-fight` (scripted human slot: seed 2040, 600 ticks, 4 fighters), `--camera-path arena600`.
 
 ### Captures
 - `target\release\arena.exe --scene arena --fighters 4 --frames 300 --exit --capture-dir target/clips/<name> --capture-every 60 --fps 30` writes `frame_000001.png`..., `manifest.json`, `cutlog.json` and prints `arena capture: frames=N manifest="..." sha=<16 hex> view=ok` (same inputs, same sha).
-- **Read `view=` before you look or report.** It is the `arena view` verdict for the same frames: `view=ok`, or `view=FAIL(<fields>)` naming what broke (`view_eye_in_body`, `view_eye_below_ground`, `view_sunk_cm_max`, `view_nonfinite`, `view_error_parts`, ...). A FAIL capture is not evidence of anything except the bug it names (`ViewLaws::verdict`, `crates/game/src/view_truth.rs`).
+- **Read `view=` before you look or report.** It is the `arena view` verdict for the same frames: `view=ok`, or `view=FAIL(<fields>)` naming what broke (`view_eye_in_body`, `view_eye_below_ground`, `view_sunk_cm_max`, `view_nonfinite`, `view_error_parts`, ...). A FAIL capture is not evidence of anything except the bug it names (`ViewLaws::verdict`, `crates/game/src/view_truth.rs`). Field meanings: `reference.md`.
 - **A capture of staged boxes fails the run.** When the fighter look cannot load (a missing clip, a body at the wrong scale, a bad manifest) the window prints `arena notice: <why>; drawing staged boxes`; with `--capture-dir` armed it also prints `an armed capture of staged boxes is no evidence` and exits 1. Fix the named file; never report those frames.
 - Realistic bodies: `E2040_BODIES=rocketbox` loads `content/fighters/rocketbox` (the Rocketbox family) instead of the CT7 bundle. `node tools/asset-gen/fighter.mjs ... --prove` runs this capture for you and fails unless the exit is 0 and every capture line says `view=ok`.
 - Tape run: `cargo run -p engine-game --features app --bin arena -- --capture-dir target/clips/<name> --capture-every 2 --tape <tape> --rows <ROW1> --sha <build-sha> --fps 30` (`docs/CAPTURE.md`, built-in dump). Flags `--tape`, `--rows`, `--sha` are documented there.
 - The PNG is an offscreen render of the same draw list, never the swapchain. Open at least one PNG yourself before you report it (skill `test-and-proof`). A PNG under 60 KB is blank.
 
-### Receipt lines, in print order
-
-```
-arena smoke: ticks=600 frames=550 alpha=0.606 hud_cells=63 ... fight_draws=16
-arena sim: ticks=600 hash=<16 hex>
-arena frame-split: sim=..ms present=..ms fighters=..ms ... interval_ms p50=13.0 p99=1382.9 ...
-arena framing: frames=550 fighters=4 seen=4 empty=0 fewest_in_view=4 tinted_share=0.00
-arena view: frames=550 sim_ticks=0.9..599.6 bodies=2200 offscreen_share=0.01 nonfinite=0 error_parts=0 sunk_cm_max=14.2 idle_float_cm_max=3.7 pops=180 pop_acts=attack:35/idle:38/run:107 pop_cm_max=107.6 eye_in_body=0 eye_below_ground=0 closest_cm=798 cover_max=0.02 foot_slide_cm=0.1 planted_feet=65 ragdolls=3
-arena break: breaks=15 debris=2 awake=0
-physfx: bodies=2 contacts=0 us=0
-```
-
-A real 4-fighter, 600-tick log of 2026-10-17; yours will differ. The `arena sim` hash is the frozen sim hash for that tick count: pausing or a different frame rate does not move it.
-
-### arena view (`crates/game/src/view_truth.rs`)
-
-Every drawn body as numbers from the CPU skin. Units: centimeters in the line, sim ticks for time.
-
-| field | reads as | red when |
-|---|---|---|
-| `frames`, `sim_ticks=a..b` | frames folded and the tick span shown | fight must start by tick 30 and span at least 60 ticks |
-| `bodies`, `offscreen_share` | bodies drawn in total; share with no on-screen rect | share high means the camera lost them |
-| `nonfinite`, `error_parts` | NaN or infinite vertices; parts drawn with the skin error material | any above 0 |
-| `sunk_cm_max` | deepest a body sank into the sand | above 3 (floor in `tools/product-bar.json`); target under 2 |
-| `idle_float_cm_max` | most an idle body floated above the sand | trend only |
-| `pops`, `pop_acts`, `pop_cm_max` | joints that missed their constant-velocity guess by more than 10 cm in one frame (a clip snap); by act | target 0; `run` pops come from the run clip phase |
-| `eye_in_body`, `eye_below_ground` | frames with the camera inside a body or under the sand | any above 0 |
-| `closest_cm`, `cover_max` | nearest body to the eye; biggest picture share (0..1) | trend only |
-| `foot_slide_cm`, `planted_feet` | p95 slide of a planted foot off its spot, over this many foot-frames | above a few cm means a skating foot; 0 `planted_feet` means no proof |
-| `ragdolls` | most bodies drawn from a ragdoll in one frame | 0 after a knockdown means the ragdoll is not wired |
-
-Ragdolled bodies are not judged for pops. No `arena view:` line at all means the view truth did not fold (fighter look failed to bind).
-
-### break and physfx
-
-- `arena break: breaks=<n> debris=<n> awake=<n>`: breaks = authority `BreakEvent`s the window saw; debris = debris bodies alive; awake = bodies still moving. `awake=0` means the pile settled. `breaks=0` is normal when nothing hit the crate in a short run. No `arena break` line: the picture is off (`--no-break-look`) or it dropped itself and printed `arena notice: break picture dropped: <why>`.
-- `physfx: bodies=<n> contacts=<n> us=<n>`: the float physics layer (debris, ragdolls) at its tier. It never feeds the hash.
-- Both come from `crates/game/src/break_window.rs` and `crates/physfx/src/types.rs`.
-
-### No window: the same view line
-
-`FighterLook::view_run(seed, ticks, fighters)` folds a bout into one `arena view:` line with no GPU. Test: `node tools/gh-check.mjs cargo test -p engine-game --features app --lib view_run` (runs on the PC). Pop and slide proofs on real bodies: `clip_switches_do_not_pop_in_a_real_duel` and `planted_feet_hold_their_spot_in_a_real_duel` in `crates/game/src/fighter_look_proofs.rs`. No door verb returns this line yet.
-
-### Score it
-
-`tools/product-check.mjs` reads these lines (`parseView`, `parseReceipt`) against `tools/product-bar.json`; run it only with `--no-build` (it writes its report and captures, nothing else). `node --test tools/product-check.test.mjs` shows the parse rules. Report: the command, the exit code, the line you read (quoted), and the PNG you opened.
-
-## Night GPU runs
-
-A GPU run left alone overnight can strand the external display. The panel on the
-NVIDIA output goes `Off Line` after the next resume and the monitor shows its
-no-signal snow while the Intel panel comes back; no TDR is logged, so the Event
-log looks clean and the topology switch does nothing. Seen 2026-10-24: a GPU
-report written 06:53, the monitor re-arrived 06:57, firmware S3 resume 06:59,
-second screen `Off Line` from then on (`Win32_DesktopMonitor` availability 8).
-
-Recover in this order: `Win+Ctrl+Shift+B`, then `Win+P` -> Extend; reseat the
-HDMI at the laptop; power-cycle the monitor and press its Source button; reboot
-if the output stays dark. Before a long GPU run: keep the lid open on AC, set
-the external display to never sleep, and prefer `--headless` for any row that
-does not need a window.
+### Reading the lines
+Receipt lines in print order, the `arena view` field table, `arena break`/`physfx`, the headless `view_run` line, and the `view.scene` report with its `view.steer` ops all live in `reference.md`. Read it before you report a `view=` line or a scene finding. `tools/product-check.mjs` scores the lines against `tools/product-bar.json`; run it with `--no-build` only.
 
 ## Checks before you report
 - A run line that names a file: check the file exists first (`Test-Path <path>`).

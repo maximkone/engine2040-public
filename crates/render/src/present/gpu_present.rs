@@ -67,12 +67,14 @@ mod forward_group;
 mod frame;
 mod gate;
 mod gtao_live;
+mod impostor_live;
 mod kind_table;
 mod live;
 mod look_seam;
 mod lut_upload;
 mod motion;
 mod msaa;
+mod pass_switch;
 mod presenter;
 mod preset;
 mod quality_apply;
@@ -101,6 +103,9 @@ pub use frame::{
 pub use msaa::{
     edge_has_intermediate, msaa_enabled, msaa_sample_count, msaa_target_desc, MsaaConfig,
     MsaaTargetDesc, MSAA_SAMPLE_COUNT,
+};
+pub use pass_switch::{
+    sun_shadow_view_proj, PassSwitch, PassSwitchError, RenderFacts, SunShadowFacts, PASS_NAMES,
 };
 pub use presenter::Presenter;
 #[cfg(feature = "window")]
