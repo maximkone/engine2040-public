@@ -9,7 +9,7 @@
 //!
 //! Owner: engine-combat. Consumer (caller must hook in): the pair framing in
 //! `crates/game/src/camera.rs` (`frame_pair` and the two-fighter case of
-//! `frame_group`) would call [`frame_melee`] and convert millimeters to
+//! `frame_group`) would call [`frame_melee`](crate::camera_framing::frame_melee) and convert millimeters to
 //! meters. Units: millimeters on a ground plane `[x, z]`, y up; angles as
 //! tangent permille. Determinism: integer math only, no state, no clock, so
 //! the pose at tick N depends on tick N's positions alone (no follow lag).

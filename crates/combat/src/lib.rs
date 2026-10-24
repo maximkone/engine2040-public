@@ -253,7 +253,7 @@ pub fn shake_for_trauma(seed: u64, trauma_permille: u16, tick: u64) -> (f32, f32
     trauma_shake(seed, Trauma::from_permille(trauma_permille), tick)
 }
 
-/// Parry window check: frame within [start,end] inclusive (data, e.g. 2f/4f/6f/10f).
+/// Parry window check: frame within `start..=end` inclusive (data, e.g. 2f/4f/6f/10f).
 pub fn parry_open(frame: u32, start: u32, end: u32) -> bool {
     frame >= start && frame <= end
 }

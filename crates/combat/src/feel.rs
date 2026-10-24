@@ -1,15 +1,15 @@
 //! feel: Pichlmair game-feel survey as engine parameter schemas (ideas only).
 //! Owner: engine-combat. Consumer: combat feel tuning — the arena match step
-//! resolves [`FeelPreset::tables`] then steps via [`step_with_feel`], while
-//! presentation reads the returned [`JuiceOutput`] on its own clock. Units:
+//! resolves [`FeelPreset::tables`](crate::feel::FeelPreset::tables) then steps via [`step_with_feel`](crate::feel::step_with_feel), while
+//! presentation reads the returned [`JuiceOutput`](crate::feel::JuiceOutput) on its own clock. Units:
 //! ticks at 60 Hz, damage/trauma in permille, ids are slots. Determinism:
 //! integer math and fighter-ID order only; same preset plus same inputs give
-//! the same events and juice. Errors: [`FeelError`] for bad versions/rows.
+//! the same events and juice. Errors: [`FeelError`](crate::feel::FeelError) for bad versions/rows.
 //! Budget: tick path O(events) time, no heap (caller buffer); the 200-bout
 //! balance survey is a headless test-only harness, never the tick.
 //! Contact-frame hit layers ride beside the survey: one [`FightEvent`]
 //! fans out to hit-stop, reaction, sound-cue and trauma data through
-//! [`contact_layers_for_event`], with per-layer [`ContactToggles`] that
+//! [`contact_layers_for_event`](crate::feel::contact_layers_for_event), with per-layer [`ContactToggles`](crate::feel::ContactToggles) that
 //! never reach the sim. Same integer and no-heap budget as the tick.
 
 use crate::fight::{step_with_tables_into, FightEvent, FightState, Tables, MAX_STAMINA, TABLES_V1};
@@ -522,7 +522,7 @@ pub const fn juice_for_event(
 
 /// Lenient tuned step plus juice, into a reused event buffer.
 ///
-/// Consumer wiring: resolves [`FeelPreset::tables`] over `base`, steps the
+/// Consumer wiring: resolves [`FeelPreset::tables`](crate::feel::FeelPreset::tables) over `base`, steps the
 /// shared fight core (same events as stepping those tables directly), then
 /// folds per-event juice into one presentation summary. `out` is cleared
 /// first, so a buffer reserved once never reallocates and the tick holds no
@@ -1268,7 +1268,7 @@ pub fn contact_layers_for_tick(
 
 /// Tuned step plus contact layers, into a reused event buffer.
 ///
-/// Consumer wiring: resolves [`FeelPreset::tables`] over `base`, steps the
+/// Consumer wiring: resolves [`FeelPreset::tables`](crate::feel::FeelPreset::tables) over `base`, steps the
 /// shared fight core (same events and end state as stepping those tables
 /// directly), then folds the tick's contact frame for presentation. `out`
 /// is cleared first, so a buffer reserved once never reallocates and the

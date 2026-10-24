@@ -104,7 +104,8 @@ pub fn validate_match(set: &MatchTableSet) -> Result<(), MatchError> {
     Ok(())
 }
 
-/// Whole-match exchange track for up to [`MAX_PARTICIPANTS`] fighters.
+/// Whole-match exchange track for up to
+/// [`MAX_PARTICIPANTS`](engine_input::MAX_PARTICIPANTS) fighters.
 /// Sweep is stateless per tick (poses in, events out), so the match owns
 /// only the exchange state; the tick is the exchange clock, never a copy.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

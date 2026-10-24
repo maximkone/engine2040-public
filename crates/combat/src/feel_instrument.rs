@@ -4,7 +4,7 @@
 //! `pq2_balance_for` reuses the feel balance survey. Units: ticks at 60 Hz,
 //! damage/trauma in permille, latency in ms. Determinism: integer math and
 //! fighter-ID order only; same preset plus same base gives the same reports.
-//! Errors: [`InstrumentError`] for bad versions/scenarios/rows. Budget: the
+//! Errors: [`InstrumentError`](crate::feel_instrument::InstrumentError) for bad versions/scenarios/rows. Budget: the
 //! 20-scenario survey is a headless harness (never the tick); per-scenario
 //! cost is O(ticks * events) time into caller-owned buffers.
 

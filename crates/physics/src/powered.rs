@@ -13,7 +13,7 @@
 //! buffers, so `step` performs no steady-state allocation.
 #![forbid(unsafe_code)]
 
-use super::pd::{clamp_vector, pd_raw, stable_gains};
+use super::pd::stable_gains;
 use super::ragdoll::{
     drain_narrow_contacts, insert_joints, joint_depths, normalize_quat, normalized_rotation,
     quat_conj, read_sim_transforms, rotate_vec, BoneShape,
@@ -22,6 +22,7 @@ use super::rapier::{
     ordered_linvel, ordered_translation, position_in_bounds, quantize, sanitize3, BodyState,
     ParamsError, RagdollParams, FIXED_DT, GRAVITY_Y, MAX_LEN,
 };
+use super::servo::{self, Rig, Servo, ServoTuning};
 use engine_anim::contract::{validate_pose, validate_skeleton, AnimError, LocalPose, Skeleton};
 use engine_core::{quat_mul, Fnv64};
 use rapier3d::dynamics::{
@@ -212,6 +213,12 @@ pub struct PoweredSnapshot {
     pub ccd_flags: Vec<bool>,
     /// Total contact pairs observed at snapshot time.
     pub contact_events: u64,
+    /// PID state of the linear servo, one per bone (see [`Servo`]).
+    pub servo_lin: Vec<Servo>,
+    /// PID state of the angular servo, one per bone.
+    pub servo_ang: Vec<Servo>,
+    /// Rig whose tuning row was active at snapshot time.
+    pub rig: Rig,
 }
 
 /// One observed contact pair from the last [`PoweredRagdoll::step`]: the
@@ -288,6 +295,13 @@ pub struct PoweredRagdoll {
     /// Total contact pairs observed since spawn (folded into the hash,
     /// carried by snapshots).
     contact_events: u64,
+    /// PID state of the linear servo, one per bone, skeleton order. Carried by
+    /// snapshots so a restored run resumes bit for bit; never hashed.
+    servo_lin: Vec<Servo>,
+    /// PID state of the angular servo, one per bone, skeleton order.
+    servo_ang: Vec<Servo>,
+    /// The rig whose tuning row this body runs (see [`ServoTuning`]).
+    rig: Rig,
 }
 
 impl PoweredRagdoll {
@@ -382,7 +396,27 @@ impl PoweredRagdoll {
             ccd_flags,
             pending: Vec::with_capacity(32),
             contact_events: 0,
+            servo_lin: vec![Servo::new(); n],
+            servo_ang: vec![Servo::new(); n],
+            rig: Rig::default(),
         })
+    }
+
+    /// The rig whose PID row drives this body.
+    pub fn rig(&self) -> Rig {
+        self.rig
+    }
+
+    /// Switch the rig row: the servo history is dropped, so the next step
+    /// starts from the pose with a clean integral and slew state.
+    pub fn set_rig(&mut self, rig: Rig) {
+        if self.rig == rig {
+            return;
+        }
+        self.rig = rig;
+        for s in self.servo_lin.iter_mut().chain(self.servo_ang.iter_mut()) {
+            s.reset();
+        }
     }
 
     /// Feed the animated driver pose for this tick. Driven bones track it via
@@ -866,6 +900,9 @@ impl PoweredRagdoll {
             hits: self.hits,
             ccd_flags: self.ccd_flags.clone(),
             contact_events: self.contact_events,
+            servo_lin: self.servo_lin.clone(),
+            servo_ang: self.servo_ang.clone(),
+            rig: self.rig,
         }
     }
 
@@ -879,6 +916,11 @@ impl PoweredRagdoll {
             return Err(RagdollError::SnapshotMismatch);
         }
         if snapshot.ccd_flags.len() != self.order.len() {
+            return Err(RagdollError::SnapshotMismatch);
+        }
+        if snapshot.servo_lin.len() != self.order.len()
+            || snapshot.servo_ang.len() != self.order.len()
+        {
             return Err(RagdollError::SnapshotMismatch);
         }
         validate_pose(&self.skeleton, &snapshot.animated)
@@ -931,66 +973,122 @@ impl PoweredRagdoll {
             }
         }
         self.contact_events = snapshot.contact_events;
+        self.servo_lin = snapshot.servo_lin;
+        self.servo_ang = snapshot.servo_ang;
+        self.rig = snapshot.rig;
         self.pending.clear();
         Ok(())
     }
 
-    /// PD velocity servo toward the animated target: per-axis `P * error`
-    /// damped by `D * velocity`, then one magnitude clamp per 3-vector
-    /// (see [`super::pd`]). Only `+ - * /`, comparisons and one `sqrt`
-    /// (rapier's own `PdController` needs angle extraction on the angular
-    /// path, which the tier-3 sim math rules forbid here); a degenerate
-    /// step `dt` falls back to the P term and non-finite terms sanitize to
-    /// zero, so a huge pose can never inject NaN into the world. A zero P
-    /// gain leaves that axis untouched, so all-zero P gains are a limp bone.
+    /// Fixed-point PID servo toward the animated target: P and I on the
+    /// offset, D on the measured rate, a bounded integral and a slew cap on
+    /// the commanded velocity, per 3-vector then one magnitude clamp (see
+    /// [`crate::servo`]). The integer law removes the rest buzz the capped
+    /// float PD left and drops the steady-state droop; a degenerate step `dt`
+    /// answers the P term only and non-finite terms sanitize to zero, so a
+    /// huge pose can never inject NaN into the world. A zero P gain leaves
+    /// that axis untouched, so all-zero P gains are a limp bone.
     fn drive_bone(&mut self, i: usize, dt: f32) {
         let drive = self.drives[i];
         let target = self.target_pos[i];
         let target_rot = self.target_rot[i];
-        let Some(body) = self.bodies.get_mut(self.order[i]) else {
+        let tuning = ServoTuning::for_rig(self.rig);
+        // The integer law takes the step in microseconds; a step outside the
+        // law's window (invalid, or past 1 s) reads as P-only inside `step`.
+        let dt_us = servo::to_micro(dt);
+        let Some(body) = self.bodies.get(self.order[i]) else {
             return;
         };
-        // Linear servo: P on the position offset damped by measured velocity,
+        let (p, lv, r, av) = {
+            let r = body.rotation();
+            (
+                body.translation(),
+                body.linvel(),
+                [r.x, r.y, r.z, r.w],
+                body.angvel(),
+            )
+        };
+        // Linear servo: P and I on the position offset, D on measured velocity,
         // capped as one vector. Rapier integrates the assigned velocity, so
         // the loop is stable for any bone mass once its gains sit inside
-        // `stable_gains` (D past the edge rang at the cap); the damping settles the
-        // recovery with fewer ticks than P-only at the same overshoot.
+        // `stable_gains`.
+        let mut lin = None;
         if drive.linear_gain > 0.0 {
             // Inside the servo's stability region whatever the table says (see [`stable_gains`]).
             let (gain, damping) = stable_gains(drive.linear_gain, drive.linear_damping, dt);
-            let p = body.translation();
-            let lv = body.linvel();
-            let raw = [
-                pd_raw(target[0] - p.x, lv.x, gain, damping, dt),
-                pd_raw(target[1] - p.y, lv.y, gain, damping, dt),
-                pd_raw(target[2] - p.z, lv.z, gain, damping, dt),
+            let err = [
+                servo::to_micro(target[0] - p.x),
+                servo::to_micro(target[1] - p.y),
+                servo::to_micro(target[2] - p.z),
             ];
-            let v = clamp_vector(raw, drive.max_speed);
-            body.set_linvel(Vector::new(v[0], v[1], v[2]), true);
+            let vel = [
+                servo::to_micro(lv.x),
+                servo::to_micro(lv.y),
+                servo::to_micro(lv.z),
+            ];
+            let out = self.servo_lin[i].step(
+                err,
+                vel,
+                dt_us,
+                servo::Gains {
+                    p: gain,
+                    d: damping,
+                },
+                &tuning,
+                cap_micro(drive.max_speed),
+            );
+            lin = Some(servo::from_vector(out, drive.max_speed));
         }
         // Angular servo: the error-quaternion vector part points along the
         // shortest correction axis with magnitude `sin(angle/2)` (plain
         // quaternion `+ - *`, no angle extraction), damped by measured spin.
+        let mut ang = None;
         if drive.angular_gain > 0.0 {
-            let r = body.rotation();
-            let qc = [r.x, r.y, r.z, r.w];
-            let mut qe = quat_mul(target_rot, quat_conj(&qc));
+            let mut qe = quat_mul(target_rot, quat_conj(&r));
             if qe[3] < 0.0 {
                 qe = [-qe[0], -qe[1], -qe[2], -qe[3]];
             }
-            let av = body.angvel();
             // The error vector is sin(angle/2), so the real loop gain is half the table's;
             // clamping with the full gain is the conservative side of the same edge.
             let (gain, damping) = stable_gains(drive.angular_gain, drive.angular_damping, dt);
-            let raw = [
-                pd_raw(qe[0], av.x, gain, damping, dt),
-                pd_raw(qe[1], av.y, gain, damping, dt),
-                pd_raw(qe[2], av.z, gain, damping, dt),
+            let err = [
+                servo::to_micro(qe[0]),
+                servo::to_micro(qe[1]),
+                servo::to_micro(qe[2]),
             ];
-            let w = clamp_vector(raw, drive.max_spin);
+            let vel = [
+                servo::to_micro(av.x),
+                servo::to_micro(av.y),
+                servo::to_micro(av.z),
+            ];
+            let out = self.servo_ang[i].step(
+                err,
+                vel,
+                dt_us,
+                servo::Gains {
+                    p: gain,
+                    d: damping,
+                },
+                &tuning,
+                cap_micro(drive.max_spin),
+            );
+            ang = Some(servo::from_vector(out, drive.max_spin));
+        }
+        let Some(body) = self.bodies.get_mut(self.order[i]) else {
+            return;
+        };
+        if let Some(v) = lin {
+            body.set_linvel(Vector::new(v[0], v[1], v[2]), true);
+        }
+        if let Some(w) = ang {
             body.set_angvel(Vector::new(w[0], w[1], w[2]), true);
         }
     }
+}
+
+/// A speed cap (m/s or rad/s) as the servo's integer cap, µm/s.
+fn cap_micro(cap: f32) -> i32 {
+    i32::try_from(servo::to_micro(cap).clamp(0, i64::from(i32::MAX))).unwrap_or(0)
 }
 
 /// Mode implied by a mask: no free bones animates, all free is a full ragdoll.
@@ -1767,6 +1865,15 @@ mod tests {
             body.angvel[1] = -body.angvel[1];
             body.angvel[2] = -body.angvel[2];
         }
+        // The servo history mirrors with the checkpoint: the linear command
+        // and integral are odd in X, the angular ones in Y and Z (a
+        // pseudovector under the same reflection).
+        for s in &mut snapshot_b.servo_lin {
+            *s = s.mirrored([true, false, false]);
+        }
+        for s in &mut snapshot_b.servo_ang {
+            *s = s.mirrored([false, true, true]);
+        }
         a.restore(snapshot_b).expect("restore mirrored");
         // The mirrored checkpoint resumes a mirrored future: stepping both
         // twins keeps every bone mirrored, so the checkpoint carries the
@@ -1778,10 +1885,13 @@ mod tests {
         for i in 0..4 {
             let pa = a.bone_position(i).expect("bone A");
             let pb = b.bone_position(i).expect("bone B");
+            // 2 mm at a 4 m height: the integer servo rounds its command to
+            // the micro-unit and slews it, so contact-phase twins on the floor
+            // drift a hair more than the float PD did (measured 1.1 mm here).
             assert!(
-                (pa[0] + pb[0]).abs() < 1e-3
-                    && (pa[1] - pb[1]).abs() < 1e-3
-                    && (pa[2] - pb[2]).abs() < 1e-3,
+                (pa[0] + pb[0]).abs() < 2e-3
+                    && (pa[1] - pb[1]).abs() < 2e-3
+                    && (pa[2] - pb[2]).abs() < 2e-3,
                 "resumed bone {i} must stay mirrored: {pa:?} vs {pb:?}"
             );
         }

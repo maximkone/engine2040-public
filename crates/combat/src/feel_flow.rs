@@ -4,12 +4,12 @@
 //! PATTERN(Game Feel Flow, MIT): a flow is a list of (trigger, effect) pairs;
 //! one trigger fires every effect registered for it. Here the list is a
 //! fixed-size slot array, so registering is one store: an effect registered
-//! during frame N already fires on the events of frame N's own [`FeelFlow::step`]
+//! during frame N already fires on the events of frame N's own [`FeelFlow::step`](crate::feel_flow::FeelFlow::step)
 //! and in any case no later than frame N+1, never a rebuild or a scan.
 //!
-//! Owner: engine-combat. Consumer: the presenter calls [`FeelFlow::step`] once
+//! Owner: engine-combat. Consumer: the presenter calls [`FeelFlow::step`](crate::feel_flow::FeelFlow::step) once
 //! per presented tick with that tick's [`FightEvent`] slice and reads the
-//! [`FeelFrame`] back. Determinism: effects fire in slot order, then event
+//! [`FeelFrame`](crate::gamefeel::FeelFrame) back. Determinism: effects fire in slot order, then event
 //! order; integer math only (see [`crate::gamefeel`]); no heap, so the tick path
 //! never allocates. Presentation only: the fight state is never read back.
 

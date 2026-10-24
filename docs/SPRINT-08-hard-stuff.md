@@ -281,6 +281,20 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Size S. Owns `crates/physics/src/servo.rs`. Accept: hit, partial and 2 s
   get-up on three rigs with jitter at or below the current servo and ≤ 10%
     overhead; hash x2. needs: PX9.
+  Progress 2026-10-24: `servo.rs` landed the integer PID (micro-units, P + I
+  + D on the measurement, integral bounded and gated by a per-rig band, slew
+  cap, one const row per rig) and `powered::drive_bone` runs it (snapshot
+  carries the servo state; mirror-symmetry test mirrors it). Jitter at rest
+  (RMS µm/s per tick, float PD -> integer PID), hit / partial / 2 s get-up:
+  Standard 103493/74471/106951 -> 102829/74028/106216, Heavy
+  112617/89798/107166 -> 111726/89053/106366, Tall 114829/95693/107688 ->
+  114081/95044/107057. Overhead is NOT met: 1.27x on one runner run and
+  2.50x on another against the float PD law (the pd baseline itself swung
+  3.4-11.1 ms for the same 300k three-axis loop), accept is <= 10%; the bench
+  test stays `#[ignore]`d with those numbers. Golden x2 unchanged
+  (d57b5c8ae3096614). A slew tight enough to lower jitter further broke
+  `gait_walk` (pelvis band 70 mm, stop drift 1892 mm), so the looseness is
+  pinned by that suite.
 - [ ] PX32 physics: CPU SPH fluid step — Clavet double-density + XSPH +
   spatial hash, explicit-Euler, fixed seed, ported as integer-mm Rust from
   flax-mcp `plugins/world/src/Physics/Core/Packs/Fluid/{SphSolver,SphConfig}.cs`

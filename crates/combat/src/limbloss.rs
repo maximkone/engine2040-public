@@ -2,7 +2,7 @@
 //! venous and arterial bleeding, shock, faint, surrender and exsanguination.
 //!
 //! Consumer: the arena match step feeds each [`Cut`] from `cut.rs` and each
-//! non-severing hit to [`BodyState`] and steps it once per tick; AI reads
+//! non-severing hit to [`BodyState`](crate::limbloss::BodyState) and steps it once per tick; AI reads
 //! the joint mask and the surrender flag; the limb body (`physics::limb`)
 //! reads the severed set. Presentation (blood spray, stump caps) reads the
 //! events and never this state. Data owner: `engine-combat`. Units: blood
@@ -10,8 +10,8 @@
 //! fixed 60 Hz ticks. Determinism scope: every function is pure over the
 //! table, the body state and the cut bytes; integer math only, joints in
 //! canonical [`JointId`] order, so the same tape gives the same bodies on
-//! every PC. Errors: [`LimbLossError`] for a bad table; user data never
-//! panics. Budget: [`BodyState::step`] is `O(1)` plus one pass over
+//! every PC. Errors: [`LimbLossError`](crate::limbloss::LimbLossError) for a bad table; user data never
+//! panics. Budget: [`BodyState::step`](crate::limbloss::BodyState::step) is `O(1)` plus one pass over
 //! [`JOINT_TOTAL`] joints on a change only, no heap; the state is `Copy`.
 //!
 //! Extends the anatomy table and the cut event; it forks neither: joint ids

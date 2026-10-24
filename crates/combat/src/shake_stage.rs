@@ -9,7 +9,7 @@
 //! restoring the pose is subtracting the same sample again.
 //!
 //! Owner: engine-combat. Consumer (caller must hook in): `shake_offset` in
-//! `crates/game/src/camera.rs`, which scales [`ShakeSample`] by the director's
+//! `crates/game/src/camera.rs`, which scales [`ShakeSample`](crate::shake_stage::ShakeSample) by the director's
 //! `max_shake_m / 1000` per axis. Units: permille of the shake cap. Errors:
 //! none; trauma past full clamps. Budget: a few integer ops, no heap.
 

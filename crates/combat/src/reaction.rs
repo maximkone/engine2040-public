@@ -9,7 +9,7 @@
 //! const construction per event, O(events) fold over a caller slice, no heap.
 //! The contact-frame layers of the feel module stay frozen: this module reads
 //! the same fight events and rows through its own visible triple, and the
-//! shared [`contact_sim_digest`](crate::feel::contact_sim_digest) proves the
+//! shared [`contact_sim_digest`] proves the
 //! sim never moves under presentation.
 
 use crate::feel::{capture_input, contact_sim_digest, FeelPreset};

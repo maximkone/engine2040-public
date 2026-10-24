@@ -76,6 +76,10 @@ pub mod ragdoll_tape;
 #[cfg(feature = "rapier")]
 pub mod rapier;
 pub mod rigid;
+/// Fixed-point PID joint servo for the powered ragdoll: P and D on the
+/// measurement, a bounded integral, a slew cap and one tuning row per rig.
+/// Integer micro-units, std-only.
+pub mod servo;
 /// Cumulative pain, servo fatigue and per-bone injury beside the balance
 /// core: the arena hit pipeline feeds each blow here plus `balance`.
 /// Integer, std-only.

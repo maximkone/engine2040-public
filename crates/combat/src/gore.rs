@@ -11,7 +11,7 @@
 //!
 //! Presentation-only means these events NEVER alter hit outcomes, damage or
 //! hashes: [`gore_for_events`] takes `&[FightEvent]` by shared reference and
-//! never touches [`FightState`], so collecting gore cannot change a replay.
+//! never touches [`FightState`](crate::fight::FightState), so collecting gore cannot change a replay.
 //! Integer centimetres only, so there are no NaN positions by construction.
 
 use crate::fight::{FightEvent, Tables, MAX_HP_PERMILLE, TABLES_V1};
@@ -23,7 +23,7 @@ use engine_core::Fnv64;
 /// `Full` keeps today's blood plus the fatal-only sever cue, `Reduced`
 /// keeps blood but drops the severed-part cue, `Off` drops all blood and
 /// emits a non-bloody impact flash plus a guard/downed cue instead. The
-/// setting never feeds [`FightState`] or its hash; the arena and render
+/// setting never feeds [`FightState`](crate::fight::FightState) or its hash; the arena and render
 /// read it as a presentation filter over [`gore_for_events`] output.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum GoreSetting {
@@ -115,7 +115,7 @@ pub const WOUND_FADE_TICKS: u32 = 48;
 /// pattern (Apache-2.0): wounds are plain values with an integer-tick
 /// pulse taper, never entities and never simulation. No bytes copied.
 /// Presentation-only like [`GoreEvent`]: collecting wounds never touches
-/// [`FightState`] and never enters its hash.
+/// [`FightState`](crate::fight::FightState) and never enters its hash.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Wound {
     /// Victim fighter slot, copied from the fight event.
@@ -346,7 +346,7 @@ pub fn gore_for_events_with_tables(
 /// severed-part cue; `Off` drops every [`GoreKind::is_blood`] event and
 /// emits [`GoreKind::ImpactFlash`] for hits and grazes plus
 /// [`GoreKind::GuardCue`] for knockdowns, so the bout still reads without
-/// blood. The setting never touches [`FightState`]: same tape under any
+/// blood. The setting never touches [`FightState`](crate::fight::FightState): same tape under any
 /// setting steps the same hash. Integer math and event order only.
 pub fn gore_for_events_with_setting(
     tick: u32,

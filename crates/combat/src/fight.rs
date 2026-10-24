@@ -223,7 +223,7 @@ pub fn poise_regen_delay_for_tables(tables: &Tables) -> u32 {
 }
 
 /// Freeze ticks for one impacting strike under explicit rows, at 60 Hz.
-/// Caller: [`resolve_strike`], so the two freeze sites never disagree. V2
+/// Caller: `resolve_strike`, so the two freeze sites never disagree. V2
 /// delegates to the single home [`crate::hitstop_kind::for_impact`]; every
 /// other row gives the single row, so V1 replays stay byte-identical.
 #[must_use]

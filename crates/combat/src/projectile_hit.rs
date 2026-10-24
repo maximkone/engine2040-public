@@ -3,14 +3,14 @@
 //!
 //! Owner: engine-combat, beside [`crate::projectile`], which owns the flight
 //! and the cast contract. Consumer: none yet; RY5's match loop resolves its
-//! volleys through [`BodyTrack`] over the tick's body state. Data owner: this
+//! volleys through [`BodyTrack`](crate::projectile_hit::BodyTrack) over the tick's body state. Data owner: this
 //! module; a body's path is data, the round's rows are the flight's
 //! [`crate::projectile::FlightTables`]. Units: millimetres, integer ticks at
 //! 60 Hz, plus the flight's `Fixed` Q16 metres. Determinism: `i128` integer
 //! math and `Fixed` only, no float anywhere, tracks keep their order, so two
 //! runs of one shot hit on the same tick on every platform, wasm included.
 //!
-//! The event is sim-owned data. The render thread reads a [`HitEvent`] and
+//! The event is sim-owned data. The render thread reads a [`HitEvent`](crate::projectile_hit::HitEvent) and
 //! never decides one: no hit tick, no impact point and no hit body are ever
 //! computed on the render side.
 //!
@@ -18,7 +18,7 @@
 //! cast, and each swept segment is tested against every track's body for that
 //! tick. The first track the segment touches, in track order, wins. A flight
 //! that meets nothing is `Ok(None)`, not a failure. Errors: typed
-//! [`HitError`]. Budget: one pass over one flight's ticks times the tracks;
+//! [`HitError`](crate::projectile_hit::HitError). Budget: one pass over one flight's ticks times the tracks;
 //! no heap, no allocation on the tick path.
 //!
 //! The segment test is exact integer math: the closest point of a segment to

@@ -7,7 +7,7 @@
 //! bytes vendored, the formulas are rewritten in integers.
 //!
 //! Owner: engine-combat. Consumer: [`crate::feel_flow::FeelFlow`] folds fight
-//! events into a [`GameFeel`]; the presenter reads one [`FeelFrame`] per
+//! events into a [`GameFeel`](crate::gamefeel::GameFeel); the presenter reads one [`FeelFrame`](crate::gamefeel::FeelFrame) per
 //! presented tick and applies it on its own clock. Units: ticks at 60 Hz,
 //! offsets in thousandths of a reference pixel (milli), scales in permille.
 //! Determinism: integer math only (the reference's `cos`/`sin` are rebuilt on
@@ -16,7 +16,7 @@
 //! here reads or writes the hashed fight state.
 //!
 //! Step order matches the reference frame: the caller starts effects during
-//! the update, then calls [`GameFeel::step`] once as the post-update. Shake and
+//! the update, then calls [`GameFeel::step`](crate::gamefeel::GameFeel::step) once as the post-update. Shake and
 //! hit-stop sample before they count down; bump decays before it is read.
 
 /// Reference shake amplitude in pixels times 1000: `2.5 * power * ratio`.

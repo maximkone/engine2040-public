@@ -1,7 +1,7 @@
 //! Combat rows text loader: designers edit numbers, no Rust edit.
 //!
 //! Consumer: practice reload (next slice) reads `content/design/combat.rows`
-//! through [`parse_tables`] at a tick boundary; this module never steps.
+//! through [`parse_tables`](crate::tables_text::parse_tables) at a tick boundary; this module never steps.
 //! Data owner: `engine-combat` (`Tables`, `SwapInput`, `validate_tables`).
 //! Units as in `Tables`: damage permille, ticks at 60 Hz, stamina points,
 //! chip counts. Determinism: same text gives same swap or same refusal.

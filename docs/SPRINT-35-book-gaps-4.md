@@ -62,8 +62,9 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   clip fires the sand cue on the clip tick +-1; two replays are equal; a clip
   with no event fires none. F2P: the event has no consumer. P2P: golden
   unchanged, the stride cue still fires when no event exists. needs: none.
-- [ ] BG6 arena: foe perception ignores cover — `arena/src/engage.rs:92-120`
-  ranks by separation only; `spatial/src/sight.rs` has no tick caller;
+- [x] BG6 arena: foe perception ignores cover — Landed 57f3ccdbc.
+  `arena/src/engage.rs:92-120` ranked by separation only;
+  `spatial/src/sight.rs` has no tick caller;
   `arena/src/world.rs:59-99` has a 2D obstacle with no height. Add a cover test
   against the existing obstacle boxes before a sighting enters `FoeView`.
   Rules v2 only. Diff: regular. Tier B. Size M. Owns

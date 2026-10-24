@@ -11,9 +11,9 @@
 //! roll (`roll_q16`), so the report equals what [`cut_one`](crate::cut::cut_one)
 //! would decide for a touching edge, and the same spec gives the same report
 //! on every PC. "Clean" means the edge touches the joint: reach and
-//! geometry are not part of the question. Errors: [`HitSimError`] for
+//! geometry are not part of the question. Errors: [`HitSimError`](crate::hitsim::HitSimError) for
 //! out-of-range specs. Budget: `O(samples * 15)` integer ops, at most
-//! [`MAX_SAMPLES`] samples, one small allocation-free report.
+//! [`MAX_SAMPLES`](crate::hitsim::MAX_SAMPLES) samples, one small allocation-free report.
 
 use crate::anatomy::{AnatomyTable, JointId, ARMOR_ALL, SEVERABLE_JOINT_COUNT};
 use crate::cut::{

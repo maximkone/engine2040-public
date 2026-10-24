@@ -2,7 +2,7 @@
 //!
 //! Owner: engine-combat. Units: ticks at sixty hertz.
 //! Determinism: integer compares only; same inputs give same answer.
-//! Errors: [`DesignError`]. Budget: constant time, no heap, no floats.
+//! Errors: [`DesignError`](crate::design::DesignError). Budget: constant time, no heap, no floats.
 //! PORT(maximkone/flax-mcp@a26f960:plugins/gameplay/GameSide/
 //! Game.Shared.Combat/Mechanics/Combat{HitResolver,Stamina,Poise,
 //! ComboChain}*.cs), MIT; clean-room integer rewrite, no vendor bytes.

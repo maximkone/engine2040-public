@@ -1,8 +1,8 @@
 //! Per-kind hit-stop freeze rows: light taps, heavy lands, parry answers longest.
 //!
-//! Single home for the V2 kind-to-ticks map. Caller: [`for_impact`] reads
-//! [`for_kind`] and [`for_parry`]; [`crate::fight::hitstop_for_impact`]
-//! steps [`for_impact`] into the live freeze (`FightState.hitstop`).
+//! Single home for the V2 kind-to-ticks map. Caller: [`for_impact`](crate::hitstop_kind::for_impact) reads
+//! [`for_kind`](crate::hitstop_kind::for_kind) and [`for_parry`](crate::hitstop_kind::for_parry); [`crate::fight::hitstop_for_impact`]
+//! steps [`for_impact`](crate::hitstop_kind::for_impact) into the live freeze (`FightState.hitstop`).
 //! The tick counts stay owned by
 //! `crate::tables` (`LIGHT_HITSTOP_TICKS_V2` and friends); this module only
 //! maps a strike kind to its row. Std-only, no heap, integer ticks only.

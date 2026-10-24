@@ -1,13 +1,13 @@
 //! depth: integer combat-depth cores over the base fight table core.
 //!
-//! Consumer: the arena steps [`DepthSet::tick`] beside the fight step,
-//! records strikes, and routes tick events through [`DepthSet::observe`];
-//! [`HitResolver`] answers damage through the fight tables. Owner:
-//! [`DepthSet`] owns per-slot pools; [`ComboChain`] owns its patterns.
+//! Consumer: the arena steps [`DepthSet::tick`](crate::depth::DepthSet::tick) beside the fight step,
+//! records strikes, and routes tick events through [`DepthSet::observe`](crate::depth::DepthSet::observe);
+//! [`HitResolver`](crate::depth::HitResolver) answers damage through the fight tables. Owner:
+//! [`DepthSet`](crate::depth::DepthSet) owns per-slot pools; [`ComboChain`](crate::depth::ComboChain) owns its patterns.
 //! Units: damage permille, stamina/poise points, all timing fixed ticks
 //! (60 Hz). Determinism: integer `+ - * /` only, slot order, no floats,
-//! no clock. Errors: [`DepthError`]; bad slots/kinds/patterns refuse.
-//! Budget: one tick touches [`MAX_SLOTS`] slots, no heap, < 2 KiB state.
+//! no clock. Errors: [`DepthError`](crate::depth::DepthError); bad slots/kinds/patterns refuse.
+//! Budget: one tick touches [`MAX_SLOTS`](crate::depth::MAX_SLOTS) slots, no heap, < 2 KiB state.
 //! PORT(maximkone/flax-mcp@a26f960:plugins/gameplay/GameSide/
 //! Game.Shared.Combat/Mechanics/Combat{HitResolver,Stamina,Poise,
 //! ComboChain}*.cs), MIT; clean-room integer rewrite, no vendor bytes.
@@ -488,7 +488,7 @@ impl ComboChain {
 ///
 /// The arena mirrors authority stamina in, records strikes as inputs are
 /// built, steps this beside the fight step, then routes the tick events
-/// back through [`DepthSet::observe`]. The mirror is one way: the fight
+/// back through [`DepthSet::observe`](crate::depth::DepthSet::observe). The mirror is one way: the fight
 /// step stays the authority and these pools never write back into it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DepthSet {
