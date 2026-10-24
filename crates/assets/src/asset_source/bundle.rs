@@ -729,6 +729,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// QW4: the HDRI tier the page streams behind the progress bar is the first
+    /// bytes of the bundle, so one prefix cut serves every HDRI file and the
+    /// tiers behind it still refuse by name.
+    #[test]
+    fn the_hdri_tier_is_first_in_the_bundle() {
+        let dir = fixture("hdri_tier");
+        std::fs::create_dir_all(dir.join("hdri")).expect("mkdir");
+        for (i, len) in [(0usize, 4096usize), (1, 8), (2, 1024)] {
+            std::fs::write(dir.join(format!("hdri/set{i}.hdr")), vec![0xABu8; len]).expect("write");
+        }
+        let rules = PackRules::new()
+            .priority("hdri/", 0)
+            .priority("src/", 1)
+            .priority("textures/", 2);
+        let bytes = packed(&dir, &rules);
+        let whole = BundleSource::open(bytes.clone()).expect("opens");
+        let hdri: Vec<EntryInfo<'_>> = whole
+            .entries_in_file_order()
+            .filter(|entry| entry.path.starts_with("hdri/"))
+            .collect();
+        assert_eq!(hdri.len(), 3, "the three HDRI blobs are packed");
+        let last_hdri = hdri
+            .iter()
+            .map(|entry| entry.offset + entry.len)
+            .max()
+            .expect("an hdri blob");
+        let first_later = whole
+            .entries_in_file_order()
+            .filter(|entry| entry.priority > 0)
+            .map(|entry| entry.offset)
+            .min()
+            .expect("a later tier");
+        assert!(
+            last_hdri <= first_later,
+            "the hdri tier ends at {last_hdri} B but a later tier starts at {first_later} B"
+        );
+        // The prefix that stops on that boundary holds every HDRI file.
+        let prefix = BundleSource::open_prefix(bytes[..last_hdri].to_vec()).expect("prefix opens");
+        assert!(prefix.is_prefix(), "the prefix says so");
+        for i in 0..3 {
+            let name = format!("hdri/set{i}.hdr");
+            assert_eq!(
+                prefix.read(&name).expect("hdri bytes"),
+                whole.read(&name).expect("whole file"),
+                "{name}"
+            );
+        }
+        let err = prefix
+            .read("src/crate.gltf")
+            .expect_err("a later tier is not here");
+        assert!(
+            err.to_string().contains("src/crate.gltf"),
+            "the refusal names the file: {err}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_prefix_that_stops_inside_a_blob_is_refused() {
         let dir = fixture("cut");
