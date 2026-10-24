@@ -33,9 +33,9 @@ pub fn read_frame(
     normal: Option<&wgpu::Texture>,
     albedo: Option<&wgpu::Texture>,
     ids: Option<&wgpu::Texture>,
-    width: u32,
-    height: u32,
+    size: [u32; 2],
 ) -> Result<DebugFrame, BufferError> {
+    let [width, height] = size;
     if width == 0 || height == 0 {
         return Err(BufferError::Empty { width, height });
     }
@@ -48,8 +48,7 @@ pub fn read_frame(
         normal,
         albedo,
         ids,
-        width,
-        height,
+        size,
     )
 }
 
@@ -84,9 +83,9 @@ pub fn read_frame_channels(
     normal: Option<&wgpu::Texture>,
     albedo: Option<&wgpu::Texture>,
     ids: Option<&wgpu::Texture>,
-    width: u32,
-    height: u32,
+    size: [u32; 2],
 ) -> Result<DebugFrame, BufferError> {
+    let [width, height] = size;
     if width == 0 || height == 0 {
         return Err(BufferError::Empty { width, height });
     }
@@ -223,6 +222,10 @@ fn read_texels(
     queue.submit(Some(encoder.finish()));
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
+    // Native waits here; a browser cannot block the main thread on the GPU, and
+    // its map is answered by a later frame, so the wasm path reports the miss
+    // from `get_mapped_range` below instead of waiting for it.
+    #[cfg(not(target_arch = "wasm32"))]
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     let mapped = slice
         .get_mapped_range()
@@ -328,8 +331,7 @@ mod tests {
             Some(&normal_tex),
             Some(&albedo_tex),
             Some(&id_tex),
-            width,
-            height,
+            [width, height],
         )
         .expect("the frame reads back");
         assert_eq!(frame.width, width, "width reads back");
@@ -360,8 +362,7 @@ mod tests {
             None,
             Some(&albedo_tex),
             Some(&id_tex),
-            width,
-            height,
+            [width, height],
         ) {
             Err(error @ BufferError::MissingChannel { channel, .. }) => {
                 assert_eq!(channel, "normal", "the message names the missing channel");
