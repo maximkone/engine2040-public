@@ -177,6 +177,26 @@ pub const fn splitmix64(z: u64) -> u64 {
 mod tests {
     use super::*;
 
+    /// The short typed writes fold exactly their little-endian bytes (AF5).
+    #[test]
+    fn the_typed_short_writes_are_their_little_endian_bytes() {
+        let mut short = Fnv64::new();
+        short.write_u16(0x0102);
+        let mut short_bytes = Fnv64::new();
+        short_bytes.write(&[0x02, 0x01]);
+        assert_eq!(short.finish(), short_bytes.finish(), "u16 is two LE bytes");
+        let mut signed = Fnv64::new();
+        signed.write_i32(-2);
+        let mut signed_bytes = Fnv64::new();
+        signed_bytes.write(&(-2i32).to_le_bytes());
+        assert_eq!(signed.finish(), signed_bytes.finish(), "i32 is four LE bytes");
+        let mut text = Fnv64::new();
+        text.write_str("a");
+        let mut text_bytes = Fnv64::new();
+        text_bytes.write(b"a");
+        assert_eq!(text.finish(), text_bytes.finish(), "a str is its UTF-8 bytes");
+    }
+
     #[test]
     fn fnv_matches_published_vectors() {
         // FNV-1a 64 test vectors from the reference suite (Noll).
