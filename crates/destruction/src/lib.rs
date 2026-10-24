@@ -60,8 +60,8 @@ pub mod structure;
 
 pub use bake::{bake_bytes, bake_hash, fracture, Chunk};
 pub use bonded::{
-    event_bytes, Bond, BondedCollection, BondedDesc, BreakError, BreakEvent, Chunk3, LOAD_Q16_ONE,
-    NO_LAYER, NO_PARENT,
+    event_bytes, Bond, BondedCollection, BondedDesc, BreakError, BreakEvent, Chunk3, SagRules,
+    LOAD_Q16_ONE, NO_LAYER, NO_PARENT, SAG_Q16_ONE,
 };
 pub use crack::{CrackError, CrackOutcome, CrackWall};
 pub use csg::{

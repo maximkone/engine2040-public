@@ -200,14 +200,15 @@ impl ServerHandler for McpServer {
         })
     }
 
-    /// D16: the four resources the door serves, in contract order.
+    /// D16: the resources the door serves — the four static families and the
+    /// lesson view (BG14) — in contract order.
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
         let mut resources = crate::resources::resource_list();
-        // BG1: the live scene view rides beside the four static families; its
+        // BG1: the live scene view rides beside the static families; its
         // body moves with the document, so it is read from the session.
         resources.push(crate::resources::scene_resource());
         Ok(ListResourcesResult {
