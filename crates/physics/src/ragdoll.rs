@@ -48,8 +48,8 @@ use engine_anim::contract::{validate_pose, validate_skeleton, AnimError, LocalPo
 use engine_core::{quat_mul, Fnv64};
 use rapier3d::dynamics::{
     CCDSolver, GenericJointBuilder, ImpulseJointSet, IntegrationParameters, IslandManager,
-    JointAxesMask, JointAxis, MultibodyJointSet, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
-    SoftBodySet, SphericalJointBuilder,
+    JointAxesMask, JointAxis, MotorModel, MultibodyJointSet, RigidBodyBuilder, RigidBodyHandle,
+    RigidBodySet, SoftBodySet, SphericalJointBuilder,
 };
 use rapier3d::geometry::{BroadPhaseBvh, ColliderBuilder, ColliderSet, NarrowPhase};
 use rapier3d::math::{Pose, Rotation, Vector};
@@ -333,6 +333,9 @@ pub struct Ragdoll {
     multibody_joints: MultibodyJointSet,
     soft_bodies: SoftBodySet,
     ccd: CCDSolver,
+    /// Explicit CCD fixed-target-cache clears so far (PX48). Observation only: not folded into
+    /// the hash and carried by no snapshot.
+    ccd_clears: u64,
     /// Body handles in skeleton order; fixes iteration/hash order.
     order: Vec<RigidBodyHandle>,
     /// Owned skeleton: joint parents drive the sim-local conversion.
@@ -429,6 +432,9 @@ fn build_bones(
         // set directly as a quaternion instead: no trig in this glue.
         if let Some(b) = bodies.get_mut(handle) {
             b.set_rotation(normalized_rotation(r), false);
+            // PX46: the PD joint motors get one more island visit, so four
+            // base passes hold the rest angle the twelve-pass servo needed.
+            b.set_additional_solver_iterations(BONE_ADDITIONAL_PGS);
         }
         // The density carries the bone's share of the body mass: the builder
         // divides that mass by the capsule volume.
@@ -531,6 +537,7 @@ impl Ragdoll {
             multibody_joints: MultibodyJointSet::new(),
             soft_bodies: SoftBodySet::new(),
             ccd: CCDSolver::new(),
+            ccd_clears: 0,
             order,
             skeleton: skeleton.clone(),
             animated: pose.clone(),
@@ -894,6 +901,23 @@ impl Ragdoll {
         (finite && capsule.inv_mass.is_finite()).then_some(capsule)
     }
 
+    /// Drop the CCD solver's cached fixed-target list.
+    ///
+    /// Rapier 0.36 caches the fixed colliders and their prediction-fattened AABBs for the
+    /// non-bullet sweep and keys that list only by the prediction distance: a restore or a bone
+    /// teleport must clear it so no sweep clamps against targets cached before the move. Costs
+    /// one list rebuild on the next step; changes no body state.
+    fn clear_ccd_targets(&mut self) {
+        self.ccd.invalidate_fixed_targets_cache();
+        self.ccd_clears = self.ccd_clears.saturating_add(1);
+    }
+
+    /// How many times this ragdoll cleared the CCD fixed-target cache (PX48 teleports and
+    /// restores). Observation only, never hashed.
+    pub fn ccd_clears(&self) -> u64 {
+        self.ccd_clears
+    }
+
     /// Move one bone by `shift` meters and change its velocity by `dv`, the two halves of
     /// parting it from another fighter. Bones never sleep, so nothing is woken: the pass stays
     /// out of Rapier's user-change lists like the floor and spacing passes.
@@ -909,6 +933,8 @@ impl Ragdoll {
             false,
         );
         body.set_linvel(Vector::new(v.x + dv[0], v.y + dv[1], v.z + dv[2]), false);
+        // A parted bone is teleported: the CCD cache from before the shift is stale.
+        self.clear_ccd_targets();
         Ok(())
     }
 
@@ -1035,6 +1061,8 @@ impl Ragdoll {
         }
         self.contact_events = snapshot.contact_events;
         self.pending.clear();
+        // A restore is a teleport to the solver: drop the CCD fixed-target cache here too.
+        self.clear_ccd_targets();
         Ok(())
     }
 }
@@ -1186,6 +1214,8 @@ pub fn insert_table_joints(
         let spec = table
             .spec(i)
             .unwrap_or_else(|| JointSpec::fallback(SWING_MIN));
+        let damp = JOINT_MOTOR_DAMPING_NM_S + spec.friction_torque;
+        let (stiff, cap) = (JOINT_MOTOR_STIFFNESS_NM, JOINT_MOTOR_MAX_NM);
         let data = match spec.kind {
             JointKind::Hinge => {
                 // A knee folds backward (+X), an elbow forward (-X): the row's
@@ -1208,7 +1238,9 @@ pub fn insert_table_joints(
                         q2.inverse() * world_frame,
                     ))
                     .limits(JointAxis::AngX, range)
-                    .motor_velocity(JointAxis::AngX, 0.0, spec.friction_torque)
+                    .motor_model(JointAxis::AngX, MotorModel::ForceBased)
+                    .motor_position(JointAxis::AngX, 0.0, stiff, damp)
+                    .motor_max_force(JointAxis::AngX, cap)
                     .contacts_enabled(false)
                     .build()
             }
@@ -1219,9 +1251,15 @@ pub fn insert_table_joints(
                 .limits(JointAxis::AngX, [-spec.swing_limit, spec.swing_limit])
                 .limits(JointAxis::AngY, [spec.twist_min, spec.twist_max])
                 .limits(JointAxis::AngZ, [-spec.swing_lateral, spec.swing_lateral])
-                .motor_velocity(JointAxis::AngX, 0.0, spec.friction_torque)
-                .motor_velocity(JointAxis::AngY, 0.0, spec.friction_torque)
-                .motor_velocity(JointAxis::AngZ, 0.0, spec.friction_torque)
+                .motor_model(JointAxis::AngX, MotorModel::ForceBased)
+                .motor_position(JointAxis::AngX, 0.0, stiff, damp)
+                .motor_max_force(JointAxis::AngX, cap)
+                .motor_model(JointAxis::AngY, MotorModel::ForceBased)
+                .motor_position(JointAxis::AngY, 0.0, stiff, damp)
+                .motor_max_force(JointAxis::AngY, cap)
+                .motor_model(JointAxis::AngZ, MotorModel::ForceBased)
+                .motor_position(JointAxis::AngZ, 0.0, stiff, damp)
+                .motor_max_force(JointAxis::AngZ, cap)
                 .build()
                 .into(),
         };
@@ -1277,6 +1315,20 @@ pub(crate) fn swing_limit(depth: u32) -> f32 {
 pub const MASS_RATIO_LO: f32 = 0.8;
 /// Child-to-parent mass ratio ceiling, same units and determinism as [`MASS_RATIO_LO`].
 pub const MASS_RATIO_HI: f32 = 1.2;
+
+/// PX46: PD position-motor stiffness on every bone joint, in N.m per radian.
+/// The motor holds the rest angle the servo used to chase every tick.
+pub const JOINT_MOTOR_STIFFNESS_NM: f32 = 600.0;
+/// PX46: PD position-motor damping on every bone joint, in N.m.s per radian.
+/// Damping is what the friction row used to be for: a moving joint slows.
+pub const JOINT_MOTOR_DAMPING_NM_S: f32 = 60.0;
+/// PX46: torque ceiling of one bone joint motor, in N.m; above it the joint
+/// gives way (a spear thrust still bends the chain instead of teleporting it).
+pub const JOINT_MOTOR_MAX_NM: f32 = 600.0;
+/// PX46: extra PGS iterations a bone body adds to its solver island. Four base
+/// passes plus these eight give a bone island the twelve visits the velocity
+/// servo needed, while the rest of the world stays at four.
+pub const BONE_ADDITIONAL_PGS: usize = 8;
 
 pub use super::joint_limits::{
     JointError, JointKind, JointSpec, JointTable, JOINT_FRICTION_BALL_NM, JOINT_FRICTION_HINGE_NM,
@@ -1440,6 +1492,10 @@ fn check_pos(pos: [f32; 3]) -> Result<(), Error> {
         Err(Error::NonFinitePosition)
     }
 }
+
+#[cfg(test)]
+#[path = "ragdoll_ccd_tests.rs"]
+mod ccd_cache_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3185,13 +3241,17 @@ mod tests {
                 root <= JOINT_GAP_LIMIT_M,
                 "a root strike opens the chain {root:.4} m at {RAGDOLL_SOLVER_PASSES} solver passes"
             );
-            // Rapier's own default misses the shipped margin: the count is
-            // chosen by this test, not left at the default.
-            let rapier_default =
-                worst_gap(RAPIER_DEFAULT_SOLVER_PASSES, false, false, CHAIN_BONES / 2);
+            // PX46: the PD joint motors plus one extra island visit hold the
+            // chain inside the shipped margin at Rapier's four base passes;
+            // the old velocity servo needed twelve.
+            let four = worst_gap(RAPIER_DEFAULT_SOLVER_PASSES, false, false, CHAIN_BONES / 2);
             assert!(
-                rapier_default > MEASURED_CHAIN_GAP_M,
-                "the Rapier default ({RAPIER_DEFAULT_SOLVER_PASSES} passes) leaves the chain at {rapier_default:.4} m, inside the measured band"
+                four <= SHIPPED_CHAIN_GAP_M,
+                "four passes open the chain {four:.4} m, over the shipped {SHIPPED_CHAIN_GAP_M} m"
+            );
+            assert!(
+                four < MEASURED_CHAIN_GAP_M,
+                "four passes leave the chain at {four:.4} m, inside the old measured band"
             );
             // The floor rows are printed but not asserted: with the coupling
             // seam on, a landing stretches the joints far past 5 cm at every
