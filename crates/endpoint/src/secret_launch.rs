@@ -1264,6 +1264,7 @@ mod tests {
         let dir = scratch("mcp57");
         let config = crate::startup::StartupConfig {
             project_dir: dir.clone(),
+            policy: None,
             web: None,
         };
         let server = crate::startup::build_server(&config).expect("MCP5 server builds");

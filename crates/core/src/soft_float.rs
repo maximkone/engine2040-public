@@ -1218,4 +1218,88 @@ mod tests {
             assert!(!named, "the production half names {word}");
         }
     }
+
+    #[test]
+    fn predicates_name_their_own_class() {
+        assert!(SoftFloat::ONE.is_finite());
+        assert!(!SoftFloat::INFINITY.is_finite());
+        assert!(!SoftFloat::ZERO.is_subnormal());
+        assert!(!SoftFloat::from_bits(0x3f80_0001).is_subnormal());
+        assert!(!SoftFloat::ONE.is_subnormal());
+        assert!(SoftFloat::MIN_POSITIVE.is_subnormal());
+        assert!(!SoftFloat::ONE.is_negative());
+        assert!(SoftFloat::NEG_ONE.is_negative());
+        assert!(SoftFloat::NEG_ZERO.is_negative());
+    }
+
+    #[test]
+    fn order_separates_neighbours_and_signs() {
+        assert_eq!(
+            SoftFloat::ONE.partial_cmp(&SoftFloat::TWO),
+            Some(Ordering::Less)
+        );
+        assert!(SoftFloat::from_bits(0x3f80_0001) > SoftFloat::ONE);
+        assert!(SoftFloat::NEG_ONE < SoftFloat::NEG_ZERO);
+        assert!(SoftFloat::NEG_ZERO < SoftFloat::ZERO);
+        assert!(SoftFloat::NEG_ONE < SoftFloat::ZERO);
+    }
+
+    #[test]
+    fn quiet_sets_only_the_nan_bit() {
+        // Arithmetic on a signalling NaN returns its quiet form, payload kept.
+        let signalling = SoftFloat::from_bits(0x7f80_0001);
+        assert_eq!((signalling + SoftFloat::ONE).to_bits(), 0x7fc0_0001);
+        assert_eq!(SoftFloat::ONE.quiet(), SoftFloat::ONE);
+    }
+
+    #[test]
+    fn fmod_with_a_nan_operand_is_nan() {
+        assert!(SoftFloat::ONE.fmod(SoftFloat::NAN).is_nan());
+        assert!(SoftFloat::NAN.fmod(SoftFloat::ONE).is_nan());
+    }
+
+    #[test]
+    fn subnormal_quotients_round_ties_to_even() {
+        // 2^-126 / 2^24 = 2^-150: an exact tie between 0 and the smallest subnormal, even wins.
+        let tiny = SoftFloat::from_bits(0x0080_0000) / SoftFloat::from_bits(0x4b80_0000);
+        assert_eq!(tiny, SoftFloat::ZERO);
+        // 3 * 2^-126 / 2^24 = 1.5 units of 2^-149: the tie goes to the even unit 2.
+        let three = SoftFloat::from_bits(0x0140_0000) / SoftFloat::from_bits(0x4b80_0000);
+        assert_eq!(three.to_bits(), 2);
+        // (2^24 - 1) * 2^-150 is a tie just under the smallest normal: it carries into it.
+        let carry = SoftFloat::from_bits(0x00ff_ffff) / SoftFloat::TWO;
+        assert_eq!(carry.to_bits(), 0x0080_0000);
+    }
+
+    #[test]
+    fn mask_bits_keeps_exactly_the_low_bits() {
+        assert_eq!(mask_bits(0), 0);
+        assert_eq!(mask_bits(1), 1);
+        assert_eq!(mask_bits(3), 7);
+        assert_eq!(mask_bits(127), u128::MAX >> 1);
+        assert_eq!(mask_bits(128), u128::MAX);
+    }
+
+    #[test]
+    fn isqrt_floors_at_the_edges() {
+        assert_eq!(isqrt(0), 0);
+        assert_eq!(isqrt(1), 1);
+        assert_eq!(isqrt(3), 1);
+        assert_eq!(isqrt(4), 2);
+        assert_eq!(isqrt(1 << 126), 1 << 63);
+        // Above 2^126 the first loop must not run away; the root is 2^64 - 1.
+        assert_eq!(isqrt(u128::MAX), u128::from(u64::MAX));
+    }
+
+    #[test]
+    fn div_round_is_nearest_with_ties_to_even() {
+        assert_eq!(div_round(9, 4), 2);
+        assert_eq!(div_round(11, 4), 3);
+        assert_eq!(div_round(13, 4), 3);
+        assert_eq!(div_round(14, 4), 4);
+        assert_eq!(div_round(10, 4), 2);
+        assert_eq!(div_round(13, 5), 3);
+        assert_eq!(div_round(7, 2), 4);
+        assert_eq!(div_round(5, 2), 2);
+    }
 }
