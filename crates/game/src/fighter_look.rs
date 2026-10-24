@@ -36,6 +36,7 @@ use engine_assets::skin_import::ImportedClip;
 use engine_core::Fnv64;
 use engine_render::contact_feet::{ContactFoot, CONTACT_FEET_MAX};
 use engine_render::draw::{trail_strip_verts, TrailStripVert};
+use engine_render::material_kind::MaterialKind;
 use engine_render::present::{DrawItem, DrawList, MeshKey, Presenter, TextureKey, TextureUpload};
 use engine_render::v1::{self, Camera, MeshData, PbrMaterial};
 use engine_render::v1_skin::{SkinPipeline, SkinWeights};
@@ -46,7 +47,7 @@ use crate::clip_events::ClipEventLane;
 use crate::fight_ring::FightRing;
 use crate::fighter_bind::{self, FighterBinding};
 use crate::stage_bodies::place_joint;
-use crate::view_truth::BodyTruth;
+use crate::view_truth::{BodyTruth, ANCHORS};
 use crate::weapon_trail::{TrailPoint, TrailRing, TRAIL_LEN};
 
 /// Fold plus bridge bulk, moved whole into the child module below so this
@@ -54,8 +55,15 @@ use crate::weapon_trail::{TrailPoint, TrailRing, TRAIL_LEN};
 /// fold live there, on the same paths as before. Presentation only.
 #[path = "fighter_look_acts.rs"]
 mod fighter_look_acts;
+#[path = "fighter_look_audit.rs"]
+mod fighter_look_audit;
 
 use self::fighter_look_acts::{bridge_act, bridge_slots};
+
+/// The first-person slot's body for its own eye: the head hidden, the mount points and the
+/// posed vertices for the view laws (row POV2, look audit 2026-10-24). Presentation only.
+#[path = "fighter_look_pov.rs"]
+mod fighter_look_pov;
 
 /// Run-clip events (BG5): the look's run phase feeds the std lane, whose
 /// foot plants the audio feed plays. Presentation only.
@@ -89,6 +97,13 @@ mod fighter_look_clamp;
 
 use self::fighter_look_clamp::LimitLane;
 
+/// The hit flash: a short bright pulse over the struck body, not a colour replace
+/// (`flash_pulse`, `flash_material`). Presentation only.
+#[path = "fighter_look_flash.rs"]
+mod fighter_look_flash;
+
+use self::fighter_look_flash::{flash_material, flash_pulse};
+
 /// The throwing arm of the spear grapple (SG3): the per-slot throw clock, the
 /// layer over the last pose and the palm positions a held spear ties to.
 /// Presentation only.
@@ -97,6 +112,27 @@ mod fighter_look_throw;
 
 pub use self::fighter_look_throw::ArmState;
 use self::fighter_look_throw::{throw_arm, Throw};
+
+/// The scene report's half of the look: posed fighters as scene things and the headless
+/// scene run (rows SP62, EG35). Presentation only.
+#[path = "fighter_look_scene.rs"]
+mod fighter_look_scene;
+
+pub use self::fighter_look_scene::{
+    mesh_owner, owner_id, shot_name, shot_named, MeshOwner, SceneRunSpec, SlotExtras,
+};
+
+/// The showcase tour folded headless into one `arena view:` line: what the
+/// window's `--showcase` run draws, as view laws with no window. Presentation only.
+#[path = "fighter_look_show.rs"]
+mod fighter_look_show;
+
+/// The hero's grafted sword and shield cut out of the body part and given iron, bronze,
+/// wood and paint of their own (the graft ships with no texture). Presentation only.
+#[path = "fighter_gear.rs"]
+mod fighter_gear;
+#[path = "fighter_gear_tex.rs"]
+mod fighter_gear_tex;
 
 /// Real-body proofs for the sand rest, the hitstop hold, clip switches and
 /// planted feet (a test-only file).
@@ -123,10 +159,25 @@ mod ragdoll_look;
 use self::ragdoll_look::RagdollLook;
 pub use self::ragdoll_look::RagdollStump;
 
+/// The hero's Roman kit: the plate suit comes off and a lorica, tunic, galea and greaves are built
+/// to fit the body under them, so no skin shows through and every piece has a back. Presentation
+/// only.
+#[path = "fighter_kit.rs"]
+mod fighter_kit;
+#[path = "fighter_kit_body.rs"]
+mod fighter_kit_body;
+#[path = "fighter_kit_tex.rs"]
+mod fighter_kit_tex;
+
 /// The realistic body family (Rocketbox bodies with their own clips) beside
 /// the CT7 bodies: same look, its own bind and per-rig clip sets.
 #[path = "fighter_look_family.rs"]
 mod fighter_look_family;
+
+/// The stands crowd's figure (RL64): one rig posed once and handed to the
+/// presenter's impostor baker. Presentation only.
+#[path = "fighter_look_crowd.rs"]
+mod fighter_look_crowd;
 /// Limb look (RZ3): an authority cut event hands the named joint's chain to the
 /// float physical layer and draws a stump cap where it left. Presentation only.
 #[path = "limb_look.rs"]
@@ -163,6 +214,9 @@ const CAPE_BODY_RADIUS_M: f32 = 0.16;
 /// drawn body is fuller than the ragdoll capsule, so the cloth rests on the
 /// surface instead of inside a thigh.
 const CAPE_LIMB_SKIN_M: f32 = 0.02;
+/// How far off a body capsule the soft cape's drawn sheet is held, meters: enough that the
+/// cloth sits on the armour instead of inside it, small enough to read as cloth.
+const CAPE_DRAW_SKIN_M: f32 = 0.015;
 /// A rival's body pushes this fighter's cape once their roots are this close
 /// on the ground plane, meters: a body leaning into a cape moves it.
 const CAPE_NEIGHBOR_M: f32 = 1.6;
@@ -194,6 +248,12 @@ fn cape_mesh_key(slot: usize) -> MeshKey {
 fn small_f32(n: usize) -> f32 {
     f32::from(u16::try_from(n).unwrap_or(u16::MAX))
 }
+
+/// The body capsules a cape draw keeps its cloth outside of.
+#[path = "fighter_look_cape_body.rs"]
+mod fighter_look_cape_body;
+
+use self::fighter_look_cape_body::CapeShell;
 
 /// The CT7 joints one rig's cape pins and collides with.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -252,13 +312,15 @@ struct CapePose {
     root: [f32; 3],
     /// Start and end of the slot's colliders in `Capes::bodies`.
     bodies: (usize, usize),
+    /// Start and end of the slot's capsules in `Capes::shells`.
+    shells: (usize, usize),
 }
 
 /// PX44c: the soft-cloth capes and the switch that draws them instead of the RZ7 chain.
 #[path = "fighter_look_soft_cape.rs"]
 mod fighter_look_soft_cape;
 
-use self::fighter_look_soft_cape::{cape_mesh_at, SOFT_CAPE_COLS, SOFT_CAPE_ROWS};
+use self::fighter_look_soft_cape::{cape_mesh_at, cape_mesh_two_sided};
 use self::fighter_look_soft_cape::{soft_cape_switch, SoftCape};
 
 /// The cape layer of a [`FighterLook`]: one Verlet sheet per look slot.
@@ -269,6 +331,8 @@ struct Capes {
     poses: [Option<CapePose>; MAX_LOOK_FIGHTERS],
     /// Every posed slot's colliders this tick (torso and limbs), slot order.
     bodies: Vec<ClothCollider>,
+    /// The same capsules as plain geometry, for the soft cape's draw-time push-out.
+    shells: Vec<CapeShell>,
     /// The colliders one cape steps against: its own body plus near rivals.
     near: Vec<ClothCollider>,
     /// Per slot: the sheet, `None` before the slot is first seen.
@@ -307,6 +371,7 @@ impl Capes {
             joints,
             poses: [None; MAX_LOOK_FIGHTERS],
             bodies: Vec::new(),
+            shells: Vec::new(),
             near: Vec::new(),
             sheets: vec![None; MAX_LOOK_FIGHTERS],
             outward: [[0.0, 0.0, -1.0]; MAX_LOOK_FIGHTERS],
@@ -364,6 +429,7 @@ impl FighterLook {
     fn cape_tick(&mut self) {
         self.capes.stepped = 0;
         self.capes.bodies.clear();
+        self.capes.shells.clear();
         for slot in 0..MAX_LOOK_FIGHTERS {
             self.capes.poses[slot] = self.cape_pose(slot);
         }
@@ -405,11 +471,27 @@ impl FighterLook {
         self.capes
             .bodies
             .extend(std::iter::once(torso).chain(limbs).flatten());
+        // The same capsules as plain geometry: the soft cape's draw pushes the cloth off
+        // them, since the cloth layer keeps its own collider geometry private.
+        let shell_start = self.capes.shells.len();
+        self.capes.shells.push(CapeShell {
+            a: at(joints.torso[1]),
+            b: at(joints.torso[0]),
+            radius: CAPE_BODY_RADIUS_M,
+        });
+        for &(a, b, radius) in joints.limbs() {
+            self.capes.shells.push(CapeShell {
+                a: at(a),
+                b: at(b),
+                radius,
+            });
+        }
         Some(CapePose {
             shoulders: [at(joints.shoulders[0]), at(joints.shoulders[1])],
             yaw_sc: sample.yaw.sin_cos(),
             root: anim.pos,
             bodies: (start, self.capes.bodies.len()),
+            shells: (shell_start, self.capes.shells.len()),
         })
     }
 
@@ -517,29 +599,19 @@ impl FighterLook {
                 continue;
             };
             let key = cape_mesh_key(slot);
-            let mesh = cape_mesh_at(positions, cols, rows, outward);
+            let mesh = if self.capes.soft.is_some() {
+                // A cloth is a sheet: draw both of its sides, or it vanishes from behind.
+                cape_mesh_two_sided(positions, cols, rows, outward)
+            } else {
+                cape_mesh_at(positions, cols, rows, outward)
+            };
             if presenter.upload_mesh(key, &mesh).is_ok() {
+                if presenter.material_kind(key) != MaterialKind::Cloth {
+                    presenter.set_material_kind(key, MaterialKind::Cloth);
+                }
                 self.capes.published.push(key);
             }
         }
-    }
-
-    /// The cape vertices `publish_capes` draws for `slot` this frame: the physfx soft
-    /// cloth's particles with the switch on, the RZ7 Verlet sheet with it off. `None`
-    /// leaves the slot without a cape draw.
-    fn cape_draw(&self, slot: usize) -> Option<(Vec<[f32; 3]>, usize, usize, [f32; 3])> {
-        if let Some(soft) = self.capes.soft.as_ref() {
-            let positions = soft.positions(slot)?;
-            return Some((
-                positions,
-                SOFT_CAPE_COLS,
-                SOFT_CAPE_ROWS,
-                soft.outward(slot),
-            ));
-        }
-        let grid = CAPE_TIER.knobs().cape;
-        let positions = self.cape_positions(slot)?.to_vec();
-        Some((positions, grid.cols, grid.rows, self.capes.outward[slot]))
     }
 
     /// Push one cloth draw per cape mesh this frame published. Returns draws. A
@@ -611,12 +683,6 @@ const IMPACT_TICKS: u32 = 12;
 /// Ticks a hit victim stays tinted: 0.25 s, as long as the light-attack
 /// tell that caused the hit, so one hit reads on screen and in the tally.
 const FLASH_TICKS: u32 = 15;
-/// Share of the green channel a flashing body keeps.
-const FLASH_GREEN_KEEP: f32 = 0.35;
-/// Share of the blue channel a flashing body keeps.
-const FLASH_BLUE_KEEP: f32 = 0.3;
-/// Exposure a flashing body draws at.
-const FLASH_EXPOSURE: f32 = 1.6;
 /// Farthest drawn attacker-to-victim gap that still tints the victim.
 /// Rules v1 lands every swing on every living foe at any range, so without
 /// this gate all eight bodies strobe red from the first exchange on.
@@ -650,12 +716,16 @@ const BALANCE_STUMBLE_LEAN_M: f32 = 0.18;
 /// and its rest pose hovers about 10 cm over it, so the cap sits above both
 /// and still stops a bad pose from flying or diving.
 const SAND_LIFT_MAX_M: f32 = 1.0;
-/// View-only shake added per in-reach Hit, in permille (LF11, view only).
-/// Presentation only; the sim hash never reads it.
+/// Highest the sim's root may stand and a body rising out of a ragdoll still rests on the sand
+/// both ways, in meters: past it the sim holds the body in the air (a jump), and it is not pulled
+/// down.
+const RISING_GROUND_M: f32 = 0.05;
+/// View-only shake added per in-reach light Hit, in permille (LF11, view only).
+/// The look now reads it from the impact rows (`content/design/impact.rows`);
+/// this is the number those rows must keep for a light blow, pinned by the
+/// shake tests below. Presentation only; the sim hash never reads it.
+#[cfg(test)]
 const SHAKE_HIT_PERMILLE: u32 = 400;
-/// View-only shake added per in-reach Knockdown, in permille (LF11).
-/// Presentation only; the sim hash never reads it.
-const SHAKE_KNOCKDOWN_PERMILLE: u32 = 700;
 /// Clamp for the fight-camera trauma, in permille (LF11).
 const SHAKE_MAX_PERMILLE: u32 = 1000;
 /// Trauma decayed per tick: 1000 per second at 60 Hz needs 16.67 per tick,
@@ -738,8 +808,19 @@ fn act_label(act: Act) -> &'static str {
     }
 }
 
+/// Mark a body drawn from its ragdoll bones. Physics owns it, so it is neither `idle` nor `run`
+/// whatever act the sim still reads for the slot: a fighter towed on a spear rope flies a meter
+/// up with the sim's act still `idle`, and the idle-float law took that flight for a hover.
+fn note_ragdoll(body: &mut BodyTruth, ragdolled: bool) {
+    body.ragdolled = ragdolled;
+    if ragdolled {
+        body.act = "down";
+    }
+}
+
 /// One body part ready to skin: bind mesh, rows, texture and factors.
 struct RigPart {
+    name: std::sync::Arc<str>,
     mesh: MeshData,
     skin: SkinWeights,
     texture: Option<(TextureKey, TextureUpload)>,
@@ -764,6 +845,8 @@ struct Rig {
     radius_m: f32,
     pipe: SkinPipeline,
     parts: Vec<RigPart>,
+    /// Joints the frame audit places (palms, weapon sockets).
+    anchors: [Option<usize>; ANCHORS],
     /// Clips in [`CLIP_FILES`] order, on this rig's skeleton.
     clips: Vec<ImportedClip>,
     /// Both legs by joint name; `None` plants no feet (LF12).
@@ -777,6 +860,11 @@ struct Rig {
 struct SlotAnim {
     act: Act,
     act_start: u32,
+    /// Ticks from the press to the blow of the swing in flight, when the
+    /// fight cued it on its press (EG19c); zero for a swing that started on
+    /// its outcome cue. The swing clip's clock bends around it
+    /// ([`crate::swing_time`]). Presentation only.
+    swing_lead: u32,
     /// The bridge's fade, mirrored in step with it: the leaving clip, its
     /// frozen time and the ticks left. Since LF9 the pose reads none of it (a
     /// clip switch rides on the `iz_age` offsets); the wire test and the
@@ -789,6 +877,10 @@ struct SlotAnim {
     pos: [f32; 3],
     prev_yaw: f32,
     yaw: f32,
+    /// View-driven turn-in-place offset for the presentation root (SW40): the
+    /// clamped bearing to the rival, eased by the aim gate. Presentation only;
+    /// `yaw` above stays the authority-facing value and is never written here.
+    turn: crate::turn_look::AimTurn,
     flash_until: u32,
     seen: bool,
     /// Planar meters per tick, set beside the speed pick in `fold_acts`.
@@ -810,6 +902,10 @@ struct SlotAnim {
     /// World-space planar push away from the attacker at `hit_start`,
     /// unit length or zero. Presentation only.
     hit_push: [f32; 2],
+    /// The flinch the last hit on this slot plays: picked by where the blow
+    /// came from and how hard it landed ([`crate::hit_reaction`]). The
+    /// reference flinch until a hit lands. Presentation only.
+    hit_shape: crate::hit_reaction::Shape,
     /// True while the sim's hitstop holds this slot's pose (LF10): the clip
     /// clock, the blend, the flinch and the facing stand still, and every
     /// frame of the freeze samples the pose of its tick. Presentation only.
@@ -825,13 +921,18 @@ struct SlotAnim {
     /// The spear throw's clock (SG3): ticks since the spear left the hand.
     /// Presentation only.
     throw: Throw,
+    /// The window's first-person eye sits in this slot's head: the body draws without its head
+    /// and carries its own pose for the view laws ([`FighterLook::set_pov_slot`]).
+    /// Presentation only.
+    pov: bool,
 }
 
 impl SlotAnim {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             act: Act::Idle,
             act_start: 0,
+            swing_lead: 0,
             prev_clip: 0,
             prev_time: 0.0,
             fade_left: 0,
@@ -840,6 +941,7 @@ impl SlotAnim {
             pos: [0.0; 3],
             prev_yaw: 0.0,
             yaw: 0.0,
+            turn: crate::turn_look::AimTurn::new(),
             flash_until: 0,
             seen: false,
             run_speed: 0.0,
@@ -847,10 +949,12 @@ impl SlotAnim {
             balance: GaitPhase::Steady,
             hit_start: u32::MAX,
             hit_push: [0.0, 0.0],
+            hit_shape: crate::hit_reaction::Shape::NEUTRAL,
             held: false,
             iz_age: fighter_look_inertia::NO_OFFSET,
             feet: Feet::new(),
             throw: Throw::NONE,
+            pov: false,
         }
     }
 
@@ -1124,13 +1228,19 @@ fn upload_slot_parts(
         split.pose_us = split
             .pose_us
             .saturating_add(micros(engine_clock::since(lifted_started)));
+        let key = look_mesh_key(slot_index, part_index);
+        // LF8: the scene owner's per-part kind table. Set before the resident
+        // early-out so a fresh presenter (device lost, resize) regains it.
+        let kind = part_material_kind(&part.name);
+        if presenter.material_kind(key) != kind {
+            presenter.set_material_kind(key, kind);
+        }
         let slot_part = slot_index * MAX_PARTS + part_index;
         if digests.get(slot_part) == Some(&Some(digest)) {
             // Resident bytes already are this frame's bytes: no upload.
             split.uploaded += 1;
             continue;
         }
-        let key = look_mesh_key(slot_index, part_index);
         // 48 B stride fix: always re-upload with recomputed tangents; never
         // refresh 32 B in place (misaligned past vertex 0, streaks).
         let upload_started = engine_clock::now();
@@ -1147,6 +1257,22 @@ fn upload_slot_parts(
         split.uploaded += 1;
     }
     Ok(split)
+}
+
+/// LF8: the shading family of one body or gear part from its imported
+/// material name. The shipped bodies name their materials `*_q0..q3` (q0 the
+/// chest garment, q1 skin and hair, q2 metal armor, q3 legs); the grafted
+/// gear names itself in `fighter_gear::Kind::name`. An unknown name stays
+/// stone, exactly the path every part drew before this table existed.
+fn part_material_kind(name: &str) -> MaterialKind {
+    match name {
+        "gladius_blade" | "gladius_fittings" => MaterialKind::Metal,
+        "scutum_face" => MaterialKind::Cloth,
+        _ if name.ends_with("_q0") => MaterialKind::Cloth,
+        _ if name.ends_with("_q1") || name.ends_with("_q3") => MaterialKind::Skin,
+        _ if name.ends_with("_q2") => MaterialKind::Metal,
+        _ => MaterialKind::Stone,
+    }
 }
 
 // Note: the authoritative read is `engine-arena` `Sim::balance` (already
@@ -1341,18 +1467,17 @@ const WIDE_STEP_M: f32 = 1.0;
 const WIDE_MAX_M: f32 = 48.0;
 /// Orbit azimuths tried per group shot: the wanted one and its mirrors.
 const WIDE_ORBITS: u8 = 16;
-/// Spare pit room (meters) that makes an orbit comfortable: the wanted orbit
-/// keeps the shot while it holds this much, so a body drifting at the edge of
-/// the pit does not flip the eye across the arena.
-const WIDE_SLACK_M: f32 = 3.0;
 /// Halvings that tighten a found eye distance below [`WIDE_STEP_M`].
 const WIDE_REFINE: u8 = 4;
 
 /// A wider eye for the seen bodies (`seen`, floor positions) when `current`
-/// drops one. Orbits nearest the `wanted` azimuth go first, each walked out
-/// from [`WIDE_START_M`] while the pit has room for the eye; the first orbit
-/// that holds every body with [`WIDE_SLACK_M`] to spare wins, else the one
-/// with the most spare room. When no orbit holds them all, the eye that holds
+/// drops one. The bearing to the pit corner of the `wanted` quadrant goes
+/// first, then the orbits nearest `wanted`, each walked out from
+/// [`WIDE_START_M`] while the pit has room for the eye; the first orbit that
+/// holds every body wins, so the eye stays on one side while it can and
+/// glides with the bodies. Ranking orbits by spare room instead flipped the
+/// eye between near-tied pit corners on noise (a 41 m jump in one tick of
+/// the 8-body arena run). When no orbit holds them all, the eye that holds
 /// the most, if more than `current` does. `None` keeps `current`. Pure
 /// presentation.
 fn wide_group_camera(
@@ -1384,12 +1509,19 @@ fn wide_group_camera(
         };
         shot_camera(base, spec, limit, shake)
     };
-    let mut whole: Option<(f32, Camera)> = None;
     let mut part: Option<(usize, Camera)> = None;
-    for orbit in 0..WIDE_ORBITS {
+    // The pit corner of the wanted quadrant first: the roomiest eye, and its
+    // bearing turns smoothly as the bodies move. The fixed orbits follow.
+    let corner = [
+        limit.copysign(wanted.sin()) - focus[0],
+        limit.copysign(wanted.cos()) - focus[2],
+    ];
+    let orbits = (0..WIDE_ORBITS).map(|orbit| {
         let steps = f32::from(orbit.div_ceil(2));
         let side = if orbit % 2 == 1 { steps } else { -steps };
-        let azimuth = wanted + side * std::f32::consts::FRAC_PI_8;
+        wanted + side * std::f32::consts::FRAC_PI_8
+    });
+    for azimuth in std::iter::once(corner[0].atan2(corner[1])).chain(orbits) {
         let room = pit_room(focus, azimuth, limit).min(WIDE_MAX_M);
         let mut distance = WIDE_START_M;
         while distance <= room {
@@ -1413,14 +1545,7 @@ fn wide_group_camera(
                         near = mid;
                     }
                 }
-                let slack = room - hit.0;
-                if slack >= WIDE_SLACK_M {
-                    return Some(hit.1);
-                }
-                if whole.as_ref().is_none_or(|(most, _)| slack > *most) {
-                    whole = Some((slack, hit.1));
-                }
-                break;
+                return Some(hit.1);
             }
             if held > kept && part.as_ref().is_none_or(|(most, _)| held > *most) {
                 part = Some((held, camera));
@@ -1428,9 +1553,7 @@ fn wide_group_camera(
             distance += WIDE_STEP_M;
         }
     }
-    whole
-        .map(|(_, camera)| camera)
-        .or_else(|| part.map(|(_, camera)| camera))
+    part.map(|(_, camera)| camera)
 }
 
 /// The fighter look: rigs, per-slot anim state and the last tick seen.
@@ -1564,38 +1687,6 @@ fn same_name_map(source: &Skeleton, target: &Skeleton) -> Result<BoneMap, LookEr
     BoneMap::build(source, target, &pairs).map_err(|err| LookError::Import(format!("{err:?}")))
 }
 
-/// Farthest a bind vertex sits from its nearest bind joint, in meters.
-/// Pure `f32` in, same `f32` out; a non-finite vertex reads as infinity so
-/// the caller skips it, never a panic.
-fn nearest_joint_d(joints: &[[f32; 3]], vertex: [f32; 3]) -> f32 {
-    let mut nearest = f32::MAX;
-    for joint in joints.iter() {
-        let dx = vertex[0] - joint[0];
-        let dy = vertex[1] - joint[1];
-        let dz = vertex[2] - joint[2];
-        nearest = nearest.min(dx * dx + dy * dy + dz * dz);
-    }
-    nearest.sqrt()
-}
-
-/// Skin radius of one rig in meters: the farthest any bind vertex sits from
-/// its nearest bind joint, plus 10 cm, floored at 0.5 m. The joints-only
-/// pose pads placed joints by this radius so its bounds hold the skinned
-/// vertex bounds. Cold path only (once per rig at load); pure `f32` in,
-/// same `f32` out; a non-finite vertex never moves the radius.
-fn skin_radius_m(body: &SkinnedBody) -> f32 {
-    let mut radius = 0.5f32;
-    for part in body.parts.iter() {
-        for vertex in part.mesh.positions.iter() {
-            let d = nearest_joint_d(&body.bind.positions, *vertex);
-            if d.is_finite() {
-                radius = radius.max(d + 0.10);
-            }
-        }
-    }
-    radius
-}
-
 /// Posed bound of one skinned body in world meters: the axis-box centre over
 /// every posed vertex plus the farthest vertex gap from it, or `None` when no
 /// finite vertex folds in. This is the bound a draw carries, so culling
@@ -1684,8 +1775,10 @@ fn load_rig(
     if sha_hex(&bytes) != binding.body_glb_sha256 {
         return Err(LookError::ShaMismatch(binding.variant.clone()));
     }
-    let body = import_skinned_body(&bytes)
+    let mut body = import_skinned_body(&bytes)
         .map_err(|err| LookError::Import(format!("{}: {err}", binding.variant)))?;
+    // The hero's graft is cut out of the body part and drawn with its own materials.
+    fighter_gear::arm_hero(&mut body);
     if body.parts.len() > MAX_PARTS {
         return Err(LookError::Import(format!(
             "{}: {} parts over {MAX_PARTS}",
@@ -1693,6 +1786,9 @@ fn load_rig(
             body.parts.len()
         )));
     }
+    // The plate suit comes off the hero and a legionary's kit is fitted to the body under it.
+    let mut body = body;
+    fighter_kit_body::dress(&mut body, &binding.variant);
     let mut pipe = SkinPipeline::new();
     pipe.upload_skeleton(body.skeleton.len())
         .map_err(|err| LookError::Skin(format!("{err:?}")))?;
@@ -1730,6 +1826,7 @@ fn load_rig(
             .validate()
             .map_err(|err| LookError::Import(format!("material: {err}")))?;
         parts.push(RigPart {
+            name: part.name.as_str().into(),
             mesh,
             skin,
             texture,
@@ -1756,7 +1853,8 @@ fn load_rig(
         .ok_or_else(|| LookError::Import(format!("{}: no head joint", binding.variant)))?;
     let clips = retarget_clips(sources, &body)?;
     Ok(Rig {
-        radius_m: skin_radius_m(&body),
+        radius_m: fighter_look_family::skin_radius_m(&body),
+        anchors: fighter_look_audit::anchor_joints(&body.skeleton),
         legs: Legs::find(&body.skeleton, &body.bind.positions),
         throw_arm: throw_arm(&body.skeleton),
         variant: binding.variant.clone(),
@@ -1859,7 +1957,11 @@ fn mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
 fn slot_root(slot: &SlotAnim, alpha: f32) -> ([f32; 3], f32) {
     let mut pos: [f32; 3] =
         std::array::from_fn(|i| slot.prev_pos[i] + (slot.pos[i] - slot.prev_pos[i]) * alpha);
-    let yaw = slot.prev_yaw + angle_delta(slot.prev_yaw, slot.yaw) * alpha;
+    // The presentation root carries the turn-in-place offset on top of the
+    // authority yaw; `slot.yaw` itself is never written by it (SW40).
+    let yaw = slot.prev_yaw
+        + angle_delta(slot.prev_yaw, slot.yaw) * alpha
+        + slot.turn.root_offset_deg().to_radians();
     // Balance lean (EG45): a stumbling root steps forward along its
     // facing; every other gait holds. Presentation only.
     let lean = balance_lean_m(slot.balance);
@@ -1906,21 +2008,6 @@ pub fn look_mesh_key(slot: usize, part: usize) -> MeshKey {
     digest[0] = u8::try_from(slot).unwrap_or(u8::MAX);
     digest[1] = u8::try_from(part).unwrap_or(u8::MAX);
     MeshKey::new(id, digest)
-}
-
-/// The hit-flash material for a body part: red-shifted albedo (the shader
-/// multiplies it into the base-color map) and a brighter exposure. Pure; a
-/// finite valid input stays finite and valid.
-#[must_use]
-fn flash_material(base: &PbrMaterial) -> PbrMaterial {
-    let mut flash = base.clone();
-    flash.base_color = [
-        base.base_color[0],
-        base.base_color[1] * FLASH_GREEN_KEEP,
-        base.base_color[2] * FLASH_BLUE_KEEP,
-    ];
-    flash.exposure = FLASH_EXPOSURE;
-    flash
 }
 
 /// GPU skin availability probe behind the window path.
@@ -2115,6 +2202,9 @@ impl FighterLook {
         // Once per accepted tick (the window calls this right after `observe_tick`): spawn
         // what the tick floored, step the float world one tick, stand up what recovered.
         self.ragdoll_tick();
+        // The ragdoll step moved the get-up age and the standing reactions behind the clamp's
+        // sample of this tick: retake it so the next tick caps against the pose that was drawn.
+        self.resample_limit_positions();
     }
 
     /// Fold view-only shake trauma (LF11): saturating add, clamped at
@@ -2170,12 +2260,22 @@ impl FighterLook {
         if slot.act == Act::Down {
             return;
         }
+        // EG19c: a swing the fight cued on its press is already playing; the
+        // outcome cue of its blow is its impact, not a new swing.
+        if self
+            .bridge
+            .get(index)
+            .is_some_and(|bridge| bridge.in_press_swing(tick))
+        {
+            return;
+        }
         if let Some(slot) = self.slots.get_mut(index) {
             // A swing already in flight keeps playing; a new one restarts.
             let variant = slot.swings % 3;
             slot.swings = slot.swings.wrapping_add(1);
             slot.act = Act::Attack(variant);
             slot.act_start = tick.saturating_sub(IMPACT_TICKS);
+            slot.swing_lead = 0;
         }
         // Trail samples land in `feed_trails` once per tick, so one swing
         // start never pushes twice. Never hashed.
@@ -2191,7 +2291,12 @@ impl FighterLook {
             let (seen, attacking, pos, yaw) = match self.slots.get(index) {
                 Some(slot) => (
                     slot.seen,
-                    matches!(slot.act, Act::Attack(_)),
+                    // EG19c: the ribbon draws from the strike, not the windup.
+                    matches!(slot.act, Act::Attack(_))
+                        && crate::swing_time::strike_live(
+                            self.tick.saturating_sub(slot.act_start),
+                            slot.swing_lead,
+                        ),
                     slot.pos,
                     slot.yaw,
                 ),
@@ -2275,6 +2380,10 @@ impl FighterLook {
             Act::Run => (1, slot.run_clip_s(alpha)),
             Act::Attack(variant) => {
                 let index = 2 + usize::from(variant.min(2));
+                // EG19c: a swing cued on its press bends its clock so the
+                // clip's impact frame meets the blow; no lead plays it 1:1.
+                let t = crate::swing_time::clip_ticks(since + alpha, slot.swing_lead, IMPACT_TICKS)
+                    / TICK_HZ;
                 if t < duration(index) {
                     (index, t)
                 } else {
@@ -2354,7 +2463,12 @@ impl FighterLook {
         if slot.hit_start == u32::MAX {
             return 0.0;
         }
-        view_envelope(self.tick.wrapping_sub(slot.hit_start), 0.0)
+        // The reaction row sets how long the flinch reads: a longer one plays
+        // the same envelope slower (the reference row scales by exactly one).
+        let (whole, alpha) = slot
+            .hit_shape
+            .envelope_at(self.tick.wrapping_sub(slot.hit_start));
+        view_envelope(whole, alpha)
     }
 
     /// Add the hit flinch to `pose`: pelvis push plus dip, then the
@@ -2370,20 +2484,43 @@ impl FighterLook {
         if weight <= 0.0 || (slot.hit_push[0] == 0.0 && slot.hit_push[1] == 0.0) {
             return Ok(0.0);
         }
-        let planar = 0.5 * PEAK_M * weight;
-        let dip = 0.5 * DIP_M * weight;
+        // The reaction row (`hit-reactions.rows`) scales the reference flinch
+        // by where the blow came from and how hard it landed.
+        let shape = slot.hit_shape;
+        let planar = 0.5 * PEAK_M * weight * shape.push;
+        let dip = 0.5 * DIP_M * weight * shape.dip;
         pose.positions[rig.pelvis][0] += slot.hit_push[0] * planar;
         pose.positions[rig.pelvis][2] += slot.hit_push[1] * planar;
         pose.positions[rig.pelvis][1] -= dip;
-        let head_m = lean_upper(
+        // The lean takes a unit weight at most; a harder blow leans on past it
+        // about the same axis, where the angles add.
+        let lean = weight * shape.lean;
+        let mut head_m = lean_upper(
             &rig.skeleton,
             pose,
             rig.torso,
             rig.head,
             slot.hit_push,
-            weight,
+            lean.min(1.0),
         )
         .map_err(|err| LookError::Skin(err.to_string()))?;
+        if lean > 1.0 {
+            head_m += lean_upper(
+                &rig.skeleton,
+                pose,
+                rig.torso,
+                rig.head,
+                slot.hit_push,
+                lean - 1.0,
+            )
+            .map_err(|err| LookError::Skin(err.to_string()))?;
+        }
+        if shape.twist_rad != 0.0 {
+            // A flank blow turns the torso away about the vertical.
+            let (sin, cos) = (0.5 * shape.twist_rad * weight).sin_cos();
+            pose.rotations[rig.torso] =
+                engine_core::quat_mul([0.0, sin, 0.0, cos], pose.rotations[rig.torso]);
+        }
         Ok(head_m)
     }
 
@@ -2567,6 +2704,11 @@ impl FighterLook {
                 .zip(rig.inverse_binds.iter())
                 .map(|(joint, inverse)| mul(&mul(inverse, joint), &root))
                 .collect();
+            // First person: the wearer's own head leaves the picture; its mount points ride this pose.
+            let mounts = slot
+                .pov
+                .then(|| fighter_look_pov::hide_head(rig, &mut matrices))
+                .flatten();
             let uniform = rig
                 .pipe
                 .skinning_uniform(&matrices)
@@ -2587,7 +2729,7 @@ impl FighterLook {
             body.clip_s = sample.time;
             body.tinted = self.tick < slot.flash_until;
             body.foot_slide_m = sample.slides;
-            body.ragdolled = self.ragdolled(slot_index);
+            note_ragdoll(&mut body, self.ragdolled(slot_index));
             body.react_head_m = sample.react_head_m;
             let mut frames = Vec::with_capacity(rig.parts.len());
             let owner = self.limb_owner(slot_index, rig);
@@ -2608,7 +2750,15 @@ impl FighterLook {
             let lift = if !body.has_bounds() {
                 0.0
             } else if self.ragdoll_rests(slot_index) {
-                sand_lift_m(body.min[1])
+                // A body rising out of a landed ragdoll rests on the sand both ways: the get-up
+                // blend swings the feet up to 47 cm off it while the pelvis climbs, and the
+                // idle-float law (rightly) called that a hover. A flying ragdoll, or a body the
+                // sim holds off the ground, is lifted only.
+                if self.ragdolled(slot_index) || pos[1] > RISING_GROUND_M {
+                    sand_lift_m(body.min[1])
+                } else {
+                    sand_rest_shift_m(body.min[1])
+                }
             } else if lies_on_sand(&slot) {
                 sand_rest_shift_m(body.min[1])
             } else {
@@ -2625,6 +2775,7 @@ impl FighterLook {
                     matrix[3][1] += lift;
                 }
             }
+            rig.audit_fold(&mut body, &frames, lift, &sample.world, &root);
             let mut drawn = PosedBody {
                 truth: body,
                 frames,
@@ -2637,6 +2788,15 @@ impl FighterLook {
             // sphere it replaces.
             drawn.bound =
                 posed_bound_m(&drawn).map(|(centre, radius)| (centre, radius.max(rig.radius_m)));
+            if let Some(mounts) = mounts {
+                let root = drawn.truth.root;
+                drawn.truth.pov = Some(Box::new(fighter_look_pov::pov_body(
+                    &mounts,
+                    &drawn.frames,
+                    root,
+                    lift,
+                )));
+            }
             posed.push(drawn);
         }
         Ok(posed)
@@ -2690,7 +2850,7 @@ impl FighterLook {
             body.clip_s = sample.time;
             body.tinted = self.tick < slot.flash_until;
             body.foot_slide_m = sample.slides;
-            body.ragdolled = self.ragdolled(slot_index);
+            note_ragdoll(&mut body, self.ragdolled(slot_index));
             body.react_head_m = sample.react_head_m;
             if let Some((lo, hi)) = crate::stage_bodies::joints_bounds(&placed, rig.radius_m) {
                 body.min = lo;
@@ -2892,13 +3052,14 @@ impl FighterLook {
             }
             let rig = &self.rigs[self.rig_for_slot(slot_index)];
             let flash = self.tick < slot.flash_until;
+            let pulse = flash_pulse(slot.flash_until.saturating_sub(self.tick));
             for (part_index, part) in rig.parts.iter().enumerate() {
                 let key = look_mesh_key(slot_index, part_index);
                 if !resident.contains(&key) {
                     continue;
                 }
                 let material = if flash {
-                    flash_material(&part.material)
+                    flash_material(&part.material, pulse)
                 } else {
                     part.material.clone()
                 };
@@ -2946,7 +3107,11 @@ impl FighterLook {
             .map_err(|err| LookError::Ring(err.to_string()))?;
         ring.stage(presenter)
             .map_err(|err| LookError::Ring(err.to_string()))?;
+        let wall_m = ring.wall_m;
         look.ring = Some(ring);
+        // The stands crowd: the body baked once into the impostor atlas, the
+        // 96 seats staged as instances the forward pass draws in one call.
+        crate::fight_ring::crowd_stands::stage_crowd(presenter, &look, wall_m)?;
         Ok(look)
     }
 
@@ -3008,17 +3173,12 @@ impl FighterLook {
         feet
     }
 
-    /// Seen fighters whose chest (1 m up) is in `camera`'s picture: the
-    /// window's framing check, 0 when the shot shows nobody.
+    /// Seen fighters whose drawn body is in `camera`'s picture (its middle, where
+    /// it is drawn, so a body in the air counts in the air): the window's framing
+    /// check, 0 when the shot shows nobody.
     #[must_use]
     pub fn fighters_in_view(&self, camera: &Camera, fighters: usize) -> usize {
-        let chests = self
-            .slots
-            .iter()
-            .take(fighters.min(MAX_LOOK_FIGHTERS))
-            .filter(|slot| slot.seen)
-            .map(|slot| [slot.pos[0], 1.0, slot.pos[2]]);
-        count_in_picture(camera, chests)
+        self.bodies_in_view(camera, fighters)
     }
 
     /// Fighters under `fighters` the look has folded at least one tick for:
@@ -3105,15 +3265,46 @@ impl FighterLook {
     /// wide arena view, orbiting slowly with `frame`. Pure presentation.
     /// View-only shake (LF11): the same [`crate::camera::shake_offset`]
     /// offset moves both eye and target, so the frame translates while the
-    /// view direction holds; zero trauma leaves the shot untouched.
+    /// view direction holds; zero trauma leaves the shot untouched. The shot is
+    /// refit so the bodies it follows stay in the picture (`fighter_look_frame`).
     #[must_use]
     pub fn fight_camera(&self, base: &Camera, shot: Shot, fighters: usize, frame: u32) -> Camera {
-        self.fight_camera_with(base, shot, fighters, frame, self.fight_shake_vec())
+        // The refit must not see the shake: it would read the offset as a body out of
+        // frame and move the eye against it, partly undoing the tremble.
+        let calm = self.fight_camera_with(base, shot, fighters, frame, [0.0; 3], None);
+        let framed = self.frame_still(calm, shot, fighters);
+        Self::shake_shot(&framed, base, self.fight_shake_vec())
+    }
+
+    /// `camera` translated by `shake` on eye and target together, the view direction
+    /// held; `base` comes back when the shaken shot does not validate.
+    fn shake_shot(camera: &Camera, base: &Camera, shake: [f32; 3]) -> Camera {
+        let mut shaken = camera.clone();
+        let eye = shaken.eye.to_array();
+        shaken.eye = [
+            eye[0] + shake[0],
+            eye[1] + shake[1],
+            eye[2] + shake[2],
+        ]
+        .into();
+        let target = shaken.target.to_array();
+        shaken.target = [
+            target[0] + shake[0],
+            target[1] + shake[1],
+            target[2] + shake[2],
+        ]
+        .into();
+        if shaken.validate().is_ok() {
+            shaken
+        } else {
+            base.clone()
+        }
     }
 
     /// The shot of [`Self::fight_camera`] with `shake` moving eye and target
     /// together; `[0.0; 3]` is the calm shot the stateful follower smooths
-    /// (`fighter_look_cam`) before it adds the shake back.
+    /// (`fighter_look_cam`) before it adds the shake back. `hint` is the threat
+    /// slot the follower held last frame (`fighter_look_frame`).
     #[must_use]
     fn fight_camera_with(
         &self,
@@ -3122,16 +3313,12 @@ impl FighterLook {
         fighters: usize,
         frame: u32,
         shake: [f32; 3],
+        hint: Option<u8>,
     ) -> Camera {
-        // The hero first (the shoulder shot rides the first body), then the rest in slot order.
+        // The hero first (the shoulder shot rides the first body), then the rest in slot
+        // order; the fight shot with a hero among three or more keeps just his pair.
         let fighters = fighters.min(MAX_LOOK_FIGHTERS);
-        let seen: Vec<[f32; 3]> = std::iter::once(self.hero)
-            .filter(|hero| *hero < fighters)
-            .chain((0..fighters).filter(|index| *index != self.hero))
-            .filter_map(|index| self.slots.get(index))
-            .filter(|slot| slot.seen)
-            .map(|slot| slot.pos)
-            .collect();
+        let seen = self.framed_positions(fighters, shot, hint);
         let Some(first) = seen.first().copied() else {
             return base.clone();
         };
@@ -3395,11 +3582,15 @@ mod tests {
             [0.0, 1.0, 0.0],
             50.0f32.to_radians(),
         );
+        // With a hero among four the camera follows his fight, not the whole pack:
+        // the hero and the threat nearest him in the picture, big enough to read.
         let cam = look.fight_camera(&base, Shot::Action, 4, 0);
-        assert_eq!(
-            look.fighters_in_view(&cam, 4),
-            4,
-            "both pairs stay in the 60 deg picture"
+        let read = look.frame_read(&cam, &[0, 1]).expect("in front");
+        assert!(read.verdict(2).in_safe, "hero and nearest threat in picture");
+        assert!(
+            read.size_max >= crate::camera_frame::HEIGHT_FLOOR,
+            "and readable: {}",
+            read.size_max
         );
     }
 
@@ -3464,12 +3655,19 @@ mod tests {
             (eye[0] + 8.0).hypot(eye[2] - 1.0) < 6.0,
             "eye rides the hero, not the far side of the pit: {eye:?}"
         );
-        // A third body hands the shot back to the group fit (high boom).
+        // A third body no longer hands the shot to a high group boom that shrinks the
+        // hero to a speck: the shot stays on the hero and the threat nearest him (the
+        // third body here, 11 m off against 15), shoulder-high on his side.
         let three = look_at(&[[-8.0, 1.0], [7.0, -2.0], [0.0, 9.0]]);
         let group = three.fight_camera(&arena_base(), Shot::Action, 3, 0);
         assert!(
-            group.eye.y > 2.5,
-            "three bodies keep the group fit: {:?}",
+            (group.eye.y - 1.9).abs() < 0.3,
+            "three bodies keep the hero's shoulder shot: {:?}",
+            group.eye
+        );
+        assert!(
+            (group.eye.x + 8.0).hypot(group.eye.z - 1.0) < 6.0,
+            "eye rides the hero: {:?}",
             group.eye
         );
         // The directed run's hero close-up never takes the duel shot.
@@ -3541,13 +3739,21 @@ mod tests {
     }
 
     #[test]
-    fn fight_camera_frames_every_live_body_at_the_arena_spread() {
-        // The hero's duel shot held 2 of 8 here; the fight shot holds all.
+    fn fight_camera_frames_the_hero_and_his_threat_at_the_arena_spread() {
+        // Eight bodies over a 36 by 30 m field: holding all of them made every body a
+        // speck (staged four-fighter bout, 2026-10-24: 8 percent of the frame). The shot
+        // holds the hero and the threat nearest him, both in picture, the hero readable.
         for spread in &ARENA_SPREADS {
             let look = look_at(spread);
             let cam = look.fight_camera(&arena_base(), Shot::Action, 8, 0);
             assert_eq!(look.fighters_seen(8), 8);
-            assert_eq!(look.fighters_in_view(&cam, 8), 8, "every body in picture");
+            let read = look.frame_read(&cam, &[0, 2]).expect("in front");
+            assert!(read.verdict(2).in_safe, "both bodies in picture: {read:?}");
+            assert!(
+                read.size_max >= crate::camera_frame::HEIGHT_FLOOR,
+                "{}",
+                read.size_max
+            );
         }
     }
 
@@ -3565,8 +3771,9 @@ mod tests {
                 let eye = cam.eye.to_array();
                 let focus = cam.target.to_array();
                 let reach = (eye[0] - focus[0]).hypot(eye[2] - focus[2]);
+                // The framing refit may lift the eye a hand's width to keep a head in picture.
                 assert!(
-                    eye[1] <= 1.6 + 0.07 * reach + 1.0e-2,
+                    eye[1] <= 1.6 + 0.07 * reach + 0.25,
                     "tick {tick}: eye {eye:?} rises above 1.6 + 0.07 * {reach} m"
                 );
                 let bearing = eye[0].atan2(eye[2]);
@@ -3618,6 +3825,7 @@ mod tests {
         let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
         let human = engine_input::FighterId::new(crate::HUMAN_SLOT).expect("human slot");
         let (mut last_eye, mut max_step): (Option<[f32; 3]>, f32) = (None, 0.0);
+        let mut worst = String::new();
         for tick in 0..300 {
             let idle = engine_input::FighterInput {
                 tick,
@@ -3638,7 +3846,10 @@ mod tests {
             let eye = cam.eye.to_array();
             if let Some(prev) = last_eye {
                 let step = ((eye[0] - prev[0]).powi(2) + (eye[2] - prev[2]).powi(2)).sqrt();
-                max_step = max_step.max(step);
+                if step > max_step {
+                    max_step = step;
+                    worst = format!("tick {tick}: {prev:?} to {eye:?}");
+                }
             }
             last_eye = Some(eye);
             assert!(
@@ -3648,7 +3859,7 @@ mod tests {
         }
         // The eye glides with the bodies; a flip to another orbit would jump
         // tens of meters in one tick.
-        assert!(max_step < 1.0, "eye jumped {max_step} m in one tick");
+        assert!(max_step < 1.0, "eye jumped {max_step} m in one tick ({worst})");
     }
 
     #[test]
@@ -4410,11 +4621,20 @@ mod tests {
         assert!(parts.iter().any(|p| p.0 == 1), "the victim is drawn");
         for (slot, part, plain, drawn) in &parts {
             if *slot == 1 {
-                assert_eq!(drawn, &flash_material(plain), "victim part {part}");
+                // The hit tick is the peak of the pulse: all 15 ticks left.
+                assert_eq!(
+                    drawn,
+                    &flash_material(plain, flash_pulse(FLASH_TICKS)),
+                    "victim part {part}"
+                );
                 assert!(drawn.exposure > plain.exposure, "brighter");
                 assert!(
                     drawn.base_color[1] < plain.base_color[1],
-                    "green drops, so the body reads red"
+                    "green drops, so the body reads warm"
+                );
+                assert!(
+                    drawn.base_color[1] >= 0.8 * plain.base_color[1],
+                    "the albedo keeps its detail, never a colour replace"
                 );
                 assert!(drawn.validate().is_ok(), "the presenter accepts it");
             } else {
@@ -4430,24 +4650,6 @@ mod tests {
         assert_eq!(look.tinted(2), (0, 2), "the flash is spent");
         for (slot, part, plain, drawn) in drawn_parts(&look, 2) {
             assert_eq!(plain, drawn, "slot {slot} part {part} plain again");
-        }
-    }
-
-    #[test]
-    fn flash_material_shifts_red_and_stays_valid() {
-        for base in [[1.0, 1.0, 1.0], [0.2, 0.5, 0.9], [0.0, 0.0, 0.0]] {
-            let plain = PbrMaterial {
-                base_color: base,
-                metallic: 0.1,
-                roughness: 0.6,
-                exposure: 1.0,
-            };
-            let flash = flash_material(&plain);
-            assert_eq!(flash.base_color[0], base[0], "red is kept");
-            assert!(flash.base_color[1] <= base[1] && flash.base_color[2] <= base[2]);
-            assert_eq!(flash.exposure, FLASH_EXPOSURE);
-            assert_eq!((flash.metallic, flash.roughness), (0.1, 0.6));
-            assert!(flash.validate().is_ok(), "{base:?} stays a valid material");
         }
     }
 
@@ -4743,26 +4945,37 @@ mod tests {
                 .expect("capture is a PNG")
                 .rgba
         };
+        // The pulse is strongest on the hit tick: draw this frame at the peak.
+        look.slots[1].flash_until = look.tick + FLASH_TICKS;
         let tinted = shoot(&mut look);
         look.slots[1].flash_until = 0;
         let plain = shoot(&mut look);
-        // Redness is red over the mean of green and blue, summed on the
-        // pixels the flash changed.
-        let (mut changed, mut red_on, mut red_off) = (0u32, 0.0f64, 0.0f64);
+        // The flash lights the body up: brighter on the pixels it changed, and
+        // never cooler.
+        let (mut changed, mut lum_on, mut lum_off) = (0u32, 0.0f64, 0.0f64);
+        let (mut warm_on, mut warm_off) = (0.0f64, 0.0f64);
         for (a, b) in tinted.chunks_exact(4).zip(plain.chunks_exact(4)) {
             if a[..3] == b[..3] {
                 continue;
             }
             changed += 1;
-            let redness = |p: &[u8]| f64::from(p[0]) - 0.5 * (f64::from(p[1]) + f64::from(p[2]));
-            red_on += redness(a);
-            red_off += redness(b);
+            let lum =
+                |p: &[u8]| 0.3 * f64::from(p[0]) + 0.6 * f64::from(p[1]) + 0.1 * f64::from(p[2]);
+            let warmth = |p: &[u8]| f64::from(p[0]) - f64::from(p[2]);
+            lum_on += lum(a);
+            lum_off += lum(b);
+            warm_on += warmth(a);
+            warm_off += warmth(b);
         }
-        eprintln!("tint pixels: {changed} changed, redness {red_off:.0} -> {red_on:.0}");
-        assert!(changed > 150, "the victim's body changed, got {changed}");
+        eprintln!("tint pixels: {changed} changed, luma {lum_off:.0} -> {lum_on:.0}, warmth {warm_off:.0} -> {warm_on:.0}");
+        assert!(changed > 150, "the body of the victim changed, got {changed}");
         assert!(
-            red_on > red_off + f64::from(changed),
-            "the flash reddens the body: {red_off:.0} -> {red_on:.0} over {changed} pixels"
+            lum_on > lum_off + f64::from(changed),
+            "the flash lights the body: {lum_off:.0} -> {lum_on:.0} over {changed} pixels"
+        );
+        assert!(
+            warm_on >= warm_off,
+            "the flash never cools the body: {warm_off:.0} -> {warm_on:.0}"
         );
     }
 
@@ -5307,6 +5520,105 @@ mod tests {
             look.slot_pose(rig, &slot, 0.5).expect("pose samples")
         };
         assert_eq!(run(), run(), "same Hit tick gives the same flinch twice");
+    }
+
+    /// The flinch slot 1 shows after a blow from slot 0 (at -x of it) while it
+    /// faces `yaw`, the sim holding the pair `hold` ticks: the biggest pelvis
+    /// shove and head travel over the window against a calm twin that took a
+    /// parry (the same hold, no flinch), and the reaction row the hit chose.
+    fn flinch_after(yaw: f32, hold: u32) -> (f32, f32, crate::hit_reaction::Shape) {
+        let views = [view(0, -1.0, 0.0), view(1, 1.0, 0.0)];
+        let hp = [1000u16, 1000u16];
+        let mut hit = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let mut calm = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        for tick in 0..=19u32 {
+            hit.observe_tick(tick, &views, &hp, &[]);
+            calm.observe_tick(tick, &views, &hp, &[]);
+        }
+        let blow = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 100,
+        };
+        let parry = FightCue::Parried {
+            attacker: 0,
+            victim: 1,
+        };
+        hit.slots[1].yaw = yaw;
+        hit.observe_hitstop(20, &[blow], hold);
+        hit.observe_tick(20, &views, &hp, &[blow]);
+        calm.observe_hitstop(20, &[parry], hold);
+        calm.observe_tick(20, &views, &hp, &[parry]);
+        let shape = hit.slots[1].hit_shape;
+        let (mut shove, mut head) = (0.0_f32, 0.0_f32);
+        for tick in 21..=80u32 {
+            hit.observe_tick(tick, &views, &hp, &[]);
+            calm.observe_tick(tick, &views, &hp, &[]);
+            let (slot_h, slot_c) = (hit.slots[1], calm.slots[1]);
+            let (rig_h, rig_c) = (
+                &hit.rigs[hit.rig_for_slot(1)],
+                &calm.rigs[calm.rig_for_slot(1)],
+            );
+            let pose_h = hit.slot_pose(rig_h, &slot_h, 0.5).expect("pose samples");
+            let pose_c = calm.slot_pose(rig_c, &slot_c, 0.5).expect("pose samples");
+            let (ph, pc) = (
+                pose_h.positions[rig_h.pelvis],
+                pose_c.positions[rig_c.pelvis],
+            );
+            shove = shove.max((ph[0] - pc[0]).hypot(ph[2] - pc[2]));
+            head = head.max(hit.react_head_m(rig_h, &slot_h, 0.5));
+        }
+        (shove, head, shape)
+    }
+
+    #[test]
+    fn hit_reaction_a_heavy_blow_reads_bigger_than_a_light_one() {
+        use crate::hit_reaction::{ReactionTable, Sector, Weight};
+        // Slot 1 faces -x, toward its attacker: a blow from the front.
+        let front = -std::f32::consts::FRAC_PI_2;
+        let (light_shove, light_head, light) = flinch_after(front, 3);
+        let (heavy_shove, heavy_head, heavy) = flinch_after(front, 6);
+        let table = ReactionTable::shipped();
+        assert_eq!(light, table.shape(Sector::Front, Weight::Light));
+        assert_eq!(heavy, table.shape(Sector::Front, Weight::Heavy));
+        assert!(
+            heavy_shove > light_shove * 1.4,
+            "shove {light_shove} m light, {heavy_shove} m heavy"
+        );
+        assert!(
+            heavy_head > light_head * 1.2,
+            "head travel {light_head} m light, {heavy_head} m heavy"
+        );
+        assert!(light_head >= 0.08, "the light front flinch is the reference");
+    }
+
+    #[test]
+    fn hit_reaction_a_blow_from_behind_arches_further_than_one_from_the_front() {
+        use crate::hit_reaction::Sector;
+        let half_turn = std::f32::consts::FRAC_PI_2;
+        let (_, front_head, front) = flinch_after(-half_turn, 3);
+        // Slot 1 faces +x, away from its attacker at -x: struck in the back.
+        let (_, back_head, back) = flinch_after(half_turn, 3);
+        assert_eq!(Sector::of(-half_turn, [1.0, 0.0]), Sector::Front);
+        assert_eq!(Sector::of(half_turn, [1.0, 0.0]), Sector::Back);
+        assert!(back.lean > front.lean);
+        assert!(
+            back_head > front_head * 1.15,
+            "head travel {front_head} m struck from the front, {back_head} m from behind"
+        );
+    }
+
+    #[test]
+    fn hit_reaction_a_flank_blow_twists_the_body_away_from_it() {
+        use crate::hit_reaction::{ReactionTable, Sector, Weight};
+        // Facing +z with the attacker at -x puts it on the left; facing -z, on the right.
+        let (_, _, left) = flinch_after(0.0, 3);
+        let (_, _, right) = flinch_after(std::f32::consts::PI, 3);
+        let table = ReactionTable::shipped();
+        assert_eq!(left, table.shape(Sector::Left, Weight::Light));
+        assert_eq!(right, table.shape(Sector::Right, Weight::Light));
+        assert!(left.twist_rad > 0.0 && right.twist_rad < 0.0);
+        assert_eq!(left.twist_rad, -right.twist_rad, "the flanks mirror");
     }
 
     #[test]
@@ -6726,5 +7038,22 @@ mod tests {
         assert_eq!(stepped, 8, "eight capes step in a full bout");
         assert_eq!(none, 0, "no cape joints, no cape");
         assert_eq!(with_capes, without, "the cape layer never moves the sim");
+    }
+
+    #[test]
+    fn lf8_body_material_names_map_to_their_shading_kinds() {
+        assert_eq!(part_material_kind("MAT_hero_q0"), MaterialKind::Cloth);
+        assert_eq!(part_material_kind("MAT_hero_q1"), MaterialKind::Skin);
+        assert_eq!(part_material_kind("MAT_hero_q2"), MaterialKind::Metal);
+        assert_eq!(part_material_kind("MAT_hero_q3"), MaterialKind::Skin);
+        assert_eq!(
+            part_material_kind("MAT_opp_male_light_q2"),
+            MaterialKind::Metal
+        );
+        assert_eq!(part_material_kind("gladius_blade"), MaterialKind::Metal);
+        assert_eq!(part_material_kind("gladius_fittings"), MaterialKind::Metal);
+        assert_eq!(part_material_kind("scutum_face"), MaterialKind::Cloth);
+        assert_eq!(part_material_kind("gear_wood"), MaterialKind::Stone);
+        assert_eq!(part_material_kind("anything_else"), MaterialKind::Stone);
     }
 }
