@@ -1,0 +1,115 @@
+{
+  "pass": true,
+  "checks": [
+    {
+      "name": "brief.json parses",
+      "pass": true,
+      "detail": "Engine2040 UI-1 Kit"
+    },
+    {
+      "name": "brief size sane",
+      "pass": true,
+      "detail": "1280x720"
+    },
+    {
+      "name": "tokens.css parses with 2+ colors",
+      "pass": true,
+      "detail": "7 vars"
+    },
+    {
+      "name": "page.html carries the title",
+      "pass": true,
+      "detail": "title text present"
+    },
+    {
+      "name": "no hardcoded colors in page.html",
+      "pass": true,
+      "detail": "all color via var(--*)"
+    },
+    {
+      "name": "page.html uses tokens",
+      "pass": true,
+      "detail": "var(--*) found"
+    },
+    {
+      "name": "ltr: html dir matches brief",
+      "pass": true,
+      "detail": "dir=ltr"
+    },
+    {
+      "name": "out.png size matches brief",
+      "pass": true,
+      "detail": "1280x720"
+    },
+    {
+      "name": "out.png non-trivial",
+      "pass": true,
+      "detail": "79328B"
+    },
+    {
+      "name": "contrast title",
+      "pass": true,
+      "detail": "10.07:1 vs 4.5:1 (#ffb325 on #14161f)"
+    },
+    {
+      "name": "contrast subtitle",
+      "pass": true,
+      "detail": "8.16:1 vs 4.5:1 (#a8aec2 on #14161f)"
+    },
+    {
+      "name": "contrast body",
+      "pass": true,
+      "detail": "15.97:1 vs 4.5:1 (#f4f1e8 on #14161f)"
+    },
+    {
+      "name": "contrast cta",
+      "pass": true,
+      "detail": "10.35:1 vs 4.5:1 (#1a1206 on #ffb325)"
+    },
+    {
+      "name": "contrast chip",
+      "pass": true,
+      "detail": "13.81:1 vs 4.5:1 (#f4f1e8 on #1f2333)"
+    },
+    {
+      "name": "title_box valid fractions",
+      "pass": true,
+      "detail": "0.03,0.04,0.6,0.2"
+    },
+    {
+      "name": "title legible at 256px",
+      "pass": true,
+      "detail": "12.8px at 256px wide (floor 12px)"
+    },
+    {
+      "name": "title fits its box",
+      "pass": true,
+      "detail": "need ~576px, box 730px"
+    },
+    {
+      "name": "title legible at 315px listing",
+      "pass": true,
+      "detail": "15.8px at 315px listing (floor 12px)"
+    },
+    {
+      "name": "size 1280x720: title legible at 256px",
+      "pass": true,
+      "detail": "12.8px at 256px (floor 12px)"
+    },
+    {
+      "name": "size 1280x720: title fits its box",
+      "pass": true,
+      "detail": "need ~576px, box 730px"
+    },
+    {
+      "name": "reference.png parity",
+      "pass": true,
+      "detail": "no reference declared, SKIP — add reference.png to gate pixels",
+      "skipped": true
+    }
+  ],
+  "errors": [],
+  "brief": "C:\\empire\\design-studio\\designs\\O-042\\brief.json",
+  "image": "C:\\empire\\design-studio\\designs\\O-042\\out.png",
+  "at": "2026-10-05"
+}
