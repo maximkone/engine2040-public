@@ -133,13 +133,19 @@ pub(super) const GPU_CULL_ENV: &str = "E2040_GPU_CULL";
 /// The flag as a bool, from the raw env value. Named so a test reads the
 /// parse without touching the process environment.
 pub(super) fn gpu_cull_flag_value(value: Option<&str>) -> bool {
-    matches!(value, Some("1") | Some("true"))
+    matches!(value, Some("1" | "true"))
 }
 
-/// Is the GPU cull plan asked for this frame? Read once per submit.
+/// The flag, read from the environment once per process: `env::var` builds a
+/// `String` on every call, so a per-frame read allocated one string per frame
+/// (cq7 `steady_120_frames_read_zero_allocs`). The value cannot change while
+/// the engine runs, so one read serves every frame.
+static GPU_CULL_READ: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Is the GPU cull plan asked for this frame? The first call reads the
+/// environment; every later frame reads the cached bool and allocates nothing.
 pub(super) fn gpu_cull_requested() -> bool {
-    let raw = std::env::var(GPU_CULL_ENV).ok();
-    gpu_cull_flag_value(raw.as_deref())
+    *GPU_CULL_READ.get_or_init(|| gpu_cull_flag_value(std::env::var(GPU_CULL_ENV).ok().as_deref()))
 }
 
 /// One frame's GPU-rule cull plan: the same pipeline-grouped order plus the
@@ -223,9 +229,8 @@ pub(super) fn gpu_submit_order(
     if slots == 0 {
         return None;
     }
-    for slot in 0..slots {
-        let draw = sorted[slot];
-        plan.spheres[slot] = bounds.spheres.get(draw).copied().unwrap_or([0.0; 4]);
+    for (slot, draw) in sorted.iter().enumerate().take(slots) {
+        plan.spheres[slot] = bounds.spheres.get(*draw).copied().unwrap_or([0.0; 4]);
         plan.flags[slot] = 0;
     }
     let packed =
@@ -233,8 +238,8 @@ pub(super) fn gpu_submit_order(
     if packed != slots {
         return None;
     }
-    for slot in 0..slots {
-        if !bounds.cullable.get(sorted[slot]).copied().unwrap_or(false) {
+    for (slot, draw) in sorted.iter().enumerate().take(slots) {
+        if !bounds.cullable.get(*draw).copied().unwrap_or(false) {
             plan.flags[slot] = 1;
         }
     }
@@ -242,9 +247,9 @@ pub(super) fn gpu_submit_order(
     plan.args = crate::draw::indirect_args_5(count);
     plan.packed = slots;
     plan.submitted = 0;
-    for slot in 0..slots {
+    for (slot, draw) in sorted.iter().enumerate().take(slots) {
         if plan.flags[slot] == 1 {
-            plan.order[plan.submitted] = sorted[slot];
+            plan.order[plan.submitted] = *draw;
             plan.submitted += 1;
         }
     }
@@ -569,5 +574,19 @@ mod tests {
         assert!(gpu_cull_flag_value(Some("1")), "1 asks for the plan");
         assert!(gpu_cull_flag_value(Some("true")), "true asks for the plan");
         assert_eq!(GPU_CULL_ENV, "E2040_GPU_CULL", "the flag names its env var");
+    }
+
+    #[test]
+    fn gpu_cull_flag_reads_the_env_once_per_process() {
+        // cq7: a steady frame allocated one `String` because `env::var` ran per
+        // frame. The first read fills the cache; 120 more frames must not
+        // allocate at all and must keep the same answer.
+        let first = gpu_cull_requested();
+        let ((), probe) = engine_core::alloc_probe::measure(|| {
+            for _ in 0..120u32 {
+                assert_eq!(gpu_cull_requested(), first, "the flag is stable");
+            }
+        });
+        assert_eq!(probe.calls, 0, "no allocation on a steady frame");
     }
 }

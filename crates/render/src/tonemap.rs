@@ -349,3 +349,13 @@ mod tests {
         );
     }
 }
+
+/// SW50: the AgX curve beside the ACES one, the CPU twin of the WGSL
+/// `agx_display` arm (`override DISPLAY_AGX`). Std-only, view only.
+#[path = "agx.rs"]
+pub mod agx;
+
+/// SW53: the ordered output dither the 8-bit store adds, the CPU twin of the
+/// WGSL screen_space_dither. Std-only, view only.
+#[path = "dither.rs"]
+pub mod dither;
