@@ -19,6 +19,10 @@ pub struct Chunk {
 
 /// Bake `pieces` chunks from box (x, y, hx, hy). Deterministic on (seed, pieces).
 /// Offline only: call at bake time, ship the returned data.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the rng draw is below 1000, so u64 -> f32 is exact"
+)]
 pub fn fracture(x: f32, y: f32, hx: f32, hy: f32, pieces: usize, seed: u64) -> Vec<Chunk> {
     let mut rng = Rng::new(seed);
     let mut rects = vec![(x, y, hx, hy)];
@@ -187,6 +191,22 @@ pub enum Mode {
     Splinter,
 }
 
+impl Mode {
+    /// Digest tag of a mode: fixed numbers, never the enum discriminant, so reordering the
+    /// variants cannot move a shipped bake digest.
+    const fn tag(self) -> u32 {
+        match self {
+            Mode::Voronoi => 0,
+            Mode::Radial => 1,
+            Mode::SlabX => 2,
+            Mode::SlabY => 3,
+            Mode::Grid => 4,
+            Mode::Shell => 5,
+            Mode::Splinter => 6,
+        }
+    }
+}
+
 /// Bake inputs: center plus half extents in meters, piece count, seed, mode.
 /// Determinism: same inputs give the same sites; invalid pieces clamp later.
 #[derive(Clone, Copy, Debug)]
@@ -221,8 +241,12 @@ pub fn should_break(impulse: f32, mass: f32) -> bool {
     impulse > breaking_impulse(mass)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "n clamps to 1..=SHARD_CAP (12) and the rng draws stay below 10_000, both exact in f32"
+)]
 fn gen_sites(mode: Mode, x: f32, y: f32, hx: f32, hy: f32, n: usize, seed: u64) -> Vec<[f32; 2]> {
-    let tag = (mode as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    let tag = u64::from(mode.tag()).wrapping_mul(0x9e3779b97f4a7c15);
     let mut rng = Rng::new(seed ^ tag ^ 0x243f6a8885a308d3u64);
     let mut fr = || (rng.next_u64() % 10_000) as f32 / 10_000.0;
     let c = |v: f32| v - 0.5;
@@ -333,6 +357,11 @@ fn label_edges(label: &[u16]) -> Vec<(u16, u16)> {
 
 /// Bakes `p` into shards; pieces clamp to `1..=SHARD_CAP`.
 /// Units: meters in, mass units out. Determinism: same `p` gives same bake.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "the lattice is RES x RES (64): indices stay below 65, RES * RES is 4096, and ids stay below n <= SHARD_CAP (12), so each value is exact in f32 and fits u16"
+)]
 pub fn bake(p: &Params) -> Bake {
     let n = p.pieces.clamp(1, SHARD_CAP);
     let sites = gen_sites(p.mode, p.x, p.y, p.hx, p.hy, n, p.seed);
@@ -403,7 +432,7 @@ pub fn bake(p: &Params) -> Bake {
     let mut e2: Vec<(u16, u16)> = edges
         .into_iter()
         .filter_map(|(a, b)| {
-            let (na, nb) = (remap[a as usize], remap[b as usize]);
+            let (na, nb) = (remap[usize::from(a)], remap[usize::from(b)]);
             if na == u16::MAX || nb == u16::MAX || na == nb {
                 None
             } else {
@@ -427,7 +456,7 @@ pub fn bake(p: &Params) -> Bake {
 pub fn bake_digest(b: &Bake) -> u64 {
     let mut h = Fnv64::new();
     h.write_u64(b.seed);
-    h.write_u32(b.mode as u32);
+    h.write_u32(b.mode.tag());
     h.write_len32(b.shards.len());
     for s in &b.shards {
         for w in [
@@ -457,10 +486,10 @@ pub fn bake_digest(b: &Bake) -> u64 {
 pub fn neighbors(b: &Bake, id: usize) -> Vec<usize> {
     let mut o = Vec::new();
     for (a, c) in &b.edges {
-        if *a as usize == id {
-            o.push(*c as usize);
-        } else if *c as usize == id {
-            o.push(*a as usize);
+        if usize::from(*a) == id {
+            o.push(usize::from(*c));
+        } else if usize::from(*c) == id {
+            o.push(usize::from(*a));
         }
     }
     o.sort_unstable();
@@ -556,6 +585,32 @@ mod mode_tests {
             assert!(neighbors(&b, *c as usize).contains(&(*a as usize)));
         }
     }
+    #[test]
+    fn casts_keep_the_cooked_cook_digest() {
+        // Pinned from the code before the CQ10 cast pass: a reviewed cast must not move a
+        // shipped byte. Values read off this fixture at HEAD.
+        let got: Vec<u64> = MODES
+            .iter()
+            .map(|m| bake_digest(&bake(&par(*m, 8, 7))))
+            .collect();
+        let hash = bake_hash(&fracture(0.0, 0.0, 10.0, 5.0, 8, 42));
+        assert_eq!(
+            (got, hash),
+            (
+                vec![
+                    16114903130744505994,
+                    10983893828934456294,
+                    16545194701048474160,
+                    5001149199541514546,
+                    16511492267601632835,
+                    2782658512613058541,
+                    10896523752078428597,
+                ],
+                7310813369372488788,
+            )
+        );
+    }
+
     #[test]
     fn cap_and_thresholds() {
         assert_eq!(bake(&par(Mode::Voronoi, 64, 1)).shards.len(), SHARD_CAP);
