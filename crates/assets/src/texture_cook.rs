@@ -2,7 +2,7 @@
 //! Owner: `engine-assets`; consumer: `crates/assets/tests/it/blockcomp_cook.rs`
 //! cook-twice gate (current byte-identical proof).
 //! Units: texels in, KTX2 bytes out. Same pixels plus slot emit identical
-//! bytes via index-order loops and sorted picks, no clock. Typed [`BcError`].
+//! bytes via index-order loops and sorted picks, no clock. Typed [`BcError`](crate::bc::BcError).
 //! PORT(hasenbanck/block_compression@f81ea7551b8fff47fb4e16d02a3077c0aba20a90): block decisions.
 //! PORT(BinomialLLC/basis_universal@99f52d63aa6799cbdaecfe977111dc5ec3b31d47): KTX2 shape.
 
