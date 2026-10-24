@@ -16,12 +16,12 @@ impl Presenter {
     /// Apply a tier to the live frame: the sun shadow map is rebuilt at the tier's edge, the
     /// particle and decal pools at the tier's caps; the cascade band, the AO pass and the
     /// texture cap are read from the stored knobs by every later frame and upload (textures
-    /// already resident keep the size they were loaded at). The render scale and bloom are the
-    /// page's own and stay with it.
+    /// already resident keep the size they were loaded at). The render scale goes to the live
+    /// upscaler (a tier under 100 turns the EASU pass on, unless a run pinned it with
+    /// `E2040_RENDER_SCALE` / `E2040_UPSCALE`); bloom stays the page's own.
     pub fn apply_quality(&mut self, knobs: &Knobs) {
         let max = self.device.limits().max_texture_dimension_2d;
-        self.sun_sub
-            .resize(&self.device, quality::shadow_edge_px(knobs, max));
+        self.sun_sub.resize(quality::shadow_edge_px(knobs, max));
         self.particles = particles_gpu::ParticlePool::with_capacity(
             POOL_SEED,
             quality::particle_pool_slots(knobs),
@@ -55,6 +55,7 @@ impl Presenter {
             self.depth_pipeline = depth;
             self.depth_skinned_pipeline = depth_skinned;
         }
+        self.upscale.config.apply_tier_scale(knobs.render_scale_pct);
         self.quality = *knobs;
     }
 
