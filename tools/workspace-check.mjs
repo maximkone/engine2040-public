@@ -11,6 +11,8 @@ import { archivedDoneRows, needsOf } from "./board-slice.mjs";
 import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
 import { OWN_MATH_FILES, deriveFixedApi, genreFindings, ioHits, platformMathHits, productionCode, softFloatHits } from "./sim-source-scan.mjs";
 import { runWithVerdictCache, scanIslandsFrom } from "./wiring-scan.mjs";
+import { DOC_PINS, checkPins as docPinFindings } from "./doc-pin.mjs";
+import { resolveViolations as hackResolveViolations } from "./feature-unify.mjs";
 import { rowsWithReason, scan as scanUnwired, summaryLine as unwiredSummaryLine } from "./unwired-code-gate.mjs";
 
 // engine-core is the bottom layer (ARCHITECTURE.md): any crate may use it.
@@ -48,7 +50,7 @@ export const allowedEdges = new Map([
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
   ["engine-chaos", ["engine-observe", "engine-proof"]],
   ["engine-combat", ["engine-input"]],
-  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf", "engine-material", "engine-provider"]], // OPT27: the window's pressure watch feeds frame time and the OS VRAM reading to the provider arbiter and reads back a placement and a GPU layer count; `app` only, so the headless graph never arbitrates a local model.
+  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf", "engine-material", "engine-provider", "engine-live"]], // OPT27: the window's pressure watch feeds frame time and the OS VRAM reading to the provider arbiter and reads back a placement and a GPU layer count; `app` only, so the headless graph never arbitrates a local model.
   // DX6: the chunk chain proof cooks a chunk fixture through the CT2 owner
   // (`engine-assets` mesh_cook, its import lane) as a dev-dependency only;
   // no destruction production path reads a cook.
@@ -56,7 +58,7 @@ export const allowedEdges = new Map([
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.
   ["engine-material", ["engine-destruction"]],
-  ["engine-editor", ["engine-ecs", "engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app", "engine-arena", "engine-material", "engine-destruction"]], // NS31a2: the document holds the material table and edits it with undo; engine-material takes destruction + core only, so no cycle. DX7: the fracture tool bakes painted bond strengths onto a `BondedDesc` through the destruction owner; destruction never imports editor. ARC6: the ui play-in loop steps one arena spine match for the inspector (arena never imports editor).
+  ["engine-editor", ["engine-ecs", "engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app", "engine-arena", "engine-material", "engine-destruction", "engine-editor-derive"]], // NS31a2: the document holds the material table and edits it with undo; engine-material takes destruction + core only, so no cycle. DX7: the fracture tool bakes painted bond strengths onto a `BondedDesc` through the destruction owner; destruction never imports editor. ARC6: the ui play-in loop steps one arena spine match for the inspector (arena never imports editor).
   // The duel teacher and strength gate run arena bouts through the public controller seam.
   ["engine-distill", ["engine-nn", "engine-ai", "engine-arena", "engine-input"]],
   // The squad pack reads legion formations from engine-ai (feature `mcp` only).
@@ -69,7 +71,7 @@ export const allowedEdges = new Map([
   // engine-ui snapshots (feature `mcp` only); ui never imports endpoint.
   // The world pack bakes, samples and paints the std-only TVER terrain (feature
   // `mcp` only); world never imports endpoint.
-  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-physfx", "engine-nav", "engine-input", "engine-ui", "engine-audio", "engine-playtest", "engine-proof", "engine-world", "engine-perf"]], // WG12 `perf.trace` writes the profiler's capture as one Chrome-trace document
+  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-physfx", "engine-nav", "engine-input", "engine-ui", "engine-audio", "engine-playtest", "engine-proof", "engine-world", "engine-perf", "engine-rome"]], // WG12 `perf.trace` writes the profiler's capture as one Chrome-trace document
   ["engine-input", ["engine-core"]],
   ["engine-net", ["engine-arena", "engine-input", "engine-observe", "engine-ecs", "engine-save", "engine-combat", "engine-physics"]], // ARC5: rejoin resim keeps spine checkpoints in `Spine::snapshot` bytes and rides the save rollback/persist envelopes; BX9 frames combat's `Cut` and spawns the decoded limb on a real limb pool (tests)
   ["engine-nav", ["engine-spatial"]], // SP40 KdTree crowd feed reads spatial KdTree
@@ -134,6 +136,8 @@ export const LAYERS = {
   data: [
     "engine-anim", "engine-assets", "engine-save", "engine-material", "engine-nn",
     "engine-input", "engine-rome", "engine-geo", "engine-observe", "engine-workspace-hack",
+    // The editor's derive macro: build-time only, takes no engine crate.
+    "engine-editor-derive",
   ],
   presentation: ["engine-render", "engine-audio", "engine-ui", "engine-physfx"],
   platform: ["engine-provider", "engine-clock", "engine-net"],
@@ -257,6 +261,7 @@ export function largeBlobViolations(entries, limit = LFS_SIZE_LIMIT) {
 // with the reason; a file that sets #[global_allocator] needs no entry. Keys are <crate dir>/<stem>.
 export const OWN_TEST_BINARY = {
   "assets/gltf_conformance": "CT10 Accept names it as --test gltf_conformance; it drives the selected glTF models through import, place, save, reopen and play",
+  "assets/polyhaven_bust": "SW121 Accept names it as --test polyhaven_bust; it runs the real intake path over the wrapped marble bust (licence gate, repair, simplify, cook, bundle, provenance row) behind the assets import+registry features",
   "assets/vfetch_vectors": "its import leg does not compile at HEAD; merge it into tests/it once it builds",
   "endpoint/door_parity": "AD8 Accept names it as --test door_parity; it spawns e2040-mcp and runs the 20-task mirror proof",
   "endpoint/look_judge_hook": "registers a process-wide one-shot hook",
@@ -266,6 +271,7 @@ export const OWN_TEST_BINARY = {
   "perf/w1_pf9a_paired": "flips the process-wide ENABLED switch",
   "editor/material_ops": "NS31a2 Accept names it as --test material_ops; it drives the document's material table through the public command API",
   "render/material_swatch": "NS31d3 Accept names it as --test material_swatch; it opens its own device and reads a swatch frame back, state the shared tests/it harness does not carry",
+  "physics/servo_calib": "bake-only PX22 calibration corpus: runs the servo bench's three motion cases over a seeded integer sweep and prints one tune row per rig; it is a standalone binary by design, not a module of the it binary",
 };
 export function testLayoutViolations(crates, own = OWN_TEST_BINARY) {
   const found = [];
@@ -310,7 +316,8 @@ export function parseDeclaredModules(text) {
 // `include!("path/name.rs")` targets: the base name without the .rs suffix.
 export function parseIncludedFiles(text) {
   const names = new Set();
-  const re = /include!\s*\(\s*"([^"]+)"\s*\)/g;
+  // `include!("x.rs")` and `#[path = "x_tests.rs"] mod tests;` both compile x as part of this file.
+  const re = /(?:include!\s*\(|#\[path\s*=)\s*"([^"]+)"\s*[)\]]/g;
   let m;
   while ((m = re.exec(text)) !== null) {
     const path = m[1].split(/[\\/]/).pop() ?? "";
@@ -600,6 +607,32 @@ function saveWiringCache(repoDir, fp, line) {
 // whose only callers sit behind a feature the default build does not turn on
 // is a different disease, so only the `no-caller` rows are counted here. The
 // numbers come from the scan, never from a constant.
+// AF6: unused dependencies, report-only until the count reaches 0. cargo-machete
+// is the installed tool (`cargo-shear` is not on this PC). A crate that must keep
+// a dependency pins it under `[package.metadata.cargo-machete] ignored`, with the
+// reason beside it, so the count is a real number and not a suppression list.
+// The tool exits 1 when it finds something, which is a result, not a failure.
+export const parseMachete = (out) => {
+  const text = String(out ?? "");
+  if (/didn'?t find any unused dependencies/i.test(text)) return 0;
+  // Its findings are one tab-indented dependency line each, under a `pkg -- path:` header.
+  return text.split(/\r?\n/).filter((l) => /^\t\S/.test(l)).length;
+};
+
+// Same shape as the other report-only lines: one number, or the first line of the fault.
+export const unusedDepsLine = (run) => {
+  try { return `WARN unused deps (report-only): ${parseMachete(run())}`; }
+  catch (error) { return `WARN unused deps (report-only): check failed: ${String(error.message).split("\n")[0]}`; }
+};
+
+// The installed binary, either name, and a non-zero exit carrying findings read as output.
+export const macheteRun = (repoDir) => () => {
+  const bin = ["cargo-machete.exe", "cargo-machete"].map((n) => join(repoDir, ".tools", "bin", n)).find((p) => existsSync(p));
+  if (!bin) throw new Error("no cargo-machete in .tools/bin (AF6: it is the installed unused-dependency scan)");
+  try { return execFileSync(bin, [], { cwd: repoDir, encoding: "utf8", maxBuffer: 1 << 26 }); }
+  catch (error) { if (error?.status === 1 && typeof error.stdout === "string") return error.stdout; throw error; }
+};
+
 export function unwiredModulesLine(cratesDir) {
   try {
     const unwired = scanUnwired(cratesDir);
@@ -884,6 +917,19 @@ function audit(repoDir) {
   // externals into this resolve, which must stay std-only).
   const hackPkg = workspacePackages.find((pkg) => pkg.name === "engine-workspace-hack");
   if (hackPkg && visited.has(hackPkg.name)) errors.push("engine-workspace-hack is scoped out of the headless default graph");
+
+  // SW12 workspace-hack verify: the union crate stays honest. This is the
+  // metadata twin of tools/feature-unify.mjs - cargo resolves `workspace = true`
+  // inheritance, renames and default-features, so a member that turns on a
+  // feature the union omits fails here even when the manifest text hides it.
+  // Host builds only: a target-gated dependency is a separate resolve.
+  let unifiedExternals = 0;
+  if (hackPkg) {
+    unifiedExternals = hackPkg.dependencies.filter((dep) => !dep.path).length;
+    errors.push(...hackResolveViolations(metadata));
+  } else {
+    errors.push("engine-workspace-hack: the union crate is missing from the workspace fix: restore crates/workspace-hack with its externals");
+  }
 
   // A file no `mod` declares is never compiled, so its tests never run either.
   // Speed: one walk per crate plus a content cache shared by the module,
@@ -1309,6 +1355,19 @@ function audit(repoDir) {
     errors.push(`structural map check could not run: ${error.message}`);
   }
 
+  // SW10: a doc that copies a source file's contract by hand carries that
+  // file's hash (tools/doc-pin.mjs). A source edit without the doc edit fails
+  // here, so the hand-copied page cannot drift away from the file that owns it.
+  let docPins = 0;
+  try {
+    const pins = docPinFindings(repoDir);
+    docPins = DOC_PINS.length;
+    errors.push(...pins);
+    for (const f of pins) console.log(`FAIL doc pin: ${f}`);
+  } catch (error) {
+    errors.push(`doc pin check could not run: ${error.message}`);
+  }
+
   // CDX6: a Rome number needs a source. The Rome loader refuses a section that
   // carries a number and no `ref`; the lint refuses it on disk too, and a ref
   // in the codex passage form must be a passage the codex index holds. The
@@ -1348,6 +1407,9 @@ function audit(repoDir) {
     console.log(`WARN wiring (report-only): ${wireOut}`);
   } catch (error) { console.log(`WARN wiring (report-only): check failed: ${String(error.message).split("\n")[0]}`); }
   try { const flakyOut = execFileSync(process.execPath, [join(repoDir, "tools", "flaky-quarantine.mjs"), "--self-test"], { encoding: "utf8" }).split("\n").find((l) => l.startsWith("PASS"))?.trim(); console.log(`WARN flaky (report-only): ${flakyOut ?? "no PASS line"}`); } catch (error) { console.log(`WARN flaky (report-only): check failed: ${String(error.message).split("\n")[0]}`); }
+  // AF6: the unused-dependency count. One scan for the whole tree; a crate that must keep a
+  // dependency pins it under [package.metadata.cargo-machete] with its reason, so this stays honest.
+  console.log(unusedDepsLine(macheteRun(repoDir)));
   // PW48: the unwired-code gate gets a caller. AD5 asked for a gate that no
   // dead public module hides behind; the tool existed and nobody ran it,
   // which is the same disease it reports. The audit runs it in process (no
@@ -1363,6 +1425,8 @@ function audit(repoDir) {
   console.log("PASS lfs guard: no newly tracked non-LFS blob over 5 MB");
   console.log(`PASS test layout: ${layoutCrates} crates keep one integration-test binary (tests/it)`);
   console.log(`PASS maps: ${mapCrates} crates, ${mapPaths} paths match the tree`);
+  console.log(`PASS doc pin: ${docPins} doc(s) match the source they copy`);
+  console.log(`PASS workspace-hack verify: ${unifiedExternals} external(s), every host feature inside the union`);
   console.log("PASS layer rules: no simulation crate imports a presentation crate");
   console.log(`WARN gpu boundary: ${gpu.offenders.length} files outside present/ name wgpu:: (report-only)`);
   if (gpu.stale.length) {
