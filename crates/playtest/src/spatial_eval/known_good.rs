@@ -337,8 +337,8 @@ fn hits(report: &Report, check: &str, id: u32) -> usize {
 
 /// Pinned result per shipped scene: zero red, zero yellow (the exact true list is empty).
 const PINNED: [&str; 6] = [
-    "arena actors=11 verdict=clean\n",
-    "arena_dressed actors=17 verdict=clean\n",
+    "arena actors=14 verdict=clean\n",
+    "arena_dressed actors=20 verdict=clean\n",
     "district actors=7 verdict=clean\n",
     "ludus actors=8 verdict=clean\n",
     "siege actors=7 verdict=clean\n",

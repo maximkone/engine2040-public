@@ -680,7 +680,7 @@ mod tests {
         for probe in [
             "shadow.feet[i]",
             "sun_shadow_at(",
-            "@group(0) @binding(13) var sun_shadow_map: texture_depth_2d;",
+            "@group(0) @binding(13) var sun_shadow_map: texture_depth_2d_array;",
             "@group(0) @binding(20) var<uniform> sun_fwd: SunFwdU;",
             "ibl_sample",
         ] {
