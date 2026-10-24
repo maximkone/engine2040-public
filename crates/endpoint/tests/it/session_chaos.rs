@@ -754,9 +754,19 @@ fn stdio_door_replays_typed_stale_revision() {
         refused_text.contains('1'),
         "stale preview names the fresh revision over stdio"
     );
+    // AD26: a refusal is a tool result with `isError` true, not a protocol
+    // error, so the model reads its advice in the result it already parses.
     assert!(
-        refused.get("error").is_some(),
-        "stale preview refuses over stdio, got: {refused_text}"
+        refused.get("error").is_none(),
+        "a stale preview is a result, not a protocol error, got: {refused_text}"
+    );
+    assert_eq!(
+        refused["result"]["isError"], true,
+        "stale preview refuses as an isError result over stdio, got: {refused_text}"
+    );
+    assert_eq!(
+        refused["result"]["structuredContent"]["retryable"], true,
+        "stale preview carries its retry flag, got: {refused_text}"
     );
     client.close_and_wait(&dir);
 }

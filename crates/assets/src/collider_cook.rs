@@ -3,20 +3,22 @@
 //! Consumer: the arena kit zone and the door's cast verbs read the cooked bytes
 //! through `engine-physics` (`collider::decode`); this module is the writer.
 //! Data owner: `engine-assets`; the glTF `COL_` nodes own the geometry
-//! ([`COL_PREFIX`] convention). Units: meters, Y up; one layer integer per
+//! ([`COL_PREFIX`](crate::collider_cook::COL_PREFIX) convention). Units: meters, Y up; one layer integer per
 //! collider, chosen by the caller (the layer table lives in `engine-physics`,
 //! which this crate does not link). Determinism: `+ - * /` and `sqrt` only,
 //! canonical point order, no hash maps, no clock; the same art gives the same
 //! bytes, and a hull's bytes do not depend on input point order.
-//! Errors: typed [`ColliderCookError`], never a panic.
+//! Errors: typed [`ColliderCookError`](crate::collider_cook::ColliderCookError), never a panic.
 //!
 //! Two shapes are cooked. A dynamic prop becomes a convex hull: the extreme
-//! points plus outward-wound triangle faces, capped at [`MAX_HULL_POINTS`] points
+//! points plus outward-wound triangle faces, capped at
+//! [`MAX_HULL_POINTS`](crate::collider_cook::MAX_HULL_POINTS) points
 //! (a capped hull is inside the true hull; the cap keeps the farthest-spread
 //! points). A static kit piece becomes a triangle mesh: vertices welded by exact
 //! position, degenerate triangles dropped. A declared height grid
-//! ([`HeightGrid`]) becomes a terrain mesh plus a heightfield record, cooked in
-//! integer millimetres ([`cook_height_grid`]) and encoded with [`encode_terrain`].
+//! ([`HeightGrid`](crate::collider_cook::HeightGrid)) becomes a terrain mesh plus a heightfield record, cooked in
+//! integer millimetres ([`cook_height_grid`](crate::collider_cook::cook_height_grid)) and encoded with
+//! [`encode_terrain`](crate::collider_cook::encode_terrain).
 //!
 //! Collision is on by default: every node of the art tree that carries a mesh
 //! collides unless the art says otherwise.
@@ -25,7 +27,7 @@
 //! - a node that carries a `COL_` child cooks nothing (the child holds the shape);
 //! - a node named `NOCOL_...` cooks nothing (the art opts out);
 //! - every other node cooks an automatic convex hull of its render mesh, on the
-//!   [`PROP_LAYER`] layer, because an untagged mesh is a prop.
+//!   [`PROP_LAYER`](crate::collider_cook::PROP_LAYER) layer, because an untagged mesh is a prop.
 //!
 //! The receipt says where the colliders came from:
 //! `colliders: <tagged> tagged, <auto> auto, <opted out> opted out`.
@@ -2098,7 +2100,11 @@ mod terrain_tests {
         assert_eq!(first.mesh.indices.len() / 3, 8);
         assert_eq!(first.collider.heights_mm, grid.heights_mm);
         assert_eq!(
-            (first.collider.rows, first.collider.cols, first.collider.spacing_mm),
+            (
+                first.collider.rows,
+                first.collider.cols,
+                first.collider.spacing_mm
+            ),
             (3, 3, 500)
         );
         // Positions are the integer millimetre grid, row-major.
@@ -2143,7 +2149,9 @@ mod terrain_tests {
         let mut short = three_by_three();
         short.heights_mm.pop();
         assert_eq!(
-            cook_height_grid(&short).expect_err("short grid").to_string(),
+            cook_height_grid(&short)
+                .expect_err("short grid")
+                .to_string(),
             "collider cook: bad mesh, the heights do not fill rows * cols"
         );
         let mut thin = three_by_three();

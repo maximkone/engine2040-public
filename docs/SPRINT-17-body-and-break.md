@@ -3,7 +3,7 @@
 Tier A rows only. The later rows (BX13-BX27, BX29-BX32, HS1, HS3-HS14, HS16-HS19,
 HS22, HS24-HS28) stay in their plan files and are boarded when these land.
 
-- [ ] BX5 anim: injured locomotion — hop, crawl, fall, one-arm guard, rebuilt Progress 2026-10-17: `crates/anim/src/injured.rs` and `injured_double.rs` rebuild the single and double loss joint masks (tests single_loss_masks_rebuild_x1000, double_loss_masks_rebuild_x1000, override wiring into layers). Left: hop, crawl, fall and one-arm-guard locomotion, the support polygon, and a legal state within 20 ticks.
+- [x] BX5 anim: injured locomotion — hop, crawl, fall, one-arm guard, rebuilt Landed c8c7d76 + 09bde11: `Gait` (stand, hop, guard, fall, crawl) picked from the loss set, `gait_supported` foot box or trunk band, `JOINT_LIMIT`, the `Staged` ramp legal inside `LEGAL_TICKS = 20`; the 15 single and 6 double fixtures x 1,000 seeds assert no NaN, no T-pose, no lane over its limit, legal inside 20 ticks; run 40115106081 (13 tests), anim_lod_pin run 40115296071 (8, digests unchanged). The physics-side hop and crawl motion is not in this row. Progress 2026-10-17: `crates/anim/src/injured.rs` and `injured_double.rs` rebuild the single and double loss joint masks (tests single_loss_masks_rebuild_x1000, double_loss_masks_rebuild_x1000, override wiring into layers). Left: hop, crawl, fall and one-arm-guard locomotion, the support polygon, and a legal state within 20 ticks.
   joint mask and support polygon after each loss. Tier A. Size L. Owns
   `crates/anim/src/injured.rs`. Accept: 15 single-loss and 6 double-loss
   fixtures x 1,000 seeds, no NaN, no T-pose, no joint over its limit; a fighter
