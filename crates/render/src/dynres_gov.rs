@@ -176,6 +176,251 @@ impl DynRes {
     }
 }
 
+/// The render scales the live window frame steps between, percent of the output edge, highest
+/// first. A short ladder keeps the frame targets from being rebuilt on every small move.
+pub const LIVE_RUNGS_PCT: [u8; 4] = [100, 85, 75, 67];
+/// GPU budget in ms the live picker holds by default: under one 60 fps frame, with slack left
+/// for the CPU half and the present.
+pub const LIVE_TARGET_MS: f32 = 14.0;
+
+const LIVE_RUNGS: usize = LIVE_RUNGS_PCT.len();
+/// Samples the median is taken over.
+const LIVE_MEDIAN: usize = 5;
+/// Frames after a change whose GPU samples are ignored (they were taken before it landed).
+const LIVE_SETTLE: u32 = 4;
+/// Changes the picker remembers for its receipt; the newest are kept.
+const LIVE_LOG: usize = 16;
+
+/// Tuning of [`LiveDynRes`]. All counts are frames.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LiveDynResConfig {
+    /// GPU ms the picker holds.
+    pub target_ms: f32,
+    /// A step up needs the predicted cost one rung up under `target_ms * up_fraction`: the gap
+    /// between this and the step-down line is the dead band that stops oscillation.
+    pub up_fraction: f32,
+    /// Consecutive over-budget frames before a step down.
+    pub down_frames: u32,
+    /// Consecutive fits before a step up.
+    pub up_frames: u32,
+    /// Frames a step down waits after any change.
+    pub hold_down_frames: u32,
+    /// Frames a step up waits after any change.
+    pub hold_up_frames: u32,
+}
+
+impl Default for LiveDynResConfig {
+    fn default() -> Self {
+        Self {
+            target_ms: LIVE_TARGET_MS,
+            up_fraction: 0.85,
+            down_frames: 6,
+            up_frames: 60,
+            hold_down_frames: 12,
+            hold_up_frames: 90,
+        }
+    }
+}
+
+/// One scale change of the live picker.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LiveScaleStep {
+    /// Frame count (from 1) of the observation that changed the scale.
+    pub frame: u32,
+    /// Scale before, percent.
+    pub from_pct: u8,
+    /// Scale after, percent.
+    pub to_pct: u8,
+}
+
+/// Picks the live frame's render scale from measured GPU ms, one of [`LIVE_RUNGS_PCT`].
+///
+/// A median of the last few samples drives it. Over the target for `down_frames` in a row steps
+/// down to the first rung the pixel-count model says fits (or the floor); a step up goes one
+/// rung at a time, only when the model says the rung above fits with `up_fraction` to spare and
+/// only after `up_frames` such frames, so a load that sits near the line cannot make it flap.
+/// After any change it holds (`hold_*_frames`) and ignores the samples already in flight.
+/// Presentation only: no clock, no allocation per frame, never hashed.
+#[derive(Clone, Debug)]
+pub struct LiveDynRes {
+    cfg: LiveDynResConfig,
+    rung: usize,
+    ring: [f32; LIVE_MEDIAN],
+    filled: usize,
+    pos: usize,
+    over: u32,
+    fits: u32,
+    since_change: u32,
+    settle: u32,
+    frames: u32,
+    hist: [u32; LIVE_RUNGS],
+    steps: [Option<LiveScaleStep>; LIVE_LOG],
+    changes: u32,
+}
+
+impl LiveDynRes {
+    /// Start at the top rung.
+    pub fn new(cfg: LiveDynResConfig) -> Self {
+        Self {
+            cfg,
+            rung: 0,
+            ring: [0.0; LIVE_MEDIAN],
+            filled: 0,
+            pos: 0,
+            over: 0,
+            fits: 0,
+            since_change: u32::MAX / 2,
+            settle: 0,
+            frames: 0,
+            hist: [0; LIVE_RUNGS],
+            steps: [None; LIVE_LOG],
+            changes: 0,
+        }
+    }
+
+    /// Current scale in percent.
+    pub fn scale_pct(&self) -> u8 {
+        LIVE_RUNGS_PCT[self.rung]
+    }
+
+    /// Frames observed.
+    pub fn frames(&self) -> u32 {
+        self.frames
+    }
+
+    /// Scale changes so far.
+    pub fn changes(&self) -> u32 {
+        self.changes
+    }
+
+    /// Frames spent at each rung, in [`LIVE_RUNGS_PCT`] order.
+    pub fn histogram(&self) -> [u32; LIVE_RUNGS] {
+        self.hist
+    }
+
+    /// The newest changes, oldest first (at most 16).
+    pub fn steps(&self) -> impl Iterator<Item = LiveScaleStep> + '_ {
+        let n = usize::try_from(self.changes).unwrap_or(usize::MAX);
+        let first = if n > LIVE_LOG { n % LIVE_LOG } else { 0 };
+        (0..n.min(LIVE_LOG)).filter_map(move |i| self.steps[(first + i) % LIVE_LOG])
+    }
+
+    fn median(&self) -> f32 {
+        let mut s = self.ring;
+        let n = self.filled.min(LIVE_MEDIAN);
+        s[..n].sort_by(f32::total_cmp);
+        s[n / 2]
+    }
+
+    /// Model: GPU cost follows the pixel count, so `ms` at `from` percent costs about
+    /// `ms * (to / from)^2` at `to` percent. It over-states the cost of a higher rung (some of
+    /// the frame does not scale), which keeps the step-up line safe.
+    fn predict(ms: f32, from_pct: u8, to_pct: u8) -> f32 {
+        let r = f32::from(to_pct) / f32::from(from_pct.max(1));
+        ms * r * r
+    }
+
+    fn change_to(&mut self, rung: usize) {
+        let from = self.scale_pct();
+        self.rung = rung;
+        let slot = usize::try_from(self.changes).unwrap_or(usize::MAX) % LIVE_LOG;
+        self.steps[slot] = Some(LiveScaleStep {
+            frame: self.frames,
+            from_pct: from,
+            to_pct: self.scale_pct(),
+        });
+        self.changes += 1;
+        self.since_change = 0;
+        self.over = 0;
+        self.fits = 0;
+        self.filled = 0;
+        self.pos = 0;
+        self.settle = LIVE_SETTLE;
+    }
+
+    /// Feed one frame's GPU ms (it may be a few frames old; the read is late by design) and
+    /// return the scale in percent for the next frame. A non-finite or negative sample counts the
+    /// frame but is not used.
+    pub fn observe(&mut self, gpu_ms: f32) -> u8 {
+        self.frames = self.frames.saturating_add(1);
+        self.hist[self.rung] = self.hist[self.rung].saturating_add(1);
+        self.since_change = self.since_change.saturating_add(1);
+        if self.settle > 0 {
+            self.settle -= 1;
+            return self.scale_pct();
+        }
+        if !gpu_ms.is_finite() || gpu_ms < 0.0 {
+            return self.scale_pct();
+        }
+        self.ring[self.pos] = gpu_ms;
+        self.pos = (self.pos + 1) % LIVE_MEDIAN;
+        self.filled = (self.filled + 1).min(LIVE_MEDIAN);
+        if self.filled < 3 {
+            return self.scale_pct();
+        }
+        let ms = self.median();
+        let cur = self.scale_pct();
+        if ms > self.cfg.target_ms {
+            self.fits = 0;
+            self.over += 1;
+            if self.over >= self.cfg.down_frames
+                && self.since_change >= self.cfg.hold_down_frames
+                && self.rung + 1 < LIVE_RUNGS
+            {
+                let mut next = self.rung + 1;
+                while next + 1 < LIVE_RUNGS
+                    && Self::predict(ms, cur, LIVE_RUNGS_PCT[next]) > self.cfg.target_ms
+                {
+                    next += 1;
+                }
+                self.change_to(next);
+            }
+        } else {
+            self.over = 0;
+            let up_fits = self.rung > 0
+                && Self::predict(ms, cur, LIVE_RUNGS_PCT[self.rung - 1])
+                    <= self.cfg.target_ms * self.cfg.up_fraction;
+            if up_fits {
+                self.fits += 1;
+                if self.fits >= self.cfg.up_frames && self.since_change >= self.cfg.hold_up_frames {
+                    self.change_to(self.rung - 1);
+                }
+            } else {
+                self.fits = 0;
+            }
+        }
+        self.scale_pct()
+    }
+
+    /// One receipt line: the target, the frames, the change count and the scale histogram.
+    pub fn receipt_line(&self) -> String {
+        use std::fmt::Write as _;
+        let mut hist = String::new();
+        for (i, (pct, n)) in LIVE_RUNGS_PCT.iter().zip(self.hist).enumerate() {
+            let _ = write!(hist, "{}{pct}:{n}", if i > 0 { "," } else { "" });
+        }
+        let mut steps = String::new();
+        for (i, s) in self.steps().enumerate() {
+            let _ = write!(
+                steps,
+                "{}{}:{}>{}",
+                if i > 0 { "," } else { "" },
+                s.frame,
+                s.from_pct,
+                s.to_pct
+            );
+        }
+        format!(
+            "dynres: on target_ms={:.1} frames={} changes={} final={} hist={hist} steps={}",
+            self.cfg.target_ms,
+            self.frames,
+            self.changes,
+            self.scale_pct(),
+            if steps.is_empty() { "none" } else { &steps },
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::DynRes;
@@ -401,5 +646,156 @@ mod tests {
         assert!(ctl.steps_down >= 1);
         let (rw, rh) = ctl.render_size(1920, 1080).expect("size runs");
         assert_eq!((rw, rh), (960, 540), "floor halves the render size");
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::{LiveDynRes, LiveDynResConfig, LIVE_RUNGS_PCT};
+    use engine_core::CounterRng;
+
+    /// A stand-in GPU: 15 percent of the frame does not scale, the rest follows the pixel count.
+    fn cost(base_ms: f32, pct: u8) -> f32 {
+        let r = f32::from(pct) / 100.0;
+        base_ms * (0.15 + 0.85 * r * r)
+    }
+
+    /// Drive the picker for `frames` frames; `load` gives the full-scale cost of each frame.
+    /// Returns every frame's cost at the scale it ran at and the picker.
+    fn run(frames: u32, mut load: impl FnMut(u32) -> f32) -> (Vec<f32>, LiveDynRes) {
+        let mut ctl = LiveDynRes::new(LiveDynResConfig::default());
+        let rng = CounterRng::new(2040);
+        let mut pct = ctl.scale_pct();
+        let mut seen = Vec::new();
+        for f in 0..frames {
+            let word = u32::try_from(rng.sample(u64::from(f)) >> 40).expect("24 bits");
+            let noise =
+                0.95 + 0.1 * (f32::from(u16::try_from(word >> 8).expect("16 bits")) / 65536.0);
+            let ms = cost(load(f), pct) * noise;
+            seen.push(ms);
+            pct = ctl.observe(ms);
+        }
+        (seen, ctl)
+    }
+
+    fn p95(v: &[f32]) -> f32 {
+        let mut s = v.to_vec();
+        s.sort_by(f32::total_cmp);
+        s[(s.len() * 95 / 100).min(s.len() - 1)]
+    }
+
+    #[test]
+    fn a_load_inside_the_budget_never_moves_the_scale() {
+        let (_, ctl) = run(1200, |_| 11.0);
+        assert_eq!(ctl.changes(), 0);
+        assert_eq!(ctl.scale_pct(), 100);
+        assert_eq!(ctl.histogram()[0], 1200);
+    }
+
+    #[test]
+    fn a_spike_steps_down_to_a_rung_that_fits_and_recovers_after() {
+        let (seen, ctl) = run(1400, |f| if (300..700).contains(&f) { 24.0 } else { 11.0 });
+        assert!(ctl.changes() >= 2, "it must go down and come back");
+        let steps: Vec<_> = ctl.steps().collect();
+        assert!(
+            steps[0].frame >= 300 && steps[0].frame <= 330,
+            "first drop at {}",
+            steps[0].frame
+        );
+        assert!(steps[0].to_pct < 100);
+        // Inside the spike, after the picker settled, the frame fits the budget.
+        let settled = &seen[400..700];
+        assert!(
+            p95(settled) <= LiveDynResConfig::default().target_ms * 1.05,
+            "p95 {}",
+            p95(settled)
+        );
+        assert_eq!(
+            ctl.scale_pct(),
+            100,
+            "back at full scale once the load is gone"
+        );
+    }
+
+    #[test]
+    fn a_steady_load_that_fits_only_lower_settles_without_flapping() {
+        let (_, ctl) = run(4000, |_| 19.0);
+        let last = ctl.steps().last().expect("it stepped down");
+        assert!(last.frame < 120, "settled by frame {}", last.frame);
+        assert!(
+            ctl.changes() <= 3,
+            "{} changes under a steady load",
+            ctl.changes()
+        );
+        assert!(ctl.scale_pct() < 100);
+    }
+
+    #[test]
+    fn changes_keep_their_distance_in_either_direction() {
+        let cfg = LiveDynResConfig::default();
+        let (_, ctl) = run(6000, |f| {
+            let wave = if (f / 150) % 2 == 1 { 14.0 } else { 0.0 };
+            9.0 + wave + f32::from(u8::try_from(f % 7).expect("under 7"))
+        });
+        let steps: Vec<_> = ctl.steps().collect();
+        for pair in steps.windows(2) {
+            let gap = pair[1].frame - pair[0].frame;
+            let need = if pair[1].to_pct > pair[1].from_pct {
+                cfg.hold_up_frames
+            } else {
+                cfg.hold_down_frames
+            };
+            assert!(
+                gap >= need,
+                "{pair:?} only {gap} frames apart, needs {need}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scale_never_leaves_the_ladder() {
+        let (_, ctl) = run(2000, |_| 500.0);
+        assert_eq!(ctl.scale_pct(), *LIVE_RUNGS_PCT.last().expect("rungs"));
+        assert!(LIVE_RUNGS_PCT.windows(2).all(|w| w[0] > w[1]));
+    }
+
+    #[test]
+    fn bad_samples_count_the_frame_but_move_nothing() {
+        let mut ctl = LiveDynRes::new(LiveDynResConfig::default());
+        for bad in [f32::NAN, f32::INFINITY, -1.0] {
+            for _ in 0..50 {
+                assert_eq!(ctl.observe(bad), 100);
+            }
+        }
+        assert_eq!(ctl.frames(), 150);
+        assert_eq!(ctl.changes(), 0);
+    }
+
+    #[test]
+    fn the_histogram_sums_to_the_frames_and_the_receipt_names_it() {
+        let (_, ctl) = run(900, |f| if f > 200 { 28.0 } else { 11.0 });
+        assert_eq!(ctl.histogram().iter().sum::<u32>(), ctl.frames());
+        let line = ctl.receipt_line();
+        assert!(
+            line.starts_with("dynres: on target_ms=14.0 frames=900 changes="),
+            "{line}"
+        );
+        assert!(
+            line.contains("hist=100:") && line.contains(",67:"),
+            "{line}"
+        );
+        assert!(
+            line.contains("steps=") && !line.contains("steps=none"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn the_same_run_gives_the_same_receipt_twice() {
+        let load = |f: u32| if (f / 200) % 2 == 1 { 26.0 } else { 12.0 };
+        assert_eq!(
+            run(2000, load).1.receipt_line(),
+            run(2000, load).1.receipt_line()
+        );
     }
 }

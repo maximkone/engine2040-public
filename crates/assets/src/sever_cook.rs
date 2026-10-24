@@ -7,7 +7,7 @@
 //! for verts/tris. Determinism: segments sort by name, edges sort by key, the
 //! digest is the crate-canonical content hash over a little-endian encoding,
 //! so the same rig cooks byte-identical output on every PC. Errors: typed
-//! [`SeverCookError`]; an open edge, a doubled edge or a flipped normal
+//! [`SeverCookError`](crate::cooker::sever_cook::SeverCookError); an open edge, a doubled edge or a flipped normal
 //! refuses the cook loudly.
 
 use std::collections::BTreeMap;
