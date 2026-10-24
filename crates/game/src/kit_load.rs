@@ -7,17 +7,18 @@
 //! AABB fit and the presenter upload. Units: meters, radians (yaw about +Y).
 //! Determinism: the same bytes give the same actors; pixels never enter the
 //! sim hash. Errors: typed [`KitError`](super::KitError), never panics.
-//! Budget: 11 actors parsed once at init; zero per-tick work, so the frame
+//! Budget: 14 actors parsed once at init; zero per-tick work, so the frame
 //! cost stays flat over a match.
 
 use super::{parse_err, KitError, MAX_KIT_POS_M, MAX_KIT_SIZE_M};
 
 /// Embedded placement table (`content/arena/placement.json`).
 pub const KIT_JSON: &str = include_str!("../../../content/arena/placement.json");
-/// Actors in the placement table (11 over 8 kit files).
-pub const KIT_ACTOR_COUNT: usize = 11;
+/// Actors in the placement table (14 over 11 kit files).
+pub const KIT_ACTOR_COUNT: usize = 14;
 
-/// One of the 8 kit assets on disk (`content/arena/src/<file>`).
+/// One of the 11 kit assets on disk: 8 under `content/arena/src/<file>`, the
+/// three machine props under `content/generated/props/<file>` (SHOW4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KitAsset {
     /// Open sand plane.
@@ -36,6 +37,12 @@ pub enum KitAsset {
     Crate,
     /// Scattered debris.
     Debris,
+    /// Seeded siege ballista, a look-only prop from the props kit (SHOW4).
+    Ballista,
+    /// Seeded treadwheel crane, a look-only prop from the props kit (SHOW4).
+    Crane,
+    /// Seeded supply cart, a look-only prop from the props kit (SHOW4).
+    Cart,
 }
 
 impl KitAsset {
@@ -50,11 +57,16 @@ impl KitAsset {
             "banner" => Ok(Self::Banner),
             "crate" => Ok(Self::Crate),
             "debris" => Ok(Self::Debris),
+            "machine_ballista" => Ok(Self::Ballista),
+            "machine_crane" => Ok(Self::Crane),
+            "machine_cart" => Ok(Self::Cart),
             _ => Err(parse_err("unknown kit asset")),
         }
     }
 
-    /// glTF file for this asset under `content/arena/src/`.
+    /// glTF file for this asset: the eight arena files sit under
+    /// `content/arena/src/`, the three machine props under
+    /// `content/generated/props/` (the props kit's own output).
     #[must_use]
     pub fn file_name(self) -> &'static str {
         match self {
@@ -66,7 +78,17 @@ impl KitAsset {
             Self::Banner => "banner.gltf",
             Self::Crate => "crate.gltf",
             Self::Debris => "debris.gltf",
+            Self::Ballista => "machine_ballista.glb",
+            Self::Crane => "machine_crane.glb",
+            Self::Cart => "machine_cart.glb",
         }
+    }
+
+    /// True for the props-kit machines: they load from `content/generated/props`
+    /// and stand as look-only dressing, never as colliders.
+    #[must_use]
+    pub const fn is_prop_kit(self) -> bool {
+        matches!(self, Self::Ballista | Self::Crane | Self::Cart)
     }
 }
 
@@ -280,9 +302,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_extra_actor_beyond_eleven() {
+    fn rejects_extra_actor_beyond_fourteen() {
         let mut text = String::from("{\"actors\": [");
-        for id in 1..=12u32 {
+        for id in 1..=15u32 {
             if id > 1 {
                 text.push(',');
             }
@@ -293,12 +315,12 @@ mod tests {
         text.push_str("]}");
         assert!(
             kit_actors_from_json(&text).is_err(),
-            "12 actors must fail, want exactly 11"
+            "15 actors must fail, want exactly 14"
         );
     }
 
     #[test]
-    fn placement_parses_11_x2_stable() {
+    fn placement_parses_14_x2_stable() {
         let first = kit_actors().expect("embedded placement parses");
         let second = kit_actors().expect("embedded placement parses twice");
         assert_eq!(first.len(), KIT_ACTOR_COUNT);

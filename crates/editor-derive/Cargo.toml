@@ -1,0 +1,21 @@
+[package]
+name = "engine-editor-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# A tuning struct draws its own editor panel: the macro emits one field table
+# plus `fn ui(&mut self, ui: &mut egui::Ui) -> bool`. Build-time only: no
+# engine crate depends on it at run time, and the table carries no reflection.
+[lib]
+proc-macro = true
+
+[dependencies]
+# Versions already in Cargo.lock behind the workspace's other derive macros.
+proc-macro2 = "1"
+quote = "1"
+syn = "2"

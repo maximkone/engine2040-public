@@ -320,6 +320,47 @@ pub fn sky_radiance(view_dir: [f32; 3], params: &SkyParams) -> Result<[f32; 3], 
     Ok(rgb)
 }
 
+/// The power the sun's transmitted colour is raised to before it lights the
+/// frame. The single-scatter coefficients above are tuned for the sky dome, and
+/// they leave the direct sun nearly white even low in the sky (red 0.94, blue
+/// 0.80 at 10 degrees); cubing the ratio gives the sun the warmth it has to the
+/// eye: gold at 35 degrees, orange near the horizon.
+pub const SUN_WARMTH_POWER: f32 = 3.0;
+
+/// How much of the sun's light survives the air on its way to the ground, per
+/// channel, `0..=1`: the same extinction `scatter_above` applies to a view ray,
+/// taken along the sun's own ray (air mass `1 / sin(elevation)`). A sun on or
+/// under the horizon takes the model's longest air mass. Pure; fails loudly on
+/// bad parameters.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the extinction of an f64 model is in 0..=1; the cast to f32 only drops digits"
+)]
+pub fn sun_transmittance(params: &SkyParams) -> Result<[f32; 3], SkyError> {
+    params.validate()?;
+    let Some(s) = normalize3(params.sun_dir) else {
+        return Err(SkyError::Invalid("sky sun_dir is not a direction".into()));
+    };
+    let air_mass = (1.0 / s[1].max(0.0).max(AIR_MASS_MIN_ELEV)).min(AIR_MASS_MAX);
+    let mie = MIE_BASE * f64::from(params.turbidity);
+    let mie_rgb = [mie, mie * 0.97, mie * 0.92];
+    let mut out = [0.0f32; 3];
+    for c in 0..3 {
+        out[c] = (-(BETA_R[c] + mie_rgb[c]) * air_mass).exp() as f32;
+    }
+    Ok(out)
+}
+
+/// The direct sun's colour for these params, linear, the brightest channel 1:
+/// the transmittance ratio raised to [`SUN_WARMTH_POWER`]. The light's
+/// intensity stays the caller's; this is hue only. A high sun is near white,
+/// a low sun warm, monotonically (the red channel never drops under the blue).
+pub fn sun_color(params: &SkyParams) -> Result<[f32; 3], SkyError> {
+    let t = sun_transmittance(params)?;
+    let top = t[0].max(t[1]).max(t[2]).max(1e-6);
+    Ok(t.map(|c| (c / top).powf(SUN_WARMTH_POWER)))
+}
+
 // ---------------------------------------------------------------------------
 // Capture: the per-frame (or per-time-of-day) bake feeding IBL + fog.
 // ---------------------------------------------------------------------------
