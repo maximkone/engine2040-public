@@ -39,6 +39,15 @@ mod tests {
     }
 
     #[test]
+    fn the_halves_are_disjoint_so_or_and_xor_agree() {
+        // a < MOD < 2^16 and b < MOD, so `b << 16` owns the high half only (AF5 note:
+        // the `|` -> `^` survivor is equivalent for this reason).
+        let value = adler32(b"Wikipedia");
+        assert_eq!(value & 0xffff, 0x0398);
+        assert_eq!(value >> 16, 0x11e6);
+    }
+
+    #[test]
     fn wikipedia_vector() {
         assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
     }

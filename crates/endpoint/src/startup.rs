@@ -10,25 +10,32 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use engine_editor::capability::{self, Approval, Capability};
+use engine_editor::capability::{self, Approval};
 use engine_editor::commands::{Applied, Batch, Document, Journal};
 use engine_editor::durable::{rehydrate, reopen_sealed, PersistError};
 
 use super::mcp::{cap_error, undo_gate_error, McpServer, McpToolError, ServerState};
 use super::packs::web::WebScope;
+use super::tool_capabilities::{load_scope_policy, ScopePolicy, SCOPE_POLICY_VERSION};
 
 /// Capability session the stdio door serves. One client, one session.
 pub const MCP_SESSION: u64 = 1;
 
 /// Help text for `--help`: usage plus the one-line MCP client config.
 pub const USAGE: &str = "\
-usage: e2040-mcp [--project-dir DIR] [--web-root DIR [--web-chrome PATH]] [DIR]\n\
+usage: e2040-mcp [--project-dir DIR] [--scope-policy FILE] [--web-root DIR [--web-chrome PATH]] [DIR]\n\
 \n\
 Serve the MCP authoring door on a project folder over stdio.\n\
 The folder holds the durable `gen-*.edoc` generations; a fresh folder\n\
 starts empty. With no DIR, the current directory is the project.\n\
 One door per folder: while a door runs it holds the folder's lease file\n\
 `.e2040-door.lease`, so a second door on the same folder is refused.\n\
+\n\
+--scope-policy FILE mints the session capability token from that scope\n\
+policy: `scope-policy-version: 1` plus an optional\n\
+`scope-policy-ops: insert,move,set,delete` line. Without the flag every op\n\
+class stays granted. A stale version, an unknown class or a missing file\n\
+refuses to open the door.\n\
 \n\
 --web-root DIR allows the web verbs (`build.web`, `serve.web`,\n\
 `browser.capture`, `browser.input`) over the repo root holding\n\
@@ -57,6 +64,8 @@ pub enum StartupError {
     BadDir { path: String, reason: String },
     /// Another door holds the folder's single-writer lease.
     Leased { path: String },
+    /// The scope-policy file is missing, unreadable, stale or malformed.
+    BadPolicy { path: String, reason: String },
     /// The stdio transport failed to start or serve.
     Transport { detail: String },
 }
@@ -69,12 +78,15 @@ impl StartupError {
         }
     }
 
-    /// Process exit code: usage is 2 (CLI convention), bad dir, lease and
-    /// transport failures are 1. All nonzero by contract.
+    /// Process exit code: usage is 2 (CLI convention), bad dir, lease, policy
+    /// and transport failures are 1. All nonzero by contract.
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Usage { .. } => 2,
-            Self::BadDir { .. } | Self::Leased { .. } | Self::Transport { .. } => 1,
+            Self::BadDir { .. }
+            | Self::Leased { .. }
+            | Self::BadPolicy { .. }
+            | Self::Transport { .. } => 1,
         }
     }
 }
@@ -88,6 +100,12 @@ impl fmt::Display for StartupError {
                 f,
                 "project `{path}` is already open in another door; close it first \
                  (a door holds the folder's lease until its process exits)"
+            ),
+            Self::BadPolicy { path, reason } => write!(
+                f,
+                "bad scope policy `{path}`: {reason}; re-run with the shipped policy file \
+                 (scope-policy-version: {}) or without --scope-policy",
+                crate::tool_capabilities::SCOPE_POLICY_VERSION
             ),
             Self::Transport { detail } => write!(f, "transport failed: {detail}"),
         }
@@ -107,76 +125,54 @@ pub struct WebGrant {
     pub chrome: Option<String>,
 }
 
-/// Parsed stdio startup: the project folder to open, plus the optional web
-/// grant. The server speaks on stdin/stdout; there is no port and no extra tool
-/// past the 26-tool registry (`crate::tools::TOOLS`).
+/// Parsed stdio startup: the project folder to open, the optional scope policy
+/// that mints the session capability token, plus the optional web grant. The
+/// server speaks on stdin/stdout; there is no port and no extra tool past the
+/// shipped registry (`crate::tools::TOOLS`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupConfig {
     /// Project folder holding the durable `gen-*.edoc` generations.
     pub project_dir: PathBuf,
+    /// `--scope-policy`: the scope-policy file the session token is minted
+    /// from; `None` (the default) is the shipped policy, every op class.
+    pub policy: Option<PathBuf>,
     /// `--web-root`: allow the web verbs under that repo root; `None` (the
     /// default) refuses every web verb with `unscoped`.
     pub web: Option<WebGrant>,
 }
 
 /// Parse `argv` (including `argv[0]`): `--project-dir DIR`,
-/// `--project-dir=DIR`, `--web-root DIR`, `--web-chrome PATH` or one positional
-/// DIR. Anything else is [`Usage`](StartupError::Usage).
+/// `--project-dir=DIR`, `--scope-policy FILE`, `--scope-policy=FILE`,
+/// `--web-root DIR`, `--web-chrome PATH` or one positional DIR. Anything else
+/// is [`Usage`](StartupError::Usage).
 pub fn parse_args(args: &[String]) -> Result<StartupConfig, StartupError> {
     let usage = |message: &str| StartupError::Usage {
         message: message.to_owned(),
     };
     let mut flag_dir: Option<PathBuf> = None;
     let mut positional: Option<PathBuf> = None;
+    let mut policy: Option<PathBuf> = None;
     let mut web_root: Option<PathBuf> = None;
     let mut web_chrome: Option<String> = None;
     let mut rest = args.iter().skip(1);
     while let Some(arg) = rest.next() {
-        if arg == "--project-dir" {
-            let value = rest
-                .next()
-                .ok_or_else(|| usage("--project-dir needs a directory"))?;
-            if value.is_empty() {
-                return Err(usage("--project-dir needs a non-empty directory"));
-            }
+        if let Some(value) = flag_value(arg, "--project-dir", "a directory", &mut rest)? {
             if flag_dir.is_some() {
                 return Err(usage("--project-dir given twice"));
             }
             flag_dir = Some(PathBuf::from(value));
-        } else if let Some(value) = arg.strip_prefix("--project-dir=") {
-            if value.is_empty() {
-                return Err(usage("--project-dir needs a non-empty directory"));
+        } else if let Some(value) = flag_value(arg, "--scope-policy", "a policy file", &mut rest)? {
+            if policy.is_some() {
+                return Err(usage("--scope-policy given twice"));
             }
-            if flag_dir.is_some() {
-                return Err(usage("--project-dir given twice"));
-            }
-            flag_dir = Some(PathBuf::from(value));
-        } else if arg == "--web-root" || arg.starts_with("--web-root=") {
-            let value = if arg == "--web-root" {
-                rest.next()
-                    .ok_or_else(|| usage("--web-root needs a repo directory"))?
-                    .as_str()
-            } else {
-                arg.trim_start_matches("--web-root=")
-            };
-            if value.is_empty() {
-                return Err(usage("--web-root needs a non-empty repo directory"));
-            }
+            policy = Some(PathBuf::from(value));
+        } else if let Some(value) = flag_value(arg, "--web-root", "a repo directory", &mut rest)? {
             if web_root.is_some() {
                 return Err(usage("--web-root given twice"));
             }
             web_root = Some(PathBuf::from(value));
-        } else if arg == "--web-chrome" || arg.starts_with("--web-chrome=") {
-            let value = if arg == "--web-chrome" {
-                rest.next()
-                    .ok_or_else(|| usage("--web-chrome needs a program or path"))?
-                    .as_str()
-            } else {
-                arg.trim_start_matches("--web-chrome=")
-            };
-            if value.is_empty() {
-                return Err(usage("--web-chrome needs a non-empty program or path"));
-            }
+        } else if let Some(value) = flag_value(arg, "--web-chrome", "a program or path", &mut rest)?
+        {
             if web_chrome.is_some() {
                 return Err(usage("--web-chrome given twice"));
             }
@@ -203,11 +199,43 @@ pub fn parse_args(args: &[String]) -> Result<StartupConfig, StartupError> {
         project_dir: flag_dir
             .or(positional)
             .unwrap_or_else(|| PathBuf::from(".")),
+        policy,
         web: web_root.map(|root| WebGrant {
             root,
             chrome: web_chrome,
         }),
     })
+}
+
+/// Read one flag's value: `--flag VALUE` or `--flag=VALUE`, `None` when `arg`
+/// is a different flag. An absent or empty value is a usage error naming the
+/// flag plus `needs`.
+fn flag_value<'a>(
+    arg: &'a str,
+    flag: &str,
+    needs: &str,
+    rest: &mut impl Iterator<Item = &'a String>,
+) -> Result<Option<&'a str>, StartupError> {
+    let value = if arg == flag {
+        rest.next()
+            .ok_or_else(|| StartupError::Usage {
+                message: format!("{flag} needs {needs}"),
+            })?
+            .as_str()
+    } else if let Some(value) = arg
+        .strip_prefix(flag)
+        .and_then(|tail| tail.strip_prefix('='))
+    {
+        value
+    } else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(StartupError::Usage {
+            message: format!("{flag} needs a non-empty {needs}"),
+        });
+    }
+    Ok(Some(value))
 }
 
 /// Open the project folder: the latest sealed `gen-*.edoc` generation wins,
@@ -370,12 +398,42 @@ pub(crate) fn undo_durable(
     })
 }
 
+/// Load the session's scope policy: the `--scope-policy` file when given, else
+/// the shipped policy. A stale version, an unknown op class or an unreadable
+/// file refuses startup, so a broken grant never opens a wider door than the
+/// host intended (EA6: fail closed).
+pub fn load_session_policy(config: &StartupConfig) -> Result<ScopePolicy, StartupError> {
+    let Some(path) = &config.policy else {
+        return Ok(ScopePolicy::default_file());
+    };
+    let shown = path.display().to_string();
+    let refuse = |reason: String| StartupError::BadPolicy {
+        path: shown.clone(),
+        reason,
+    };
+    let text_path = path
+        .to_str()
+        .ok_or_else(|| refuse("the policy path is not valid UTF-8".to_owned()))?;
+    let policy = load_scope_policy(text_path).map_err(|error| refuse(error.to_string()))?;
+    if policy.version() != SCOPE_POLICY_VERSION {
+        return Err(refuse(format!(
+            "policy version {} is stale, need scope-policy-version: {SCOPE_POLICY_VERSION}",
+            policy.version()
+        )));
+    }
+    Ok(policy)
+}
+
 /// Build the door server (core tools plus verb packs) over the opened
-/// project folder. A [`WebGrant`] is the one host call that allows the web
-/// verbs for this session; the verbs stay refused (`unscoped`) without it.
+/// project folder. The session capability token is minted from the host's
+/// scope policy (EA6, `--scope-policy`; every op class by default), so a write
+/// the policy does not grant refuses with `op_not_allowed` instead of running
+/// under a blanket grant. A [`WebGrant`] is the one host call that allows the
+/// web verbs for this session; the verbs stay refused (`unscoped`) without it.
 pub fn build_server(config: &StartupConfig) -> Result<McpServer, StartupError> {
-    // Validate the one host grant that opens the web verbs before taking the
-    // folder lease, so a bad grant never leaves a lock behind.
+    // Validate the host grants that open the door before taking the folder
+    // lease, so a bad grant never leaves a lock behind.
+    let policy = load_session_policy(config)?;
     if let Some(grant) = &config.web {
         if !grant.root.is_dir() {
             return Err(StartupError::BadDir {
@@ -395,7 +453,7 @@ pub fn build_server(config: &StartupConfig) -> Result<McpServer, StartupError> {
         doc,
         journal,
         MCP_SESSION,
-        Capability::unrestricted(MCP_SESSION),
+        super::door_token::token_from_policy(&policy, MCP_SESSION),
     );
     state.project_dir = Some(config.project_dir.clone());
     state.project_lease = Some(lease);
@@ -577,6 +635,7 @@ mod tests {
         // Refused by default: the door grant is the only way in.
         let closed = build_server(&StartupConfig {
             project_dir: project.clone(),
+            policy: None,
             web: None,
         })
         .expect("server builds without a grant");
@@ -586,6 +645,7 @@ mod tests {
         // Granted: the verb reaches its own gate and names the missing tool.
         let open = build_server(&StartupConfig {
             project_dir: project.clone(),
+            policy: None,
             web: Some(WebGrant {
                 root: root.clone(),
                 chrome: Some("chrome-fixture".to_owned()),
@@ -598,6 +658,7 @@ mod tests {
         // A grant root that is not a directory is a typed start failure.
         let error = build_server(&StartupConfig {
             project_dir: project.clone(),
+            policy: None,
             web: Some(WebGrant {
                 root: root.join("nope"),
                 chrome: None,
@@ -710,6 +771,7 @@ mod tests {
         let dir = scratch("tools");
         let config = StartupConfig {
             project_dir: dir.clone(),
+            policy: None,
             web: None,
         };
         let server = build_server(&config).expect("server builds");
@@ -842,6 +904,7 @@ mod tests {
     fn door(dir: &Path) -> McpServer {
         build_server(&StartupConfig {
             project_dir: dir.to_path_buf(),
+            policy: None,
             web: None,
         })
         .expect("door builds")
@@ -963,6 +1026,7 @@ mod tests {
         let dir = scratch("durable-lease");
         let config = StartupConfig {
             project_dir: dir.clone(),
+            policy: None,
             web: None,
         };
         let first = build_server(&config).expect("first door opens");
