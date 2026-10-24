@@ -268,8 +268,7 @@ impl Presenter {
             Some(&dbg.normal_texture),
             Some(&dbg.albedo_texture),
             Some(&dbg.ids_texture),
-            width,
-            height,
+            [width, height],
         )
         .map_err(|error| PresentError::Device(error.to_string()))
     }
