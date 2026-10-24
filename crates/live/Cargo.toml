@@ -1,0 +1,15 @@
+[package]
+name = "engine-live"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The one FFI seam: loading and calling a dev-built tuning dylib. ISC, in the
+# lock already through the window stack, and it keeps the unsafe surface to
+# two documented sites here instead of a hand-rolled Windows/Unix loader.
+libloading = "0.8"
