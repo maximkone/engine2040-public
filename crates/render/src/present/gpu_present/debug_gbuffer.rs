@@ -268,8 +268,7 @@ impl Presenter {
             Some(&dbg.normal_texture),
             Some(&dbg.albedo_texture),
             Some(&dbg.ids_texture),
-            width,
-            height,
+            [width, height],
         )
         .map_err(|error| PresentError::Device(error.to_string()))
     }
@@ -286,7 +285,19 @@ fn map_depth(
 ) -> Result<Vec<f32>, PresentError> {
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
+    // Native waits here; a browser cannot block the main thread on the GPU, and
+    // its map is answered by a later frame, so the wasm path reports the miss
+    // from `get_mapped_range` below instead of waiting for it.
+    #[cfg(not(target_arch = "wasm32"))]
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = device;
+        return Err(PresentError::Device(
+            "the debug G-buffer readback waits on the GPU map, which a browser cannot block on"
+                .into(),
+        ));
+    }
     let row_bytes = usize::try_from(width).unwrap_or(0).saturating_mul(4);
     let stride = usize::try_from(padded).unwrap_or(0);
     let rows = usize::try_from(height).unwrap_or(0);

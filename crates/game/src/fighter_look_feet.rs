@@ -5,8 +5,8 @@
 //! frame ([`FighterLook::plant_feet`]), so the window and the headless view run
 //! pose a plant the same way. Data owner: each slot owns its [`Feet`], each rig
 //! its [`Legs`]; the solve is `engine_anim::ik`. A foot the clip holds still
-//! against the body (ankle speed under [`PLANT_SPEED_M_S`] for a few ticks, low
-//! over the sand) plants where it is drawn and stays on that spot in the world
+//! against the body or on the sand (ankle speed under [`PLANT_SPEED_M_S`] in
+//! either frame for a few ticks, low over the sand) plants where it is drawn and stays on that spot in the world
 //! while the sim moves the body. The drawn foot follows the spot through an
 //! offset from the clip's foot that moves at most [`STEP_M`] a tick, so a
 //! plant or a let-go never jumps; a plant the body has carried past
@@ -276,7 +276,8 @@ fn approach(from: [f32; 2], to: [f32; 2], step: f32) -> [f32; 2] {
 /// One foot's plant after a tick. `ankle` is the clip's ankle in model space
 /// at the end of the tick, `rest_y` its standing height and `world` where the
 /// clip puts it on the sand. A foot plants where the clip puts it once the clip
-/// has held it low and still for [`PLANT_STILL_TICKS`] and no offset is left
+/// has held it low and still (against the body or on the sand) for
+/// [`PLANT_STILL_TICKS`] and no offset is left
 /// running; a held foot lets go when the clip lifts or moves it past
 /// [`RELEASE_SPEED_M_S`] or the body has carried it past [`MAX_PULL_M`]. The
 /// drawn offset then moves toward the held spot (or back to zero) by at most
@@ -293,8 +294,12 @@ fn step_plant(prev: Plant, ankle: [f32; 3], rest_y: f32, world: [f32; 2], elapse
         .world
         .map(|was| (world[0] - was[0]).hypot(world[1] - was[1]) / count);
     let low = ankle[1] <= rest_y + PLANT_LIFT_M;
+    // Still against the body (a stance the clip holds) or still on the sand (the
+    // stance foot of a run, which the clip sweeps back as fast as the body goes):
+    // checking only the first starved the plants once the duel ran most ticks.
     let slower_than = |limit: f32| {
-        low && carried.is_some_and(|m| m <= STEP_M) && speed.is_some_and(|s| s < limit)
+        low && carried.is_some_and(|m| m <= STEP_M)
+            && (speed.is_some_and(|s| s < limit) || carried.is_some_and(|m| m * TICK_HZ < limit))
     };
     let still = if slower_than(PLANT_SPEED_M_S) {
         prev.still.saturating_add(1)
@@ -795,6 +800,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_run_stance_foot_plants_on_the_sand_and_lets_go_when_it_lifts() {
+        // A 3 m/s runner: the clip sweeps the stance ankle back 5 cm a tick
+        // against the body while the body carries it 5 cm forward, so on the
+        // sand it stands still. It plants after PLANT_STILL_TICKS, stays held
+        // through the stance, and lets go on the tick the clip lifts it.
+        let mut plant = Plant::NEW;
+        for k in 0..=PLANT_STILL_TICKS {
+            let model_x = -0.05 * f32::from(k);
+            plant = step_plant(plant, ankle(model_x), REST, [0.4, 0.0], 1);
+        }
+        assert!(plant.planted, "a still stance foot plants mid-run");
+        assert_eq!(plant.contact, [0.4, 0.0]);
+        for k in 1..=6u8 {
+            let model_x = -0.05 * f32::from(PLANT_STILL_TICKS + k);
+            plant = step_plant(
+                plant,
+                ankle(model_x),
+                REST,
+                [0.4 + 0.001 * f32::from(k), 0.0],
+                1,
+            );
+            assert!(plant.planted, "stance tick {k}: still held");
+        }
+        let lifted = step_plant(plant, [-0.5, REST + 0.10, 0.0], REST, [0.41, 0.0], 1);
+        assert!(!lifted.planted, "the swing lifts the foot off its spot");
+        // A swing foot moving on the sand as fast as the body never plants.
+        let mut swing = Plant::NEW;
+        for k in 0..6u8 {
+            let x = 0.05 * f32::from(k);
+            swing = step_plant(swing, ankle(0.0), REST, [x, 0.0], 1);
+        }
+        assert!(!swing.planted, "3 m/s on the sand is a moving foot");
     }
 
     #[test]
