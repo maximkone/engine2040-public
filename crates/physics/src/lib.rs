@@ -5,6 +5,10 @@
 pub mod articulated;
 /// Center-of-mass balance core plus stagger response.
 pub mod balance;
+/// The capture point picks hold, step or fall for one landed blow: the center
+/// of mass plus its velocity one pendulum time, integer millimetres against the
+/// feet box. Std-only, and no sim tick calls it yet.
+pub mod capture_point;
 /// Clinch pass for ragdolls that share a place: parts the bone capsules of several fighters in
 /// fighter-id order so none sinks into another. Float, client-side, never hashed.
 #[cfg(feature = "rapier")]
