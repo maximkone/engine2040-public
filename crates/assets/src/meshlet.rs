@@ -110,7 +110,7 @@ fn count_u32(count: usize, field: &'static str) -> Result<u32, MeshletError> {
 /// A count as `f32` for scores and means; saturates instead of wrapping.
 ///
 /// Callers pass cluster-scale counts (at most hundreds), well inside `u16`.
-fn count_f32(count: usize) -> f32 {
+pub(crate) fn count_f32(count: usize) -> f32 {
     match u16::try_from(count) {
         Ok(value) => f32::from(value),
         Err(_) => f32::from(u16::MAX),
