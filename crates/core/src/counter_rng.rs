@@ -308,6 +308,37 @@ mod tests {
     }
 
     #[test]
+    fn fork_keys_are_pinned_and_islands_chunks_fork_under_their_tags() {
+        let parent = CounterRng::new(SEED);
+        assert_eq!(
+            parent.fork(3).key(),
+            [5_009_997_474_472_960_174, 14_174_306_566_839_388_830],
+            "the fork word is (stream * INC + k0) ^ k1, pinned"
+        );
+        assert_eq!(parent.for_island(1), parent.fork(1 ^ ISLAND_TAG));
+        assert_eq!(parent.for_chunk(9), parent.fork(9 ^ CHUNK_TAG));
+    }
+
+    #[test]
+    fn the_cursor_takes_the_high_half_and_its_range_never_leaves() {
+        let mut high = CounterCursor::new(7);
+        let mut whole = CounterCursor::new(7);
+        assert_eq!(
+            u64::from(high.next_u32()),
+            whole.next_u64() >> 32,
+            "next_u32 is the high half of the next word"
+        );
+        let mut range = CounterCursor::new(7);
+        for _ in 0..8 {
+            assert_eq!(
+                range.next_range(9, 10),
+                9,
+                "a one-wide range is its own bound"
+            );
+        }
+    }
+
+    #[test]
     fn stream_state_sizes() {
         assert_eq!(core::mem::size_of::<CounterRng>(), 16);
         assert_eq!(core::mem::size_of::<CounterCursor>(), 24);

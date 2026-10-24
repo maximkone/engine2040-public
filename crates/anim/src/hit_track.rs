@@ -18,9 +18,15 @@ use engine_combat::cut::{
     CutError, HitMove, HitTrack, HitTrackRow, JointTarget, CUT_POS_BOUND_MM, CUT_SWING_LEN_MM_V1,
     HIT_TRACK_VERSION_V1, MAX_HIT_TRACK_MOVES, MAX_HIT_TRACK_TICKS,
 };
+use engine_combat::fight::TABLES_V2;
 
 /// Blade half-thickness baked into every row, in millimetres.
 pub const HIT_BLADE_HALF_MM: u32 = 10;
+/// The tick every shipped 1H clip lands its blade on: the readable rules-v2
+/// attack startup, read from the table so a timing change moves the bake with
+/// it (OPT59 moved it 15 -> 30). Each clip's keys peak on this tick and the
+/// clip runs past it.
+pub const STRIKE_TICK: u32 = TABLES_V2.attack_startup_ticks;
 /// Shortest blade segment a spec may bake, in millimetres.
 const MIN_BLADE_MM: u32 = 100;
 /// Widest chest twist a spec may bake, in millimetres.
@@ -48,10 +54,10 @@ pub struct AttackClipSpec {
     pub source: &'static str,
     /// Ship license; must equal the source registry license.
     pub license: &'static str,
-    /// Frame count at 60 Hz; the shipped attack clips are 25.
+    /// Frame count at 60 Hz; the shipped attack clips are 49.
     pub frames: u16,
-    /// Tick where the blade crosses the strike line.
-    pub strike_tick: u16,
+    /// Tick where the blade crosses the strike line; the table's startup.
+    pub strike_tick: u32,
     /// Blade key poses in tick order, first `0`, last `frames - 1`.
     pub keys: [BladeKey; 5],
 }
@@ -65,8 +71,8 @@ pub const HERO_ATTACK_SET: [AttackClipSpec; 3] = [
         name: "attack_1h_1",
         source: "system_g6",
         license: "CC0-1.0",
-        frames: 25,
-        strike_tick: 15,
+        frames: 49,
+        strike_tick: STRIKE_TICK,
         keys: [
             BladeKey {
                 tick: 0,
@@ -75,25 +81,25 @@ pub const HERO_ATTACK_SET: [AttackClipSpec; 3] = [
                 twist_mm: -70,
             },
             BladeKey {
-                tick: 8,
+                tick: 16,
                 palm_mm: [-420, 240, 250],
                 tip_mm: [-420, 240, 1250],
                 twist_mm: -40,
             },
             BladeKey {
-                tick: 15,
+                tick: 30,
                 palm_mm: [0, 200, 600],
                 tip_mm: [0, 200, 1600],
                 twist_mm: 0,
             },
             BladeKey {
-                tick: 20,
+                tick: 40,
                 palm_mm: [420, 240, 250],
                 tip_mm: [420, 240, 1250],
                 twist_mm: 40,
             },
             BladeKey {
-                tick: 24,
+                tick: 48,
                 palm_mm: [600, 220, -100],
                 tip_mm: [600, 220, 900],
                 twist_mm: 70,
@@ -104,8 +110,8 @@ pub const HERO_ATTACK_SET: [AttackClipSpec; 3] = [
         name: "attack_1h_2",
         source: "system_g6",
         license: "CC0-1.0",
-        frames: 25,
-        strike_tick: 15,
+        frames: 49,
+        strike_tick: STRIKE_TICK,
         keys: [
             BladeKey {
                 tick: 0,
@@ -114,25 +120,25 @@ pub const HERO_ATTACK_SET: [AttackClipSpec; 3] = [
                 twist_mm: 0,
             },
             BladeKey {
-                tick: 8,
+                tick: 16,
                 palm_mm: [0, 720, 280],
                 tip_mm: [0, 1620, 680],
                 twist_mm: 0,
             },
             BladeKey {
-                tick: 15,
+                tick: 30,
                 palm_mm: [0, 250, 700],
                 tip_mm: [0, -200, 1400],
                 twist_mm: 0,
             },
             BladeKey {
-                tick: 20,
+                tick: 40,
                 palm_mm: [0, 80, 620],
                 tip_mm: [0, -520, 1220],
                 twist_mm: 0,
             },
             BladeKey {
-                tick: 24,
+                tick: 48,
                 palm_mm: [0, 150, 380],
                 tip_mm: [0, -650, 880],
                 twist_mm: 0,
@@ -143,8 +149,8 @@ pub const HERO_ATTACK_SET: [AttackClipSpec; 3] = [
         name: "attack_1h_3",
         source: "system_g6",
         license: "CC0-1.0",
-        frames: 25,
-        strike_tick: 15,
+        frames: 49,
+        strike_tick: STRIKE_TICK,
         keys: [
             BladeKey {
                 tick: 0,
@@ -153,25 +159,25 @@ pub const HERO_ATTACK_SET: [AttackClipSpec; 3] = [
                 twist_mm: 60,
             },
             BladeKey {
-                tick: 8,
+                tick: 16,
                 palm_mm: [260, -260, 340],
                 tip_mm: [660, -660, 820],
                 twist_mm: 30,
             },
             BladeKey {
-                tick: 15,
+                tick: 30,
                 palm_mm: [0, -120, 600],
                 tip_mm: [0, 680, 1200],
                 twist_mm: 0,
             },
             BladeKey {
-                tick: 20,
+                tick: 40,
                 palm_mm: [-260, 140, 420],
                 tip_mm: [-260, 940, 1020],
                 twist_mm: -30,
             },
             BladeKey {
-                tick: 24,
+                tick: 48,
                 palm_mm: [-420, 260, 120],
                 tip_mm: [-420, 1060, 720],
                 twist_mm: -60,
@@ -287,7 +293,7 @@ fn validate_spec(spec: &AttackClipSpec) -> Result<(), HitTrackError> {
     if spec.frames == 0 || usize::from(spec.frames) > MAX_HIT_TRACK_TICKS {
         return Err(bad("frames"));
     }
-    if spec.strike_tick >= spec.frames {
+    if spec.strike_tick >= u32::from(spec.frames) {
         return Err(bad("strike tick"));
     }
     if spec.keys[0].tick != 0 {
@@ -306,7 +312,7 @@ fn validate_spec(spec: &AttackClipSpec) -> Result<(), HitTrackError> {
             }
         }
         previous = Some(key.tick);
-        if key.tick == spec.strike_tick {
+        if u32::from(key.tick) == spec.strike_tick {
             strike_key = true;
         }
         for value in key.palm_mm.iter().chain(key.tip_mm.iter()) {
@@ -523,12 +529,32 @@ mod tests {
         for (index, spec) in HERO_ATTACK_SET.iter().enumerate() {
             let id = u16::try_from(index).expect("move id");
             assert_eq!(
-                u32::from(spec.strike_tick),
-                TABLES_V2.attack_startup_ticks,
+                spec.strike_tick, TABLES_V2.attack_startup_ticks,
                 "{} lands on the readable v2 startup",
                 spec.name
             );
-            let row = track.row(id, spec.strike_tick).expect("strike row");
+            let row = track
+                .row(
+                    id,
+                    u16::try_from(spec.strike_tick).expect("strike tick fits a row"),
+                )
+                .expect("strike row");
+            let strike_key = spec
+                .keys
+                .iter()
+                .find(|key| u32::from(key.tick) == spec.strike_tick)
+                .expect("the bake needs a key on the strike tick");
+            let farthest = spec
+                .keys
+                .iter()
+                .map(|key| key.tip_mm[2])
+                .max()
+                .expect("keys");
+            assert_eq!(
+                strike_key.tip_mm[2], farthest,
+                "{} keys peak on the strike tick",
+                spec.name
+            );
             let pose = StrikePose::from_hit_row(body(0, 0, 0), row, 0);
             assert_eq!(pose.blade, row.blade(0));
             assert!(

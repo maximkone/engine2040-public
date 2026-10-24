@@ -1,6 +1,6 @@
 //! The committed arena kit cooks the same twice. The real `arena_cook` bin cooks the CC0 texture
 //! sources into two fresh roots; both runs and the committed `content/arena/cooked/` must agree
-//! byte for byte (15 KTX2 maps and the receipt). The 8 kit meshes cook through the CT2 prop lane
+//! byte for byte (24 KTX2 maps and the receipt). The 8 kit meshes cook through the CT2 prop lane
 //! twice to equal output under the prop budget.
 #![cfg(feature = "import")]
 
@@ -64,7 +64,7 @@ fn read_set(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 fn arena_cook_committed_set_is_identical_twice_and_matches_the_tree() {
     let first = cook("a");
     let second = cook("b");
-    assert_eq!(first.len(), 16, "15 KTX2 maps and cook.json");
+    assert_eq!(first.len(), 25, "24 KTX2 maps and cook.json");
     assert!(first == second, "two cooks of the same sources differ");
     let committed = read_set(&arena().join("cooked"));
     assert_eq!(
@@ -85,6 +85,41 @@ fn arena_cook_committed_set_is_identical_twice_and_matches_the_tree() {
             assert!(bytes == want, "{name} differs from the committed file");
         }
     }
+}
+
+#[test]
+fn travertine_and_marble_cook_twice_equal() {
+    // SW122: the marble sets landed as sources; the cook must be reproducible
+    // before their KTX2 maps are committed beside the older five.
+    let first = cook("sw122a");
+    let second = cook("sw122b");
+    for set in ["marble", "marble_tiles"] {
+        for suffix in ["base", "normal", "orm"] {
+            let name = format!("{set}_{suffix}.ktx2");
+            assert_eq!(
+                first[&name], second[&name],
+                "{name} cooks equal twice (SW122)"
+            );
+            assert!(!first[&name].is_empty(), "{name} has bytes");
+        }
+    }
+}
+
+#[test]
+fn dense_sand_cooks_twice_equal() {
+    // SW124: Poly Haven naming plus the packed arm image. Two cooks must agree,
+    // and the arm's metal channel must have reached the ORM's blue channel.
+    let first = cook("sw124a");
+    let second = cook("sw124b");
+    for suffix in ["base", "normal", "orm"] {
+        let name = format!("sand_dense_{suffix}.ktx2");
+        assert_eq!(
+            first[&name], second[&name],
+            "{name} cooks equal twice (SW124)"
+        );
+    }
+    let orm = &first["sand_dense_orm.ktx2"];
+    assert!(!orm.is_empty(), "the packed arm cooked an ORM map");
 }
 
 #[test]
