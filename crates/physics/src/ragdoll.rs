@@ -333,6 +333,9 @@ pub struct Ragdoll {
     multibody_joints: MultibodyJointSet,
     soft_bodies: SoftBodySet,
     ccd: CCDSolver,
+    /// Explicit CCD fixed-target-cache clears so far (PX48). Observation only: not folded into
+    /// the hash and carried by no snapshot.
+    ccd_clears: u64,
     /// Body handles in skeleton order; fixes iteration/hash order.
     order: Vec<RigidBodyHandle>,
     /// Owned skeleton: joint parents drive the sim-local conversion.
@@ -531,6 +534,7 @@ impl Ragdoll {
             multibody_joints: MultibodyJointSet::new(),
             soft_bodies: SoftBodySet::new(),
             ccd: CCDSolver::new(),
+            ccd_clears: 0,
             order,
             skeleton: skeleton.clone(),
             animated: pose.clone(),
@@ -894,6 +898,23 @@ impl Ragdoll {
         (finite && capsule.inv_mass.is_finite()).then_some(capsule)
     }
 
+    /// Drop the CCD solver's cached fixed-target list.
+    ///
+    /// Rapier 0.36 caches the fixed colliders and their prediction-fattened AABBs for the
+    /// non-bullet sweep and keys that list only by the prediction distance: a restore or a bone
+    /// teleport must clear it so no sweep clamps against targets cached before the move. Costs
+    /// one list rebuild on the next step; changes no body state.
+    fn clear_ccd_targets(&mut self) {
+        self.ccd.invalidate_fixed_targets_cache();
+        self.ccd_clears = self.ccd_clears.saturating_add(1);
+    }
+
+    /// How many times this ragdoll cleared the CCD fixed-target cache (PX48 teleports and
+    /// restores). Observation only, never hashed.
+    pub fn ccd_clears(&self) -> u64 {
+        self.ccd_clears
+    }
+
     /// Move one bone by `shift` meters and change its velocity by `dv`, the two halves of
     /// parting it from another fighter. Bones never sleep, so nothing is woken: the pass stays
     /// out of Rapier's user-change lists like the floor and spacing passes.
@@ -909,6 +930,8 @@ impl Ragdoll {
             false,
         );
         body.set_linvel(Vector::new(v.x + dv[0], v.y + dv[1], v.z + dv[2]), false);
+        // A parted bone is teleported: the CCD cache from before the shift is stale.
+        self.clear_ccd_targets();
         Ok(())
     }
 
@@ -1035,6 +1058,8 @@ impl Ragdoll {
         }
         self.contact_events = snapshot.contact_events;
         self.pending.clear();
+        // A restore is a teleport to the solver: drop the CCD fixed-target cache here too.
+        self.clear_ccd_targets();
         Ok(())
     }
 }
@@ -1440,6 +1465,10 @@ fn check_pos(pos: [f32; 3]) -> Result<(), Error> {
         Err(Error::NonFinitePosition)
     }
 }
+
+#[cfg(test)]
+#[path = "ragdoll_ccd_tests.rs"]
+mod ccd_cache_tests;
 
 #[cfg(test)]
 mod tests {

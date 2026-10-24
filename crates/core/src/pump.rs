@@ -188,6 +188,18 @@ mod tests {
     }
 
     #[test]
+    fn a_pump_with_slices_left_is_not_done() {
+        let mut pump = SlicePump::with_capacity(CountingJob::new(StableId::slot(2), 2), 4);
+        assert!(!pump.is_done(), "nothing ran yet");
+        assert!(!pump.frame(1), "the first slice is not the last");
+        assert!(!pump.is_done(), "one slice left");
+        assert!(!pump.frame(2), "the second slice is still work");
+        assert!(!pump.is_done(), "the job is done only when a step reports it");
+        assert!(pump.frame(3), "the step after the last slice ends the job");
+        assert!(pump.is_done());
+    }
+
+    #[test]
     fn pump_steps_one_slice_per_frame_and_records_the_tick_arrivals() {
         let mut pump = SlicePump::with_capacity(CountingJob::new(StableId::slot(3), 3), 8);
         assert!(!pump.frame(10), "the job has slices left");
