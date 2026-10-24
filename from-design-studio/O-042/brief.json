@@ -1,0 +1,23 @@
+{
+  "title": "Engine2040 UI-1 Kit",
+  "size": { "w": 1280, "h": 720 },
+  "sizes": [
+    { "w": 1280, "h": 720, "name": "kit-sheet", "title_px": 64, "title_box": [0.03, 0.04, 0.6, 0.2], "title_longest": 18 }
+  ],
+  "dir": "ltr",
+  "tokens": "tokens.css",
+  "page": "page.html",
+  "image": "out.png",
+  "text": [
+    { "label": "title", "fg": "var(--accent)", "bg": "var(--bg)", "min": 4.5 },
+    { "label": "subtitle", "fg": "var(--muted)", "bg": "var(--bg)", "min": 4.5 },
+    { "label": "body", "fg": "var(--ink)", "bg": "var(--bg)", "min": 4.5 },
+    { "label": "cta", "fg": "var(--on-accent)", "bg": "var(--accent)", "min": 4.5 },
+    { "label": "chip", "fg": "var(--ink)", "bg": "var(--panel)", "min": 4.5 }
+  ],
+  "title_box": [0.03, 0.04, 0.6, 0.2],
+  "title_px": 64,
+  "title_longest": 18,
+  "order": "O-042",
+  "product": "order:game-ui-for-engine2040-eb-2026-10-05-s29"
+}

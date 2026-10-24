@@ -7,7 +7,7 @@
 //! 1 ch 9.6, 11.3: never wait on the GPU inside a frame).
 use super::super::*;
 use super::frame::{FrameReceipt, LookPassReceipt};
-use super::gate::{ibl_cut_word, LiveLook, IBL_CUT_OFFSET};
+use super::gate::{ibl_cut_word, sun_from_light_bytes, LiveLook, IBL_CUT_OFFSET};
 use super::presenter::Presenter;
 use super::submit::{
     effective_camera, inverse_view_proj_cols, map_readback_f32, padded_depth_row, ForwardLook,
@@ -488,6 +488,7 @@ impl Presenter {
             // Material-only pack: the camera plus light uniforms above already
             // carry this frame's matrix, so no per-draw view math runs here.
             let kind = self.material_kind(item.mesh);
+            let param = self.material_param(item.mesh, kind);
             let mat_u = crate::v1::build_material(&item.material).map_err(|e| {
                 PresentError::InvalidDraw {
                     index: slot,
@@ -506,7 +507,7 @@ impl Presenter {
             // Stack image, not `to_bytes()`: the per-draw byte image would
             // build one `Vec` per draw, which the ALLOC ratchet cannot see.
             self.material_scratch
-                .extend_from_slice(&mat_u.to_array_with_kind(kind, kind.default_param()));
+                .extend_from_slice(&mat_u.to_array_with_kind(kind, param));
             self.material_scratch
                 .resize((slot + 1) * MATERIAL_STRIDE, 0);
         }
@@ -953,10 +954,16 @@ impl Presenter {
             IBL_CUT_OFFSET,
             &ibl_cut_word(ibl_on).to_le_bytes(),
         );
+        // RL47 A9: the look tranche reads the sun this very frame is lit by.
+        if let Some(sun) = sun_from_light_bytes(light) {
+            self.live_sun_dir = sun;
+        }
         if !self.material_scratch.is_empty() {
             self.queue
                 .write_buffer(&self.material_ring, 0, &self.material_scratch);
         }
+        // The sprite and ribbon passes tint by the frame's light.
+        self.set_vfx_light(light);
     }
 
     /// End a frame: drain the buffers and bind groups created since the
@@ -1189,7 +1196,9 @@ impl Presenter {
         #[cfg(target_arch = "wasm32")]
         self.scopes.settle();
         let stage_started = engine_clock::now();
-        let (render_w, render_h) = live_present_size(width, height, live_half_res_enabled());
+        let surface = matches!(sink, LiveSink::Surface(_));
+        self.tick_dynres();
+        let (render_w, render_h) = self.live_render_size(surface, width, height);
         let frame = effective_camera(list, render_w, render_h)?;
         // The meter step runs before the frame is staged: the histogram
         // of the frame before this one lands here (the readback is one
@@ -1200,6 +1209,7 @@ impl Presenter {
         let (cam_bytes, light_bytes) = (staged.cam_bytes, staged.light_bytes);
         self.frame_waits = FrameWaits::default();
         self.ensure_targets(render_w, render_h);
+        self.prepare_upscale(surface, (render_w, render_h), (width, height));
         let mut look = LiveLook::from_toggles(toggles);
         look.gtao = crate::quality::gtao_runs(&self.quality, look.gtao);
         self.write_frame_uniforms(&cam_bytes, &light_bytes, look.ibl);
@@ -1249,7 +1259,9 @@ impl Presenter {
         // Caller: `live_sky_should_draw` above over `submit_skips_for`.
         let sky_draw = live_sky_should_draw(toggles);
         let fight_fx = self.stage_fight_fx(&frame)?; // FEEL5: hit sparks, blood and dust
+        self.stage_fight_trail(&frame)?; // LF14: the sword ribbon, live frames included
         self.stage_fight_splats(&frame)?; // FEEL5: and the blood it leaves on the floor
+        self.prepare_impostors(); // RL64: the baked crowd binds this frame's buffers
         let stale_us: u64;
         let gtao_timed: bool;
         // The `ibl` cell is the forward IBL-bound encode and nothing else, as
@@ -1301,7 +1313,13 @@ impl Presenter {
             // sink itself; with one bound it lands in the twin and the look
             // pass below writes the display target.
             let stage = self.look_stage(sink)?;
-            let (blit_view, blit_pipeline) = (stage.blit, stage.pipeline);
+            // Below the output size the blit lands in the render-size target and the EASU
+            // chain writes the output-size picture the overlays and the look pass continue on.
+            let route = self.upscale.route(stage);
+            let (blit_view, blit_pipeline) = match &route {
+                Some(r) => (r.lo(), &self.twin_pipeline),
+                None => (stage.blit, stage.pipeline),
+            };
 
             // LF3 first landing: the CPU GTAO helper
             // (`live_ao_upload_for_frame`: bake via
@@ -1367,8 +1385,23 @@ impl Presenter {
                 self.blit_bind_for(targets),
                 blit_view,
                 blit_pipeline,
-                timer.map(|(timer, _)| timer.blit_writes()),
+                timer.map(|(timer, _)| {
+                    if route.is_some() {
+                        timer.blit_begin_writes()
+                    } else {
+                        timer.blit_writes()
+                    }
+                }),
             );
+            let (blit_view, stage) = match &route {
+                Some(r) => {
+                    let end = timer.map(|(timer, _)| timer.blit_end_writes());
+                    let stamps = super::look_seam::SpanStamps { begin: None, end };
+                    r.encode(&self.device, &mut enc, stamps);
+                    (r.stage.blit, r.stage)
+                }
+                None => (blit_view, stage),
+            };
             let overlay_format = stage.format;
             if let Some(plan) = self.overlay.hp_bars_plan(frame.aspect) {
                 let mut verts = [crate::overlay::QuadVertex::default();

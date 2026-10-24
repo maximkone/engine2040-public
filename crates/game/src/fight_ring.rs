@@ -12,20 +12,20 @@
 //! sampler clamps, so every tile carries its own full UV square).
 //! Determinism: presentation only; same half-extent gives the same meshes.
 //! Errors: a missing or undecodable texture or a refused upload is loud.
-//! Budget: cold build (one floor mesh, one tier mesh, one mesh per crowd
-//! palette slot, two textures); per frame six draws.
+//! Budget: cold build (one floor mesh, one tier mesh, two textures); per
+//! frame two draws. The stands crowd is not meshes: it is baked once into an
+//! impostor atlas and staged by [`crowd_stands`], one draw for all 96 seats.
 
 use std::path::Path;
 
-use engine_assets::bc::srgb_byte_to_linear;
 use engine_assets::{AssetSource, FsSource};
-use engine_render::draw::crowd_seats::{
-    crowd_palette_index, crowd_palette_rgba, crowd_seat_pos, CROWD_BODY_D_M, CROWD_BODY_H_M,
-    CROWD_BODY_W_M, CROWD_HEAD_M, CROWD_PALETTE_LEN, CROWD_ROWS_PER_SECTOR, CROWD_SEATS_PER_ROW,
-    CROWD_SECTORS, CROWD_WALL_M,
-};
 use engine_render::present::{DrawItem, DrawList, MeshKey, Presenter, TextureKey, TextureUpload};
 use engine_render::v1::{self, MeshData, PbrMaterial};
+
+/// The stands crowd as octahedral impostors (RL64): seats to instances, and the
+/// figure bake through the presenter.
+#[path = "crowd_stands.rs"]
+pub mod crowd_stands;
 
 /// The GP36 zone classifier lives in `engine-arena` (one owner, shared with
 /// the tournament metric); re-exported so every `fight_ring::` path and the
@@ -63,11 +63,10 @@ pub fn ring_zone_at(x_m: f32, z_m: f32) -> ArenaZone {
 pub const RING_FLOOR_KEY_ID: u64 = 0xF16D_0001;
 /// Wall plus tiers mesh key.
 pub const RING_TIERS_KEY_ID: u64 = 0xF16D_0002;
-/// One crowd mesh key per palette slot (four), clear of the ring keys.
-pub const RING_CROWD_KEY_IDS: [u64; CROWD_PALETTE_LEN] =
-    [0xF16D_0201, 0xF16D_0202, 0xF16D_0203, 0xF16D_0204];
-/// Gap between a spectator's shoulders and its head, in meters.
-const CROWD_HEAD_GAP_M: f32 = 0.04;
+/// Mesh key ids the box crowd used (one per palette slot), kept reserved so no
+/// other staged mesh takes them. The crowd is no longer meshes: it is one
+/// impostor batch under [`crowd_stands::CROWD_FIGURE_KEY`].
+pub const RING_CROWD_KEY_IDS: [u64; 4] = [0xF16D_0201, 0xF16D_0202, 0xF16D_0203, 0xF16D_0204];
 /// Texture ids for the sand and stone albedo maps.
 const RING_SAND_TEX_ID: u64 = 0xF16D_0101;
 const RING_STONE_TEX_ID: u64 = 0xF16D_0102;
@@ -146,13 +145,10 @@ impl core::fmt::Display for RingError {
 
 impl std::error::Error for RingError {}
 
-/// The ring: floor plus tiers meshes, the crowd on the tiers, and their
-/// textures and materials.
+/// The ring: floor plus tiers meshes and their textures and materials.
 pub struct FightRing {
     floor: MeshData,
     tiers: MeshData,
-    /// Spectator boxes on the tiers, one mesh per palette slot.
-    crowd: [MeshData; CROWD_PALETTE_LEN],
     sand: (TextureKey, TextureUpload),
     stone: (TextureKey, TextureUpload),
     /// Inner wall face distance from the center (meters).
@@ -288,134 +284,6 @@ fn tiers_mesh(wall_m: f32) -> Result<MeshData, RingError> {
     b.finish("tiers")
 }
 
-/// One spectator part as six outward quads (24 verts, 36 indices), `uv`
-/// being the full texture square the stone albedo tiles at.
-fn seat_box(b: &mut Builder, center: [f32; 3], half: [f32; 3], uv: f32) {
-    let (cx, cy, cz) = (center[0], center[1], center[2]);
-    let (hx, hy, hz) = (half[0], half[1], half[2]);
-    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
-        (
-            [1.0, 0.0, 0.0],
-            [
-                [cx + hx, cy - hy, cz - hz],
-                [cx + hx, cy - hy, cz + hz],
-                [cx + hx, cy + hy, cz + hz],
-                [cx + hx, cy + hy, cz - hz],
-            ],
-        ),
-        (
-            [-1.0, 0.0, 0.0],
-            [
-                [cx - hx, cy - hy, cz + hz],
-                [cx - hx, cy - hy, cz - hz],
-                [cx - hx, cy + hy, cz - hz],
-                [cx - hx, cy + hy, cz + hz],
-            ],
-        ),
-        (
-            [0.0, 1.0, 0.0],
-            [
-                [cx - hx, cy + hy, cz - hz],
-                [cx - hx, cy + hy, cz + hz],
-                [cx + hx, cy + hy, cz + hz],
-                [cx + hx, cy + hy, cz - hz],
-            ],
-        ),
-        (
-            [0.0, -1.0, 0.0],
-            [
-                [cx - hx, cy - hy, cz + hz],
-                [cx - hx, cy - hy, cz - hz],
-                [cx + hx, cy - hy, cz - hz],
-                [cx + hx, cy - hy, cz + hz],
-            ],
-        ),
-        (
-            [0.0, 0.0, 1.0],
-            [
-                [cx - hx, cy - hy, cz + hz],
-                [cx + hx, cy - hy, cz + hz],
-                [cx + hx, cy + hy, cz + hz],
-                [cx - hx, cy + hy, cz + hz],
-            ],
-        ),
-        (
-            [0.0, 0.0, -1.0],
-            [
-                [cx + hx, cy - hy, cz - hz],
-                [cx - hx, cy - hy, cz - hz],
-                [cx - hx, cy + hy, cz - hz],
-                [cx + hx, cy + hy, cz - hz],
-            ],
-        ),
-    ];
-    for (normal, corners) in faces {
-        b.quad(corners, normal, [uv, uv]);
-    }
-}
-
-/// Spectator body plus head boxes for one palette slot, on the ring treads.
-///
-/// The seat layout is owned by `engine_render::draw::crowd_seats` and its
-/// wall, rise and run match this ring's exactly (tier `r` tread top
-/// `CROWD_WALL_H_M + RISE * (r + 1)`, run `CROWD_WALL_M + RUN * (r + 1)`),
-/// so every seat's feet land on a drawn tread rather than inside the stone.
-/// A custom-extent ring shifts the whole layout outward by the wall
-/// difference, so the seats ride its treads too. Presentation only, never
-/// hashed; same inputs give the same mesh twice.
-fn crowd_mesh(slot: usize, wall_m: f32) -> Result<MeshData, RingError> {
-    let mut b = Builder::default();
-    let push = wall_m - CROWD_WALL_M;
-    for sector in 0..CROWD_SECTORS {
-        // Seats of a north/south stand face along z, an east/west stand
-        // along x, so the body box turns with its sector.
-        let (half_x, half_z) = if sector < 2 {
-            (CROWD_BODY_W_M, CROWD_BODY_D_M)
-        } else {
-            (CROWD_BODY_D_M, CROWD_BODY_W_M)
-        };
-        for row in 0..CROWD_ROWS_PER_SECTOR {
-            for seat in 0..CROWD_SEATS_PER_ROW {
-                if crowd_palette_index(sector, row, seat) != slot % CROWD_PALETTE_LEN {
-                    continue;
-                }
-                let at = crowd_seat_pos(sector, row, seat);
-                let (x, z) = match sector {
-                    0 => (at[0], at[2] - push),
-                    1 => (at[0], at[2] + push),
-                    2 => (at[0] - push, at[2]),
-                    _ => (at[0] + push, at[2]),
-                };
-                let body_center = [x, at[1] + CROWD_BODY_H_M * 0.5, z];
-                seat_box(
-                    &mut b,
-                    body_center,
-                    [half_x * 0.5, CROWD_BODY_H_M * 0.5, half_z * 0.5],
-                    0.25,
-                );
-                let head_center = [
-                    x,
-                    at[1] + CROWD_BODY_H_M + CROWD_HEAD_GAP_M + CROWD_HEAD_M * 0.5,
-                    z,
-                ];
-                seat_box(&mut b, head_center, [CROWD_HEAD_M * 0.5; 3], 0.25);
-            }
-        }
-    }
-    b.finish("crowd")
-}
-
-/// Linear base-color factors for one crowd palette slot: the shared palette
-/// owns the sRGB bytes, the presenter multiplies them into the stone albedo.
-fn crowd_tint(slot: usize) -> [f32; 3] {
-    let [r, g, b, _] = crowd_palette_rgba(slot);
-    [
-        srgb_byte_to_linear(r),
-        srgb_byte_to_linear(g),
-        srgb_byte_to_linear(b),
-    ]
-}
-
 fn texture(
     source: &dyn AssetSource,
     file: &str,
@@ -446,17 +314,9 @@ impl FightRing {
             return Err(RingError::Extent);
         }
         let wall_m = half_extent_m + WALL_GAP_M;
-        let mut crowd = Vec::with_capacity(CROWD_PALETTE_LEN);
-        for slot in 0..CROWD_PALETTE_LEN {
-            crowd.push(crowd_mesh(slot, wall_m)?);
-        }
-        let crowd: [MeshData; CROWD_PALETTE_LEN] = crowd
-            .try_into()
-            .map_err(|_| RingError::Mesh("crowd slot count".to_string()))?;
         Ok(Self {
             floor: floor_mesh(wall_m)?,
             tiers: tiers_mesh(wall_m)?,
-            crowd,
             sand: texture(source, "sand_albedo_2k.jpg", RING_SAND_TEX_ID)?,
             stone: texture(source, "stone_albedo_2k.jpg", RING_STONE_TEX_ID)?,
             wall_m,
@@ -470,11 +330,7 @@ impl FightRing {
         )
     }
 
-    fn crowd_keys() -> [MeshKey; CROWD_PALETTE_LEN] {
-        std::array::from_fn(|slot| MeshKey::new(RING_CROWD_KEY_IDS[slot], [0xD3; 32]))
-    }
-
-    /// Upload both ring meshes, the four crowd meshes and both textures.
+    /// Upload both ring meshes and both textures.
     /// Cold path; loud on refusal.
     pub fn stage(&self, presenter: &mut Presenter) -> Result<(), RingError> {
         let (floor, tiers) = Self::keys();
@@ -484,11 +340,6 @@ impl FightRing {
         presenter
             .upload_mesh(tiers, &self.tiers)
             .map_err(|err| RingError::Upload(format!("tiers: {err}")))?;
-        for (key, mesh) in Self::crowd_keys().iter().zip(self.crowd.iter()) {
-            presenter
-                .upload_mesh(*key, mesh)
-                .map_err(|err| RingError::Upload(format!("crowd: {err}")))?;
-        }
         for (key, upload) in [&self.sand, &self.stone] {
             presenter
                 .upload_texture(*key, upload)
@@ -497,9 +348,7 @@ impl FightRing {
         Ok(())
     }
 
-    /// Push the floor, tier and crowd draws when resident; returns draws
-    /// pushed. The crowd rides the same stone albedo under the shared
-    /// palette tints, so the tiers read as spectators instead of bare stone.
+    /// Push the floor and tier draws when resident; returns draws pushed.
     pub fn push_draws(&self, list: &mut DrawList, resident: &[MeshKey]) -> usize {
         let (floor, tiers) = Self::keys();
         let mut pushed = 0usize;
@@ -527,25 +376,6 @@ impl FightRing {
             });
             pushed += 1;
         }
-        for (slot, key) in Self::crowd_keys().iter().enumerate() {
-            if !resident.contains(key) {
-                continue;
-            }
-            list.items.push(DrawItem {
-                mesh: *key,
-                material: PbrMaterial {
-                    base_color: crowd_tint(slot),
-                    metallic: 0.0,
-                    roughness: 0.9,
-                    exposure: 1.0,
-                },
-                base_color: Some(self.stone.0),
-                normal_map: None,
-                orm: None,
-                emissive: None,
-            });
-            pushed += 1;
-        }
         pushed
     }
 }
@@ -553,12 +383,15 @@ impl FightRing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_render::draw::crowd_seats::{crowd_total, CROWD_WALL_H_M};
+    use engine_render::draw::crowd_seats::{
+        crowd_seat_pos, crowd_total, CROWD_ROWS_PER_SECTOR, CROWD_SEATS_PER_ROW, CROWD_SECTORS,
+        CROWD_WALL_H_M, CROWD_WALL_M,
+    };
 
     #[test]
     fn crowd_seats_stand_on_the_ring_treads() {
         // The layout's feet heights and depths must match this ring's own
-        // tier rise and run, or the boxes float or sink into the stone.
+        // tier rise and run, or the spectators float or sink into the stone.
         let mut seats = 0usize;
         for sector in 0..CROWD_SECTORS {
             for row in 0..CROWD_ROWS_PER_SECTOR {
@@ -583,67 +416,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(seats, crowd_total(), "every laid-out seat is drawn");
-    }
-
-    #[test]
-    fn crowd_mesh_rises_out_of_the_pit_on_every_slot() {
-        let wall = 21.0;
-        let mut seats = 0usize;
-        for slot in 0..CROWD_PALETTE_LEN {
-            let mesh = crowd_mesh(slot, wall).expect("crowd builds");
-            assert!(
-                !mesh.positions.is_empty(),
-                "palette slot {slot} seats no one"
-            );
-            // Two boxes (body plus head) per seat: 24 verts and 36 indices each.
-            assert_eq!(mesh.positions.len() % 48, 0, "slot {slot} halves a seat");
-            assert_eq!(mesh.indices.len(), mesh.positions.len() / 48 * 72);
-            assert_eq!(mesh.uvs.len(), mesh.positions.len());
-            for (p, n) in mesh.positions.iter().zip(mesh.normals.iter()) {
-                assert!(
-                    p[0].abs().max(p[2].abs()) >= wall - 1e-3,
-                    "seat hangs inside the pit at {p:?}"
-                );
-                assert!(p[1] > WALL_HEIGHT_M, "seat sits below the wall top");
-                assert!(n.iter().all(|c| c.is_finite()));
-            }
-            seats += mesh.positions.len() / 48;
-        }
-        assert_eq!(seats, crowd_total(), "the four slots hold all 96 seats");
-        // A custom-extent ring keeps its seats on its own treads.
-        let wider = crowd_mesh(0, 25.0).expect("wider ring crowd builds");
-        let narrow = crowd_mesh(0, 21.0).expect("duel crowd builds");
-        assert_eq!(wider.positions.len(), narrow.positions.len());
-        assert!(
-            wider
-                .positions
-                .iter()
-                .map(|p| p[0].abs().max(p[2].abs()))
-                .fold(f32::MAX, f32::min)
-                > narrow
-                    .positions
-                    .iter()
-                    .map(|p| p[0].abs().max(p[2].abs()))
-                    .fold(f32::MAX, f32::min),
-            "wider ring pushes the seats outward"
-        );
-        // Empty slots refuse instead of uploading nothing silently.
-        assert!(crowd_mesh(CROWD_PALETTE_LEN, wall).is_ok());
-    }
-
-    #[test]
-    fn crowd_tints_are_linear_and_distinct() {
-        let slots: Vec<[f32; 3]> = (0..CROWD_PALETTE_LEN).map(crowd_tint).collect();
-        for tint in &slots {
-            assert!(
-                tint.iter().all(|c| (0.0..=1.0).contains(c)),
-                "tint {tint:?} escapes the linear range"
-            );
-        }
-        assert!(slots.iter().any(|t| *t != slots[0]), "slots must differ");
-        assert_eq!(srgb_byte_to_linear(0), 0.0);
-        assert!((srgb_byte_to_linear(255) - 1.0).abs() < 1e-6);
+        assert_eq!(seats, crowd_total(), "every laid-out seat is on a tread");
     }
 
     #[test]

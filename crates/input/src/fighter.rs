@@ -52,10 +52,15 @@ pub const JUMP: u8 = 0x20;
 /// can anchor a wall behind the enemy. Opt-in like [`THROW_SPEAR`]: a match
 /// built without a spear masks both bits off.
 pub const THROW_SPEAR_WORLD: u8 = 0x40;
+/// Noose-throw bit in [`Buttons`] (the laquearius, row SG11): opt-in, acted on
+/// only by a match built with `MatchSpec::noose`; any other match masks it off.
+/// It sits at `0x80` because `0x08` is the "unknown bit" every older test and
+/// tape fixture leans on. Not part of [`KNOWN_BUTTONS`].
+pub const THROW_NOOSE: u8 = 0x80;
 /// Every button bit the wire accepts: [`KNOWN_BUTTONS`] plus [`THROW_SPEAR`],
-/// [`JUMP`] and [`THROW_SPEAR_WORLD`]. Consumers that mask with
-/// [`KNOWN_BUTTONS`] keep three bits.
-pub const ALL_BUTTONS: u8 = KNOWN_BUTTONS | THROW_SPEAR | JUMP | THROW_SPEAR_WORLD;
+/// [`JUMP`], [`THROW_SPEAR_WORLD`] and [`THROW_NOOSE`]. Consumers that mask
+/// with [`KNOWN_BUTTONS`] keep three bits.
+pub const ALL_BUTTONS: u8 = KNOWN_BUTTONS | THROW_SPEAR | JUMP | THROW_SPEAR_WORLD | THROW_NOOSE;
 
 /// Stable fighter slot in `0..MAX_PARTICIPANTS`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -358,8 +363,13 @@ mod tests {
         input
             .validate()
             .expect("the world-aimed throw bit is a legal button");
-        input.buttons = Buttons(0x80);
-        assert_eq!(input.validate(), Err(FighterError::UnknownButtons(0x80)));
+        input.buttons = Buttons(THROW_NOOSE);
+        input
+            .validate()
+            .expect("the noose throw bit is a legal button");
+        assert_eq!(KNOWN_BUTTONS & THROW_NOOSE, 0, "combat keeps 3 bits");
+        input.buttons = Buttons(0x88);
+        assert_eq!(input.validate(), Err(FighterError::UnknownButtons(0x88)));
     }
 
     #[test]
