@@ -79,6 +79,30 @@ pub const MAX_NEW_ELEMENTS_PER_RUNG: u8 = 3;
 pub const FIRST_BOUT_START_SECS: u32 = 45;
 /// Last legal second for the first bout start.
 pub const FIRST_BOUT_START_LIMIT_SECS: u32 = 60;
+/// Shipped ladder beat chart (`content/design/ladder.rows`): the designer's
+/// chart. Every rung row names the arena it runs in its `arena=` cell, so a
+/// designer swaps a placement without a Rust edit.
+pub const LADDER_ROWS: &str = include_str!("../../../content/design/ladder.rows");
+/// Arena placements a rung may name: the id the chart uses, the file it
+/// comes from and the file bytes. The chart's `arena=` cell names the id, so
+/// the game loads the file the chart points at.
+pub const LADDER_PLACEMENTS: [(&str, &str, &str); 3] = [
+    (
+        "base",
+        "content/arena/placement.json",
+        include_str!("../../../content/arena/placement.json"),
+    ),
+    (
+        "ludus",
+        "content/maps/placement_ludus.json",
+        include_str!("../../../content/maps/placement_ludus.json"),
+    ),
+    (
+        "siege",
+        "content/maps/placement_siege.json",
+        include_str!("../../../content/maps/placement_siege.json"),
+    ),
+];
 
 /// Ladder failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -889,6 +913,234 @@ pub mod palus {
     }
 }
 
+/// Arena variant failures: a bad chart row, a variant no placement file
+/// backs, or a placement file that holds no actor table.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ArenaError {
+    /// The chart row is missing or malformed; detail bounded.
+    Chart(String),
+    /// The chart names a variant the placement table does not hold; key carried.
+    UnknownVariant(String),
+    /// The placement file holds no actor table; file carried.
+    Placement(String),
+}
+
+impl core::fmt::Display for ArenaError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Chart(detail) => write!(f, "ladder arena chart: {detail}"),
+            Self::UnknownVariant(key) => {
+                write!(f, "ladder arena variant `{key}` has no placement file")
+            }
+            Self::Placement(file) => {
+                write!(f, "ladder arena placement {file} holds no actors")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ArenaError {}
+
+/// One rung's arena row from the chart: the placement the rung runs and the
+/// new arena elements it teaches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RungArenaRow {
+    /// Rung index the row sits on.
+    pub rung: u8,
+    /// Placement id the row names (the chart's `arena=` cell).
+    pub id: &'static str,
+    /// New arena elements the rung teaches (the chart's `new_arena=` cell).
+    pub new_arena: u8,
+}
+
+/// The arena a rung runs: the placement the chart names, the file it came
+/// from and the actors that file holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RungArena {
+    /// Rung the arena belongs to.
+    pub rung: u8,
+    /// Placement id: the key the chart names.
+    pub id: &'static str,
+    /// Placement file the rung loaded.
+    pub placement: &'static str,
+    /// Actors the placement file holds.
+    pub actors: usize,
+}
+
+impl RungArena {
+    /// The line the game prints for this rung: the rung, the placement id,
+    /// the file it came from and the actor count.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "ladder arena rung={} id={} placement={} actors={}",
+            self.rung, self.id, self.placement, self.actors
+        )
+    }
+}
+
+/// The `arena=` and `new_arena=` cells of one rung row.
+fn arena_cells<'a>(body: &'a str, line: usize) -> Result<(&'a str, u8), ArenaError> {
+    let mut arena: Option<&'a str> = None;
+    let mut count: Option<u8> = None;
+    for cell in body.split_whitespace().skip(1) {
+        let Some((key, value)) = cell.split_once('=') else {
+            continue;
+        };
+        match key {
+            "arena" => arena = Some(value),
+            "new_arena" => {
+                let Ok(parsed) = value.parse::<u8>() else {
+                    return Err(ArenaError::Chart(format!(
+                        "line {line}: bad new_arena count"
+                    )));
+                };
+                count = Some(parsed);
+            }
+            _ => {}
+        }
+    }
+    match (arena, count) {
+        (Some(id), Some(new_arena)) => Ok((id, new_arena)),
+        _ => Err(ArenaError::Chart(format!(
+            "line {line}: misses the arena cell"
+        ))),
+    }
+}
+
+/// Parse the arena rows of a ladder chart text, in file order.
+///
+/// Every rung row names its placement in the `arena=` cell and counts the
+/// new arena elements in `new_arena=`. A row that misses either cell, or
+/// that sits out of order, refuses.
+fn arena_rows_from_text(text: &'static str) -> Result<Vec<RungArenaRow>, ArenaError> {
+    let mut rows: Vec<RungArenaRow> = Vec::with_capacity(RUNG_COUNT);
+    for (index, raw) in text.lines().enumerate() {
+        let line = index + 1;
+        let body = raw.split('#').next().unwrap_or("").trim();
+        if !body.starts_with("rung_") {
+            continue;
+        }
+        let id = body.split_whitespace().next().unwrap_or("");
+        let Some(tail) = id.strip_prefix("rung_") else {
+            return Err(ArenaError::Chart(format!("line {line}: bad rung id")));
+        };
+        let Ok(number) = tail.parse::<u16>() else {
+            return Err(ArenaError::Chart(format!("line {line}: bad rung id")));
+        };
+        let Ok(rung) = u8::try_from(number) else {
+            return Err(ArenaError::Chart(format!("line {line}: bad rung id")));
+        };
+        if usize::from(rung) != rows.len() {
+            return Err(ArenaError::Chart(format!(
+                "line {line}: rung {rung} out of order"
+            )));
+        }
+        let (arena, count) = arena_cells(body, line)?;
+        rows.push(RungArenaRow {
+            rung,
+            id: arena,
+            new_arena: count,
+        });
+    }
+    if rows.len() != RUNG_COUNT {
+        return Err(ArenaError::Chart(format!(
+            "chart holds {} rungs, want {RUNG_COUNT}",
+            rows.len()
+        )));
+    }
+    Ok(rows)
+}
+
+/// Refuse a chart whose `new_arena` count does not follow its placement
+/// change: 1 when the rung swaps the placement, 0 when it keeps it.
+fn check_arena_counts(rows: &[RungArenaRow]) -> Result<(), ArenaError> {
+    let mut previous: Option<&str> = None;
+    for row in rows {
+        let swaps = previous.is_some_and(|before| before != row.id);
+        if row.new_arena != u8::from(swaps) {
+            return Err(ArenaError::Chart(format!(
+                "rung {}: new_arena {} but the placement {}",
+                row.rung,
+                row.new_arena,
+                if swaps { "changes" } else { "stays" }
+            )));
+        }
+        previous = Some(row.id);
+    }
+    Ok(())
+}
+
+/// The arena rows of the shipped chart, in rung order.
+///
+/// The count rule rides along: a rung that swaps the placement teaches one
+/// new arena element (`new_arena=1`) and a rung that keeps it teaches none
+/// (`new_arena=0`). A chart that breaks the rule refuses, so the count is
+/// acted on instead of summed. Pure over the chart text.
+pub fn ladder_arena_rows() -> Result<Vec<RungArenaRow>, ArenaError> {
+    let rows = arena_rows_from_text(LADDER_ROWS)?;
+    check_arena_counts(&rows)?;
+    Ok(rows)
+}
+
+/// Actors in a placement table: one per `"id"` field of the actor list.
+///
+/// The count comes from the loaded file, not from the chart, so a placement
+/// that lost its actor table refuses instead of staging an empty arena.
+fn placement_actors(text: &str) -> usize {
+    text.matches("\"id\"").count()
+}
+
+/// The arena one chart row names: the placement file is loaded and its actor
+/// table is read, so the id the chart names is backed by a real file.
+fn arena_from_row(row: &RungArenaRow) -> Result<RungArena, ArenaError> {
+    let Some((id, placement, text)) = LADDER_PLACEMENTS.iter().find(|(key, _, _)| *key == row.id)
+    else {
+        return Err(ArenaError::UnknownVariant(row.id.to_string()));
+    };
+    let actors = placement_actors(text);
+    if actors == 0 {
+        return Err(ArenaError::Placement((*placement).to_string()));
+    }
+    Ok(RungArena {
+        rung: row.rung,
+        id,
+        placement,
+        actors,
+    })
+}
+
+/// The arena a rung runs: the chart names the placement, the placement table
+/// holds its file and the file is loaded for real (its actor table is read).
+///
+/// Consumer: the arena twin's report and the bout staging that follows it.
+/// Presentation: the id and the actor count never enter the hashed state, so
+/// the golden stays put. Errors: [`ArenaError`] on a bad rung, a bad chart
+/// or a variant no placement file backs.
+pub fn rung_arena(rung: u8) -> Result<RungArena, ArenaError> {
+    if rung > MAX_RUNG {
+        return Err(ArenaError::Chart(format!("rung {rung} above {MAX_RUNG}")));
+    }
+    let rows = ladder_arena_rows()?;
+    let row = rows
+        .get(usize::from(rung))
+        .ok_or_else(|| ArenaError::Chart(format!("chart misses rung {rung}")))?;
+    arena_from_row(row)
+}
+
+/// One line per rung: the arena placement each rung runs.
+///
+/// Consumer: the arena twin's startup report. Errors: the chart's own
+/// refusal, so a broken chart prints one loud line instead of a list.
+pub fn ladder_arena_lines() -> Result<Vec<String>, ArenaError> {
+    let rows = ladder_arena_rows()?;
+    let mut out = Vec::with_capacity(RUNG_COUNT);
+    for row in &rows {
+        out.push(arena_from_row(row)?.line());
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1591,5 +1843,104 @@ mod tests {
         let mut buffer = String::new();
         record.push_line(&mut buffer);
         assert_eq!(buffer, record.line());
+    }
+
+    #[test]
+    fn rung_four_runs_a_second_placement_and_names_its_id() {
+        // F2P: the rung names the placement it runs and the game loads that
+        // file, so the count is acted on instead of summed.
+        let third = rung_arena(3).expect("rung 3 has an arena");
+        let fourth = rung_arena(4).expect("rung 4 has an arena");
+        assert_ne!(third.id, fourth.id, "rung 4 swaps the placement");
+        assert_ne!(
+            third.placement, fourth.placement,
+            "rung 4 loads another file"
+        );
+        assert!(fourth.actors > 0, "the placement holds actors");
+        assert_eq!(third.placement, "content/arena/placement.json");
+        let line = fourth.line();
+        assert!(line.contains("id=ludus"), "the line names the id: {line}");
+        assert!(
+            line.contains("placement=content/maps/placement_ludus.json"),
+            "the line names the file: {line}"
+        );
+    }
+
+    #[test]
+    fn the_arena_count_follows_the_placement_change() {
+        let rows = ladder_arena_rows().expect("the shipped chart parses");
+        assert_eq!(rows.len(), RUNG_COUNT);
+        for index in 0..rows.len() {
+            let swaps = index > 0 && rows[index - 1].id != rows[index].id;
+            assert_eq!(
+                rows[index].new_arena,
+                u8::from(swaps),
+                "rung {} count",
+                rows[index].rung
+            );
+        }
+        // A chart whose count lies refuses: the placement changes but the
+        // rung claims no new arena element.
+        let lying = vec![
+            RungArenaRow {
+                rung: 0,
+                id: "base",
+                new_arena: 0,
+            },
+            RungArenaRow {
+                rung: 1,
+                id: "ludus",
+                new_arena: 0,
+            },
+        ];
+        assert!(
+            check_arena_counts(&lying).is_err(),
+            "the count must follow the swap"
+        );
+    }
+
+    #[test]
+    fn every_chart_variant_has_a_placement_file() {
+        let rows = ladder_arena_rows().expect("the shipped chart parses");
+        for row in &rows {
+            assert!(
+                LADDER_PLACEMENTS.iter().any(|(key, _, _)| *key == row.id),
+                "rung {} names the unknown placement {}",
+                row.rung,
+                row.id
+            );
+        }
+        // A variant no placement file backs refuses instead of running a
+        // missing file.
+        let unknown = RungArenaRow {
+            rung: 0,
+            id: "nowhere",
+            new_arena: 0,
+        };
+        assert_eq!(
+            arena_from_row(&unknown),
+            Err(ArenaError::UnknownVariant("nowhere".to_string()))
+        );
+    }
+
+    #[test]
+    fn every_rung_reports_its_placement() {
+        let lines = ladder_arena_lines().expect("the shipped chart parses");
+        assert_eq!(lines.len(), RUNG_COUNT);
+        assert!(
+            lines[4].contains("id=ludus"),
+            "rung 4 names its placement: {}",
+            lines[4]
+        );
+        assert!(
+            lines[6].contains("id=siege"),
+            "rung 6 names its placement: {}",
+            lines[6]
+        );
+        assert!(
+            lines[0].contains("id=base"),
+            "rung 0 names its placement: {}",
+            lines[0]
+        );
     }
 }

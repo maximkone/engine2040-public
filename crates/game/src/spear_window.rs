@@ -15,6 +15,7 @@
 use crate::fighter_look::{ArmState, FighterLook, MAX_LOOK_FIGHTERS};
 use crate::lock_on::{bearing_cdeg, whole};
 use crate::spear_look::{Carry, SpearDraw, SpearLook, Ties, DEFAULT_TIER, SPEAR_LEN_M};
+use crate::view_truth::audit::SpearTruth;
 use crate::FighterView;
 use engine_arena::spear::{Phase, SpearEvent, SpearSlot};
 use engine_arena::LiveMatch;
@@ -28,7 +29,7 @@ use engine_render::v1::{upload_mesh, Camera, MeshData, MeshError, PbrMaterial};
 pub const SPEAR_MESH_ID_BASE: u64 = 0x5BEA_0000;
 /// Digest every spear mesh key carries (the content changes under a fixed key).
 const DIGEST: [u8; 32] = [0x5B; 32];
-const SIDES: usize = 6;
+const SIDES: usize = 8;
 
 /// A small count as a float; shapes here hold a few dozen points.
 fn num(n: usize) -> f32 {
@@ -39,19 +40,24 @@ fn num(n: usize) -> f32 {
 fn idx(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
-const SHAFT_R_M: f32 = 0.014;
-const HEAD_LEN_M: f32 = 0.38;
-const HEAD_R_M: f32 = 0.05;
-const FIN_LEN_M: f32 = 0.22;
-const FIN_HALF_M: f32 = 0.07;
-const ROPE_R_M: f32 = 0.013;
-const TRAIL_R_M: f32 = 0.03;
+
+mod parts;
+mod rope;
+
+use engine_physfx::{TetherState, Tier};
+use parts::{head_mesh, shaft_mesh};
+use rope::{Lay, RopeStyle};
+
+/// Radius of the streak behind a flying spear, meters.
+const TRAIL_R_M: f32 = 0.02;
 /// A spear in a hand stands this far in front of the feet, meters, tilted forward, when the
 /// look cannot say where the palm is.
 const HELD_FORWARD_M: f32 = 0.45;
 const HELD_FOOT_Y_M: f32 = 0.15;
 /// How far the palm grips the shaft from its tail, meters.
 const HELD_GRIP_M: f32 = 0.6;
+/// Height of the shaft's axis when a fallen holder's spear lies in the sand, meters.
+const LYING_Y_M: f32 = 0.03;
 /// Camera follow: share of the way the look point moves to the pair, and the pull-back.
 const FOLLOW_LOOK: f32 = 0.7;
 const FOLLOW_BACK: f32 = 0.35;
@@ -70,10 +76,11 @@ const STEEL: PbrMaterial = PbrMaterial {
     roughness: 0.35,
     exposure: 1.0,
 };
+/// Hemp, a shade darker than the sand so a rope reads against it, rough and unshiny.
 const HEMP: PbrMaterial = PbrMaterial {
-    base_color: [0.58, 0.46, 0.30],
+    base_color: [0.50, 0.38, 0.22],
     metallic: 0.0,
-    roughness: 0.9,
+    roughness: 0.95,
     exposure: 1.0,
 };
 const STREAK: PbrMaterial = PbrMaterial {
@@ -163,31 +170,11 @@ fn tube(points: &[[f32; 3]], radius: &dyn Fn(usize) -> f32, roll: f32) -> Mesh {
         for k in 0..SIDES {
             let (a, b) = (i * SIDES + k, i * SIDES + (k + 1) % SIDES);
             let (c, d) = (a + SIDES, b + SIDES);
-            let tri = |x: usize, y: usize, z: usize| [idx(x), idx(y), idx(z)];
-            indices.extend(tri(a, c, b));
-            indices.extend(tri(b, c, d));
+            // Counter-clockwise seen from outside: the renderer culls back faces.
+            indices.extend([idx(a), idx(b), idx(c), idx(b), idx(d), idx(c)]);
         }
     }
     (positions, normals, indices)
-}
-
-/// A flat quad both sides visible: `center` plus `along * len` and `across * half`.
-fn quad(center: [f32; 3], along: [f32; 3], across: [f32; 3], len: f32, half: f32) -> Mesh {
-    let n = norm(cross3(along, across));
-    let corner = |a: f32, b: f32| add(center, add(scale(along, a * len), scale(across, b * half)));
-    let positions = vec![
-        corner(0.0, -1.0),
-        corner(1.0, -1.0),
-        corner(1.0, 1.0),
-        corner(0.0, 1.0),
-        corner(0.0, -1.0),
-        corner(1.0, -1.0),
-        corner(1.0, 1.0),
-        corner(0.0, 1.0),
-    ];
-    let mut normals = vec![n; 4];
-    normals.extend(vec![scale(n, -1.0); 4]);
-    (positions, normals, vec![0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6])
 }
 
 fn join(parts: Vec<Mesh>) -> Mesh {
@@ -201,28 +188,9 @@ fn join(parts: Vec<Mesh>) -> Mesh {
     out
 }
 
-/// The wooden part of a spear: shaft and the two tail fins (they show the spin).
-fn shaft_mesh(tip: [f32; 3], dir: [f32; 3], roll: f32) -> Mesh {
-    let tail = sub(tip, scale(dir, SPEAR_LEN_M));
-    let neck = sub(tip, scale(dir, HEAD_LEN_M));
-    let (u, v) = basis(dir, roll);
-    let fin_start = add(tail, scale(dir, 0.05));
-    join(vec![
-        tube(&[tail, neck], &|_| SHAFT_R_M, 0.0),
-        quad(fin_start, dir, u, FIN_LEN_M, FIN_HALF_M),
-        quad(fin_start, dir, v, FIN_LEN_M, FIN_HALF_M),
-    ])
-}
-
-/// The steel head: a cone from the neck to the tip.
-fn head_mesh(tip: [f32; 3], dir: [f32; 3]) -> Mesh {
-    let neck = sub(tip, scale(dir, HEAD_LEN_M));
-    tube(&[neck, tip], &|i| if i == 0 { HEAD_R_M } else { 0.0 }, 0.0)
-}
-
-/// A rope through `nodes`.
-fn rope_mesh(nodes: &[[f32; 3]]) -> Mesh {
-    tube(nodes, &|_| ROPE_R_M, 0.0)
+/// Length of a vector, meters.
+fn length(v: [f32; 3]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 /// The streak behind a flying spear: newest point first, thinning to nothing.
@@ -329,25 +297,38 @@ pub struct SpearScene {
     fighters: Vec<FighterView>,
     /// Where each right palm was drawn at the tick before the last and at the last one.
     palms: [[Option<[f32; 3]>; MAX_LOOK_FIGHTERS]; 2],
+    /// Slots drawn as a ragdoll at the last tick: a fallen holder lets its spear go.
+    down: [bool; MAX_LOOK_FIGHTERS],
     /// Follow envelope in `0..=1`: how much the camera has turned to the pair.
     follow: f32,
     /// Midpoint of the tethered pair at the last tick.
     pair_m: [f32; 3],
     draws: usize,
+    /// How the ropes are cut into rings and sides: the tier's.
+    rope: RopeStyle,
 }
 
 impl SpearScene {
     /// An empty scene on the default tier.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_tier(DEFAULT_TIER)
+    }
+
+    /// An empty scene on `tier`: the rope world's node count and how finely a rope is drawn
+    /// (a potato draws a round tube in a few rings, a desktop the twisted strands).
+    #[must_use]
+    pub fn with_tier(tier: Tier) -> Self {
         Self {
-            look: SpearLook::new(DEFAULT_TIER),
+            look: SpearLook::new(tier),
             view: Vec::new(),
             fighters: Vec::new(),
             palms: [[None; MAX_LOOK_FIGHTERS]; 2],
+            down: [false; MAX_LOOK_FIGHTERS],
             follow: 0.0,
             pair_m: [0.0; 3],
             draws: 0,
+            rope: RopeStyle::for_tier(tier),
         }
     }
 
@@ -369,6 +350,7 @@ impl SpearScene {
             Ties {
                 pelvis: &look.ragdoll_roots(),
                 palms: &look.palms(1.0),
+                bones: &look.ragdoll_bone_frames(),
             },
         );
         look.observe_carries(&self.tows());
@@ -405,6 +387,7 @@ impl SpearScene {
     ) {
         self.look.observe(events, view, fighters, ties);
         self.palms = [self.palms[1], *ties.palms];
+        self.down = ties.pelvis.map(|pelvis| pelvis.is_some());
         self.view.clear();
         self.view.extend_from_slice(view);
         self.fighters.clear();
@@ -456,6 +439,22 @@ impl SpearScene {
             .filter_map(|(slot, _)| {
                 let fighter = self.fighters.iter().find(|f| usize::from(f.slot) == slot)?;
                 let (s, c) = fighter.yaw.sin_cos();
+                if self.down[slot] {
+                    // A ragdoll holds nothing: the spear lies in the sand along the body's facing,
+                    // its grip where the hand fell (it stood 83 deg up out of a fallen holder).
+                    let dir = [s, 0.0, c];
+                    let hand = self.palms[1][slot].unwrap_or(fighter.pos_m);
+                    let tail = sub([hand[0], LYING_Y_M, hand[2]], scale(dir, HELD_GRIP_M));
+                    return Some(SpearDraw {
+                        slot: u8::try_from(slot).ok()?,
+                        tip: add(tail, scale(dir, SPEAR_LEN_M)),
+                        dir,
+                        roll: 0.0,
+                        flying: false,
+                        stuck_in: None,
+                        held_by: None,
+                    });
+                }
                 let dir = norm([s * 0.12, 1.0, c * 0.12]);
                 let tail = match (self.palms[0][slot], self.palms[1][slot]) {
                     (Some(was), Some(now)) => {
@@ -473,6 +472,8 @@ impl SpearScene {
                     dir,
                     roll: 0.0,
                     flying: false,
+                    stuck_in: None,
+                    held_by: u8::try_from(slot).ok(),
                 })
             })
             .collect()
@@ -507,13 +508,13 @@ impl SpearScene {
             Ok::<(), SceneError>(())
         };
         for spear in &spears {
+            put(0, spear.slot, shaft_mesh(spear.tip, spear.dir), WOOD)?;
             put(
-                0,
+                1,
                 spear.slot,
-                shaft_mesh(spear.tip, spear.dir, spear.roll),
-                WOOD,
+                head_mesh(spear.tip, spear.dir, spear.roll),
+                STEEL,
             )?;
-            put(1, spear.slot, head_mesh(spear.tip, spear.dir), STEEL)?;
             let trail = self.look.trail(spear.slot);
             if spear.flying && trail.len() >= 2 {
                 put(3, spear.slot, trail_mesh(trail), STREAK)?;
@@ -523,12 +524,37 @@ impl SpearScene {
             let Ok(slot) = u8::try_from(slot) else {
                 continue;
             };
-            if let Some(nodes) = self.look.rope(slot, alpha) {
-                put(2, slot, rope_mesh(&nodes), HEMP)?;
+            if let Some(shape) = self.rope_shape(slot, alpha) {
+                put(2, slot, shape, HEMP)?;
             }
         }
         self.draws = pushed;
         Ok(pushed)
+    }
+
+    /// Every spear the frame draws as audit rows: held, flying, stuck or at rest, with the
+    /// slot that holds it or the body it is stuck in. View only; `alpha` blends the last two ticks.
+    #[must_use]
+    pub fn audit_rows(&self, alpha: f32) -> Vec<SpearTruth> {
+        let mut spears = self.look.draws(alpha);
+        spears.extend(self.held(alpha));
+        spears
+            .iter()
+            .map(|s| SpearTruth {
+                slot: s.slot,
+                kind: match (s.held_by, s.stuck_in, s.flying) {
+                    (Some(_), _, _) => "held",
+                    (_, Some(_), _) => "stuck",
+                    (_, _, true) => "flying",
+                    _ => "rest",
+                },
+                tip: s.tip,
+                dir: s.dir,
+                len_m: SPEAR_LEN_M,
+                holder: s.held_by,
+                victim: s.stuck_in,
+            })
+            .collect()
     }
 
     /// Draws pushed by the last frame.
@@ -536,6 +562,41 @@ impl SpearScene {
     pub const fn draws(&self) -> usize {
         self.draws
     }
+
+    /// The mesh of the rope of `slot`, or `None` when it has none: its nodes smoothed into a curve
+    /// that sags while the rope is slack, runs straight while it is taut and turns round the
+    /// corner it snagged on, swept into a lit twisted tube.
+    fn rope_shape(&self, slot: u8, alpha: f32) -> Option<Mesh> {
+        let nodes = self.look.rope(slot, alpha)?;
+        let lay = self.rope_lay(slot)?;
+        rope::mesh(&rope::curve(&nodes, lay, &self.rope), &self.rope)
+    }
+
+    /// How the rope of `slot` lies: round the corner it snagged on, hanging, fallen or straight.
+    fn rope_lay(&self, slot: u8) -> Option<Lay> {
+        let state = self.look.rope_state(slot)?.0;
+        Some(match (self.wrap_corner(usize::from(slot)), state) {
+            (Some(corner), _) => Lay::Wrapped(corner),
+            (None, TetherState::Slack) => Lay::Slack,
+            (None, TetherState::Loose) => Lay::Loose,
+            (None, TetherState::Taut) => Lay::Taut,
+        })
+    }
+
+    /// The corner the slot's rope is snagged on this tick, meters: set while
+    /// the tether holds, all zero while the rope runs straight to its anchor.
+    fn wrap_corner(&self, slot: usize) -> Option<[f32; 3]> {
+        let view = self.view.get(slot)?;
+        if !matches!(view.phase, Phase::Tether(_)) || view.wrap_mm == [0, 0, 0] {
+            return None;
+        }
+        Some(view.wrap_mm.map(meters))
+    }
+}
+
+/// A millimetre length as meters, for a drawn rope.
+fn meters(mm: i32) -> f32 {
+    f32::from(i16::try_from(mm).unwrap_or(0)) / 1000.0
 }
 
 impl Default for SpearScene {
@@ -554,13 +615,16 @@ mod tests {
     fn spear_window_shapes_are_valid_meshes_in_world_space() {
         let tip = [1.0, 1.3, -2.0];
         let dir = norm([0.5, 0.1, 0.8]);
+        let rope_style = RopeStyle::for_tier(DEFAULT_TIER);
+        let rope = rope::curve(
+            &[[0.0, 1.0, 0.0], [1.0, 0.5, 0.2], [2.0, 1.0, 0.4]],
+            Lay::Slack,
+            &rope_style,
+        );
         for (name, shape) in [
-            ("shaft", shaft_mesh(tip, dir, 0.7)),
-            ("head", head_mesh(tip, dir)),
-            (
-                "rope",
-                rope_mesh(&[[0.0, 1.0, 0.0], [1.0, 0.5, 0.2], [2.0, 1.0, 0.4]]),
-            ),
+            ("shaft", shaft_mesh(tip, dir)),
+            ("head", head_mesh(tip, dir, 0.7)),
+            ("rope", rope::mesh(&rope, &rope_style).expect("a rope")),
             (
                 "trail",
                 trail_mesh(&[tip, [0.5, 1.3, -2.5], [0.0, 1.3, -3.0]]),
@@ -569,16 +633,59 @@ mod tests {
             let mesh = to_mesh(shape).unwrap_or_else(|err| panic!("{name}: {err}"));
             assert!(!mesh.positions.is_empty(), "{name}");
         }
-        // The head's tip is exactly the spear's tip; the tail is a spear length behind.
-        let (positions, _, _) = head_mesh(tip, dir);
+        // The head's tip is exactly the spear's tip; the shaft starts inside the butt shoe, a
+        // hand's breadth in from the tail.
+        let (positions, _, _) = head_mesh(tip, dir, 0.0);
         assert!(positions.contains(&tip));
-        let (shaft, _, _) = shaft_mesh(tip, dir, 0.0);
+        let (shaft, _, _) = shaft_mesh(tip, dir);
         let tail = sub(tip, scale(dir, SPEAR_LEN_M));
-        let near = shaft.iter().map(|p| {
-            let d = sub(*p, tail);
-            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-        });
-        assert!(near.fold(f32::MAX, f32::min) < 0.1);
+        let near = shaft.iter().map(|p| length(sub(*p, tail)));
+        assert!(near.fold(f32::MAX, f32::min) < 0.12);
+    }
+
+    #[test]
+    fn spear_window_draws_every_rope_of_a_real_throw_smooth_and_the_same_shape_each_frame() {
+        use crate::{App, GameConfig, TickOutcome, HUMAN_SLOT};
+        for tier in [Tier::Potato, Tier::Comfort] {
+            let cfg = GameConfig {
+                seed: 2040,
+                ticks: 600,
+                fighters: 2,
+                half_extent_m: 20.0,
+            };
+            let mut app = App::new(cfg).expect("session").into_spear().expect("spear");
+            let human = FighterId::new(HUMAN_SLOT).expect("slot");
+            let mut scene = SpearScene::with_tier(tier);
+            let mut out = TickOutcome::default();
+            let (mut slack, mut taut, mut drawn) = (0, 0, 0);
+            for tick in 0..600 {
+                let input = demo_input(
+                    tick,
+                    human,
+                    app.fighter_views(),
+                    app.live_match().spear_view(),
+                );
+                app.tick_into(input, &mut out);
+                let live = app.live_match();
+                scene.observe(
+                    live.spear_events(),
+                    live.spear_view(),
+                    app.fighter_views(),
+                    Ties::NONE,
+                );
+                let Some(shape) = scene.rope_shape(0, 0.5) else {
+                    continue;
+                };
+                drawn += 1;
+                slack += i32::from(scene.rope_lay(0) == Some(Lay::Slack));
+                taut += i32::from(scene.rope_lay(0) == Some(Lay::Taut));
+                assert_eq!(shape.0.len(), scene.rope.vertices(), "{tier:?} tick {tick}");
+                to_mesh(shape).unwrap_or_else(|err| panic!("{tier:?} tick {tick}: {err}"));
+            }
+            assert!(drawn > 30, "{tier:?}: the rope was drawn {drawn} ticks");
+            assert!(slack > 0, "{tier:?}: a rope sagged in flight");
+            assert!(taut > 0, "{tier:?}: a rope pulled straight in the tow");
+        }
     }
 
     #[test]
@@ -591,6 +698,7 @@ mod tests {
             cue::PARRY,
             cue::IMPACT_STONE,
             cue::FOOTSTEP_WOOD,
+            cue::SEVER,
         ];
         let events = [
             SpearEvent::Thrown {
@@ -623,6 +731,12 @@ mod tests {
                 victim: Some(1),
                 why: EndWhy::Wall,
                 damage_permille: 90,
+            },
+            SpearEvent::TetherEnd {
+                thrower: 0,
+                victim: Some(1),
+                why: EndWhy::Cut,
+                damage_permille: 0,
             },
         ];
         for event in events {
@@ -676,6 +790,7 @@ mod tests {
                 Ties {
                     pelvis: &[None; MAX_LOOK_FIGHTERS],
                     palms: &palms,
+                    bones: &[],
                 },
             );
         }
@@ -697,6 +812,53 @@ mod tests {
                 "alpha {alpha}: grip {at:?} vs palm {want:?}"
             );
         }
+    }
+
+    #[test]
+    fn spear_window_a_fallen_holder_drops_the_spear_flat_in_the_sand() {
+        let mut scene = SpearScene::new();
+        let ready = [SpearSlot::default(); 2];
+        let fighters = [FighterView {
+            slot: 0,
+            pos_m: [1.0, 0.0, 2.0],
+            yaw: 0.0,
+        }];
+        let mut palms = [None; MAX_LOOK_FIGHTERS];
+        palms[0] = Some([1.3, 0.2, 2.4]);
+        let mut pelvis = [None; MAX_LOOK_FIGHTERS];
+        pelvis[0] = Some([1.0, 0.25, 2.0]);
+        let ties = Ties {
+            pelvis: &pelvis,
+            palms: &palms,
+            bones: &[],
+        };
+        scene.observe(&[], &ready, &fighters, ties);
+        let spears = scene.held(1.0);
+        let spear = spears.first().expect("the dropped spear is still drawn");
+        assert_eq!(spear.held_by, None, "a ragdoll holds nothing");
+        assert!(
+            spear.dir[1].abs() < 1.0e-6,
+            "flat, not standing: {:?}",
+            spear.dir
+        );
+        let tail = sub(spear.tip, scale(spear.dir, SPEAR_LEN_M));
+        for end in [tail, spear.tip] {
+            assert!(
+                (end[1] - LYING_Y_M).abs() < 1.0e-6,
+                "both ends lie in the sand: {end:?}"
+            );
+        }
+        let grip = add(tail, scale(spear.dir, HELD_GRIP_M));
+        assert!(
+            length(sub(grip, [1.3, LYING_Y_M, 2.4])) < 1.0e-5,
+            "the grip is where the hand fell"
+        );
+        let rows = scene.audit_rows(1.0);
+        assert_eq!(
+            rows.first().map(|r| r.kind),
+            Some("rest"),
+            "the audit reads it at rest"
+        );
     }
 
     #[test]
