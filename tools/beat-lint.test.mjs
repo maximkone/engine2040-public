@@ -3,16 +3,19 @@
 // with a clumped rung (seed 2040, fixed strings, no randomness) fails.
 // Bad tiers, a boss off the last rung, rank drift from ladder.rs, a minute
 // or a new-element total off the compiled chart, and float cells fail too,
-// with a line number so a bad row cannot slip silent. The first-bout launch
+// with a line number so a bad row cannot slip silent. The arena a rung runs
+// is gated too: an id no placement file backs fails, and a new-arena count
+// that does not follow the placement swap fails. The first-bout launch
 // cap is not checked here: ladder.rs owns it (FIRST_BOUT_START_SECS 45,
 // FIRST_BOUT_START_LIMIT_SECS 60) and its Rust test proves it, so no row
 // ever states a bout length as a launch time.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  ARENA_VARIANTS,
   checkAll,
   parseLadder,
   rankOf,
@@ -32,6 +35,7 @@ function row(id, patch = {}) {
     new_moves: 1,
     new_rules: RUNG_NEW_ELEMENTS[n] - 1,
     new_arena: 0,
+    arena: "base",
     reward: rewardForRung(n),
     penalty: 25,
     minutes: RUNG_MINUTES[n],
@@ -45,6 +49,7 @@ function row(id, patch = {}) {
     " new_moves=" + got.new_moves +
     " new_rules=" + got.new_rules +
     " new_arena=" + got.new_arena +
+    " arena=" + got.arena +
     " reward=" + got.reward +
     " penalty=" + got.penalty +
     " minutes=" + got.minutes +
@@ -145,4 +150,41 @@ test("rows refuse floats with the line number", () => {
 
 test("rows refuse a missing header", () => {
   assert.throws(() => parseLadder(row("rung_0") + "\n"), /first row must be/);
+});
+
+test("the live rows name the arena each rung runs", () => {
+  const r = checkAll({ ladderText: readFileSync(LADDER, "utf8") });
+  assert.deepEqual(
+    r.rows.map((x) => x.arena),
+    ["base", "base", "base", "base", "ludus", "ludus", "siege", "siege"],
+    "the live chart names the placement per rung",
+  );
+  // The count follows the swap: 1 on the rung that changes the placement.
+  assert.deepEqual(
+    r.rows.map((x) => x.new_arena),
+    [0, 0, 0, 0, 1, 0, 1, 0],
+    "the live count follows the placement swap",
+  );
+});
+
+test("every arena variant names a placement file that exists", () => {
+  for (const variant of ARENA_VARIANTS) {
+    assert.ok(existsSync(variant.file), "placement file missing: " + variant.file);
+  }
+});
+
+test("an arena variant no placement file backs must fail", () => {
+  const r = checkAll({ ladderText: ladderText({ rung_4: { arena: "nowhere" } }) });
+  assert.ok(
+    r.failures.some((f) => f.includes("rung_4") && f.includes("unknown arena variant")),
+    "fails unknown variant, got " + r.failures.join("; "),
+  );
+});
+
+test("an arena count that ignores the swap must fail", () => {
+  const r = checkAll({ ladderText: ladderText({ rung_4: { arena: "ludus", new_arena: 0 } }) });
+  assert.ok(
+    r.failures.some((f) => f.includes("rung_4") && f.includes("new_arena 0")),
+    "fails a lying count, got " + r.failures.join("; "),
+  );
 });
