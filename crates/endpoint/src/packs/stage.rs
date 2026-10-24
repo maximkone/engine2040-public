@@ -26,6 +26,13 @@ pub fn pack() -> Result<PackDef, PackError> {
         false,
     );
     add_stage_surface(&mut pack)?;
+    // SW145: one rendered still through the host renderer, idempotent per
+    // (tick, pose); a headless door refuses it by name.
+    pack.add(VerbSpec::of::<crate::photo_verb::PhotoShootTool>(
+        crate::photo_verb::VERB_PHOTO_SHOOT,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
     Ok(pack)
 }
 
@@ -1047,14 +1054,15 @@ fn whole(value: f32, max: u32) -> u32 {
     u32::try_from(engine_core::checked::saturating_f64_to_u64(clamped)).unwrap_or(max)
 }
 
+/// The camera's three view axes: forward, right and up.
+type ViewAxes = ([f32; 3], [f32; 3], [f32; 3]);
+
 /// The camera's view axes: forward down the eye-to-target line, right and up.
-fn view_axes(
-    eye: [f32; 3],
-    target: [f32; 3],
-) -> Result<([f32; 3], [f32; 3], [f32; 3]), crate::mcp::McpToolError> {
+fn view_axes(eye: [f32; 3], target: [f32; 3]) -> Result<ViewAxes, crate::mcp::McpToolError> {
     let dir = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]];
     let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
-    if !(len > 1e-4) {
+    // NaN fails the comparison too, so a degenerate view refuses like a zero one.
+    if len.partial_cmp(&1e-4) != Some(std::cmp::Ordering::Greater) {
         return Err(bad_args(
             "eye and target are the same point; re-run with a target down the arena".to_owned(),
         ));
