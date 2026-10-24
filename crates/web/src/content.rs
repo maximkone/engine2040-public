@@ -15,7 +15,7 @@
 //! [`BundleSource`] is an [`AssetSource`], so a loader reads logical names and
 //! never a file path, and a missing asset is a typed refusal that names it.
 
-use engine_assets::asset_source::{AssetSource, BundleSource, SourceError};
+use engine_assets::asset_source::{content_digest, AssetSource, BundleSource, SourceError};
 use std::future::Future;
 
 /// Where the packer puts the bundle inside `dist/web`.
@@ -115,6 +115,41 @@ pub fn asset_bytes(source: &dyn AssetSource, name: &str) -> Result<Vec<u8>, Cont
         Err(SourceError::Missing { path }) => Err(ContentError::Missing { path }),
         Err(err) => Err(ContentError::Bundle(err)),
     }
+}
+
+/// The loaded-content line the page prints, comparable with the native load (WEB6):
+/// `content: {label} bytes=<byte_len> entries=<n> digest=<16 lowercase hex>`.
+///
+/// The digest is [`content_digest`] over the whole source: it folds each path, length and
+/// byte hash in path order, so the same files give the same number through a fetched
+/// `.e2bundle` or the native file system. That one number is how the browser leg of "the
+/// loaded content is the cooked content" is read against the native digest.
+///
+/// # Errors
+/// The format's refusal when a blob no longer matches its recorded hash, and the refusal
+/// of a fetched prefix that must read a tier it does not hold yet (the page uses
+/// [`source_line_held`], which prints that case without a digest).
+pub fn source_line(source: &BundleSource, label: &str) -> Result<String, ContentError> {
+    let digest = content_digest(source, "")?;
+    Ok(format!(
+        "content: {label} bytes={} entries={} digest={digest:016x}",
+        source.byte_len(),
+        source.len()
+    ))
+}
+
+/// [`source_line`] for a source that may hold only a fetched prefix (QW4): the bytes and
+/// the entries it holds are always named, and a prefix whose later tiers are still in
+/// flight prints `digest=na` with the reason instead of a digest it cannot fold.
+#[must_use]
+pub fn source_line_held(source: &BundleSource, label: &str) -> String {
+    source_line(source, label).unwrap_or_else(|err| {
+        format!(
+            "content: {label} bytes={} entries={} digest=na ({err})",
+            source.byte_len(),
+            source.len()
+        )
+    })
 }
 
 /// Open the bundle the host fetched for `url`.
@@ -271,7 +306,7 @@ fn describe(err: &wasm_bindgen::JsValue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_assets::asset_source::{bundle_pack, PackRules};
+    use engine_assets::asset_source::{bundle_pack, pack_to, FsSource, PackRules};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::task::{Context, Poll, Waker};
@@ -325,6 +360,59 @@ mod tests {
         let bytes = std::fs::read(&out).expect("read bundle");
         let _ = std::fs::remove_dir_all(&base);
         bytes
+    }
+
+    /// Two files of different sizes packed from a directory: the line's byte, entry and
+    /// digest numbers. The caller removes `base`.
+    fn two_file_content(tag: &str) -> (std::path::PathBuf, Vec<u8>) {
+        let base = std::env::temp_dir().join(format!("e2040-web-source-line-{tag}"));
+        let root = base.join("content");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(root.join("cooked")).expect("temp dir");
+        std::fs::write(root.join("cooked/sand_base.ktx2"), b"ktx2 bytes").expect("write");
+        std::fs::write(root.join("cooked/sand_tile.ktx2"), b"another tile").expect("write");
+        let mut bytes = Vec::new();
+        pack_to(&FsSource::new(&root), &PackRules::new(), &mut bytes).expect("pack");
+        (base, bytes)
+    }
+
+    /// WEB6: the loaded-content line names the bytes, the files and the digest, and that
+    /// digest is the native one, so the browser leg has a number to compare.
+    #[test]
+    fn the_source_line_names_bytes_entries_and_digest() {
+        let (base, bytes) = two_file_content("line");
+        let source = open_bundle(bytes.clone()).expect("open");
+        let digest = content_digest(&source, "").expect("bundle digest");
+        assert_eq!(
+            source_line(&source, "arena kit").expect("line"),
+            format!(
+                "content: arena kit bytes={} entries=2 digest={digest:016x}",
+                bytes.len()
+            )
+        );
+        assert_eq!(
+            digest,
+            content_digest(&FsSource::new(base.join("content")), "").expect("native digest"),
+            "the fetched bundle folds to the native digest"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// WEB6: a fetched prefix names what it holds and says `digest=na` for the tier it does
+    /// not, so the page prints a line even while the later tiers are still in flight.
+    #[test]
+    fn a_prefix_source_line_names_its_bytes_and_no_digest() {
+        let bytes = packed_bundle_with_hdri("line-prefix");
+        let first = tier_zero_end(&bytes);
+        let source = open_bundle_prefix(bytes[..first].to_vec()).expect("prefix");
+        let line = source_line_held(&source, "arena kit prefix");
+        assert!(
+            line.starts_with(&format!(
+                "content: arena kit prefix bytes={first} entries=2 digest=na ("
+            )),
+            "{line}"
+        );
+        assert!(line.contains("not in the fetched prefix"), "{line}");
     }
 
     /// The byte at which the coarse tier ends, from the full bundle's own index.
