@@ -27,9 +27,13 @@ pub mod rig_cook;
 pub use datanode::{parse, DataNodeError, Node};
 /// Blender node extras as load-time data, no name hacks.
 pub mod extras;
-/// Std-only scene/rules schema gate: compile once, refuse with key paths, never panic.
+/// Std-only JSON schema gate: compile once, refuse with key paths, never panic.
+pub mod schema;
+pub use schema::{Refusal, Schema};
+/// Content rules over a cooked mesh: each names a defect, its severity and an optional fix.
+/// Rides the `import` lane with the mesh type it checks.
+#[cfg(feature = "import")]
 pub mod validate;
-pub use validate::{Refusal, Schema};
 /// Zero-copy archived bundles over a shared byte mapping: staged
 /// payloads finish to one versioned archive; `open` borrows the mapping with
 /// no per-entry copy. Std-only; planned, no caller yet (verified 2026-10-16):
@@ -112,6 +116,23 @@ pub mod ktx2_cook;
 pub mod lod_swap;
 #[cfg(feature = "import")]
 pub mod mesh_cook;
+/// The LOD chain with its measured geometric error per level in metres: the
+/// number the pixel-error LOD pick projects. Rides `mesh_cook`'s feature.
+#[cfg(feature = "import")]
+pub mod lod_error;
+#[cfg(feature = "import")]
+pub use lod_error::{max_deviation_m, measure_lod_chain, one_way_deviation_m, CookedLod};
+/// One cluster-LOD hierarchy over a cooked mesh: level 0 is the meshlet cook,
+/// each higher level merges neighbours and simplifies the group, and a cut at
+/// one error threshold covers every triangle exactly once. The far crowd and
+/// the debris field pick from this tree instead of a 4-level chain.
+#[cfg(feature = "import")]
+pub mod cluster_lod;
+#[cfg(feature = "import")]
+pub use cluster_lod::{
+    build_clod_tree, ClodBounds, ClodConfig, ClodNode, ClodTree, DEFAULT_GROUP_SIZE,
+    DEFAULT_SIMPLIFY_RATIO, DEFAULT_SIMPLIFY_THRESHOLD, MAX_LEVELS, MAX_NODES,
+};
 /// Native glTF-Transform style document pre-pass (dedup, prune, resize-record).
 pub mod optimize;
 /// Offline BC cook over `bc` plus KTX2 emit: picked shape, x2 identical.
