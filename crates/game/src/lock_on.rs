@@ -68,9 +68,65 @@ pub fn nearest_rival_facing(human: u8, views: &[FighterView], hp: &[u16]) -> Opt
     bearing_cdeg(dx, dz)
 }
 
+/// Distance (meters) inside which a living rival locks the movement frame (see
+/// [`lock_on_forward`]): a fight, not a walk across the pit.
+pub const LOCK_ON_RANGE_M: f32 = 12.0;
+
+/// The movement frame of a fight: the unit floor direction `[x, z]` from `human` to the
+/// nearest living rival when one stands within `range_m`, else `None`. The window turns the
+/// keys by this instead of by the camera while it holds (owner 2026-10-24: "controls
+/// inverted, left is right"): the director cuts to side-on, front and roomier-side shots, and
+/// camera-relative keys flipped with every cut; W at the rival and D to the hero's right of
+/// that line never flip. Same rival choice as [`nearest_rival_facing`]. Pure.
+#[must_use]
+pub fn lock_on_forward(
+    human: u8,
+    views: &[FighterView],
+    hp: &[u16],
+    range_m: f32,
+) -> Option<[f32; 2]> {
+    let me = views.iter().find(|view| view.slot == human)?;
+    let (dist, _, dx, dz) = views
+        .iter()
+        .filter(|view| view.slot != human)
+        .filter(|view| hp.get(usize::from(view.slot)).is_none_or(|&left| left > 0))
+        .filter_map(|view| {
+            let (dx, dz) = (view.pos_m[0] - me.pos_m[0], view.pos_m[2] - me.pos_m[2]);
+            let dist = dx.hypot(dz);
+            dist.is_finite().then_some((dist, view.slot, dx, dz))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))?;
+    (dist >= MIN_RANGE_M && dist <= range_m).then(|| [dx / dist, dz / dist])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lock_on_frame_points_at_a_near_living_rival_only() {
+        let hp = [1000u16, 1000, 0];
+        let near = [view(0, 0.0, 0.0), view(1, 3.0, 4.0)];
+        let f = lock_on_forward(0, &near, &hp, LOCK_ON_RANGE_M).expect("a rival 5 m away locks");
+        assert!(
+            (f[0] - 0.6).abs() < 1e-6 && (f[1] - 0.8).abs() < 1e-6,
+            "{f:?}"
+        );
+        let far = [view(0, 0.0, 0.0), view(1, 30.0, 0.0)];
+        assert_eq!(
+            lock_on_forward(0, &far, &hp, LOCK_ON_RANGE_M),
+            None,
+            "a walk across the pit keeps the camera frame"
+        );
+        let dead = [view(0, 0.0, 0.0), view(2, 1.0, 0.0)];
+        assert_eq!(
+            lock_on_forward(0, &dead, &hp, LOCK_ON_RANGE_M),
+            None,
+            "a downed rival locks nothing"
+        );
+        let alone = [view(0, 0.0, 0.0)];
+        assert_eq!(lock_on_forward(0, &alone, &hp, LOCK_ON_RANGE_M), None);
+    }
 
     fn view(slot: u8, x: f32, z: f32) -> FighterView {
         FighterView {
