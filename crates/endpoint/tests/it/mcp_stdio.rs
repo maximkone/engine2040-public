@@ -1,5 +1,10 @@
 //! MCP5 scripted external client: list, preview, apply and undo over stdio.
 //!
+//! AD26: the refusal leg below reads a refusal the way an outside model does —
+//! an `isError` result carrying the code, the closed advice code, the retry
+//! flag and the one next call (a verb this connection lists, and one that
+//! answers), while a name that is no tool stays a JSON-RPC error.
+//!
 //! Consumer: external MCP clients (Claude Code, OpenCode, Cursor) and the EV1
 //! eval harness. Spawns the `e2040-mcp` binary as a child and speaks
 //! newline-delimited JSON-RPC on its stdin/stdout, exactly like an outside
@@ -16,15 +21,20 @@ use std::time::Duration;
 
 use rmcp::serde_json::{self, Value};
 
+use engine_endpoint::mcp::Advice;
+
 /// Bounded wait per server reply: a silent server fails the test, never hangs it.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-/// What a fresh door lists: the thirteen core tools plus the eight default
-/// `scene`-pack verbs and GS46's `world.query` (22 names), in contract order.
-/// Every other verb is callable by name and listed
-/// once its pack loads (`api.load`). The last three are the defined TOOL_
-/// consts that inbox row EB-2026-10-08-S178 (E37) registered: `game.build`,
-/// `sim.build_encounter`, `test.run`.
-const EXPECTED_TOOLS: [&str; 22] = [
+/// What a fresh door lists: the thirteen core tools plus the thirteen default
+/// `scene`-pack verbs (26 names), in contract order. Every other verb is
+/// callable by name and listed once its pack loads (`api.load`); the scene
+/// pack's `game.play` joins the default list only under the `rules` feature.
+/// The last three are the defined TOOL_ consts that inbox row
+/// EB-2026-10-08-S178 (E37) registered: `game.build`, `sim.build_encounter`,
+/// `test.run`. 2026-10-24: the pin was four verbs stale — `scene.save` and
+/// `scene.load` (5d75945c4, DOOR2) and `prefab.save` and `prefab.place`
+/// (894f1ea0c) sit in the default `scene` pack and always were advertised.
+const EXPECTED_TOOLS: [&str; 26] = [
     "scene.read",
     "tx.preview",
     "tx.apply",
@@ -44,6 +54,10 @@ const EXPECTED_TOOLS: [&str; 22] = [
     "scene.next",
     "scene.pick",
     "world.query",
+    "scene.save",
+    "scene.load",
+    "prefab.save",
+    "prefab.place",
     "game.build",
     "sim.build_encounter",
     "test.run",
@@ -51,7 +65,10 @@ const EXPECTED_TOOLS: [&str; 22] = [
 /// Verbs of the `view` pack: listed only after `api.load`. 2026-10-19: SP62's
 /// `view.observe` and `view.laws` joined the pack, so the list is six now.
 /// 2026-10-21: `view.compare` joined the pack too, so the list is seven now.
-const VIEW_PACK: [&str; 7] = [
+/// 2026-10-23: `door.status` joined (eight); 2026-10-24: the art wave added
+/// `view.sheet`, `look.propose` and `view.frame`, so the pack lists eleven;
+/// SP62/EG35 then added `view.scene` and `view.steer` (thirteen).
+const VIEW_PACK: [&str; 13] = [
     "log.digest",
     "log.query",
     "rpc.discover",
@@ -59,6 +76,12 @@ const VIEW_PACK: [&str; 7] = [
     "view.observe",
     "view.laws",
     "view.compare",
+    "door.status",
+    "view.sheet",
+    "look.propose",
+    "view.frame",
+    "view.scene",
+    "view.steer",
 ];
 /// Fixed node id for the scripted edit (a fresh server serves an empty doc).
 const NODE_ID: &str = "123e4567-e89b-42d3-a456-426614174000";
@@ -113,8 +136,9 @@ impl StdioClient {
         }
     }
 
-    /// One JSON-RPC request: write a line, read the reply line, return `result`.
-    fn send(&mut self, method: &str, params: &str) -> Value {
+    /// One JSON-RPC request whose reply may be a refusal: write a line, read the
+    /// reply line and hand back the whole envelope, result or error.
+    fn send_maybe_refused(&mut self, method: &str, params: &str) -> Value {
         let id = self.next_id;
         self.next_id += 1;
         writeln!(
@@ -134,6 +158,12 @@ impl StdioClient {
             Some(id),
             "server echoes the request id: {reply}"
         );
+        reply
+    }
+
+    /// One JSON-RPC request that must answer ok: return its `result`.
+    fn send(&mut self, method: &str, params: &str) -> Value {
+        let reply = self.send_maybe_refused(method, params);
         assert!(
             reply.get("error").is_none(),
             "server answers ok, got: {reply}"
@@ -281,16 +311,61 @@ fn scripted_client_lists_previews_applies_and_undoes_over_stdio() {
     let called = structured(&client.call("api.call", r#"{"verb":"log.digest","args":{}}"#));
     assert_eq!(called["pack"].as_str(), Some("view"));
     assert_eq!(called["result"]["events"], digest["events"]);
+    // The default surface plus the view pack is over the hard tool budget, so
+    // the documented flow unloads the default `scene` pack first; the door
+    // names that flow in its refusal. Core tools stay listed either way.
+    let unloaded = structured(&client.call("api.load", r#"{"pack":"scene","unload":true}"#));
+    assert_eq!(unloaded["loaded"].as_bool(), Some(false));
+    let core_only = listed_tools(&mut client);
+    assert!(
+        !core_only.contains(&"scene.brief".to_owned()),
+        "unload hides the scene pack: {core_only:?}"
+    );
     let loaded = structured(&client.call("api.load", r#"{"pack":"view"}"#));
     assert_eq!(loaded["loaded"].as_bool(), Some(true));
+    assert_eq!(loaded["pack"].as_str(), Some("view"));
+    let mut pack_verbs: Vec<String> = loaded["verbs"]
+        .as_array()
+        .expect("api.load names the pack's verbs")
+        .iter()
+        .map(|verb| verb.as_str().expect("verb names are text").to_owned())
+        .collect();
+    pack_verbs.sort();
+    let mut expected_verbs: Vec<String> = VIEW_PACK.iter().map(ToString::to_string).collect();
+    expected_verbs.sort();
+    assert_eq!(pack_verbs, expected_verbs, "api.load names every view verb");
+    // The API6 guardrail may hide the widest verbs of a loaded pack at the
+    // ceiling, but it never hides a core tool and never advertises a verb
+    // outside the packs this session loaded.
     let with_view = listed_tools(&mut client);
-    for verb in VIEW_PACK {
+    for name in &with_view {
         assert!(
-            with_view.contains(&verb.to_owned()),
-            "api.load lists `{verb}`"
+            core_only.contains(name) || VIEW_PACK.contains(&name.as_str()),
+            "only the loaded pack joins the list: {name}"
         );
     }
-    assert_eq!(with_view.len(), expected.len() + VIEW_PACK.len());
+    assert!(
+        with_view
+            .iter()
+            .any(|name| VIEW_PACK.contains(&name.as_str())),
+        "api.load advertises view verbs: {with_view:?}"
+    );
+    // Hide view again and restore the shipped default surface for the legs
+    // below: the round trip must leave the exact list the door started with.
+    let unloaded = structured(&client.call("api.load", r#"{"pack":"view","unload":true}"#));
+    assert_eq!(unloaded["loaded"].as_bool(), Some(false));
+    assert_eq!(
+        listed_tools(&mut client),
+        core_only,
+        "unload restores the core list"
+    );
+    let restored = structured(&client.call("api.load", r#"{"pack":"scene"}"#));
+    assert_eq!(restored["loaded"].as_bool(), Some(true));
+    assert_eq!(
+        listed_tools(&mut client),
+        expected,
+        "reloading scene restores the shipped list"
+    );
     let found = structured(&client.call("api.search", r#"{"query":"pack","limit":32}"#));
     let packs = found["hits"]
         .as_array()
@@ -531,5 +606,121 @@ fn startup_rejects_bad_dirs_and_flags_with_nonzero_exits() {
         stderr.contains("usage error"),
         "typed usage error, got: {stderr}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stdio_a_refusal_carries_advice_retry_and_a_live_next_call() {
+    let dir = scratch("refusal-advice");
+    let mut client = StdioClient::spawn(&dir);
+    // The list this connection serves: a next call has to name one of these,
+    // or the advice points at a verb this client cannot invoke.
+    let listed = listed_tools(&mut client);
+
+    // One refused write: the fresh document sits at revision 0, the batch asks
+    // for 5, so the door refuses it as a stale revision.
+    let op = insert_op(NODE_ID);
+    let stale = format!("{{\"expected_revision\":5,\"idempotency_key\":4242,\"ops\":[{op}]}}");
+    let reply = client.send_maybe_refused(
+        "tools/call",
+        &format!("{{{META},\"name\":\"tx.preview\",\"arguments\":{stale}}}"),
+    );
+    assert!(
+        reply.get("error").is_none(),
+        "a refusal the caller can act on is a tool result, not a protocol error: {reply}"
+    );
+    let result = reply["result"].clone();
+    assert_eq!(
+        result["isError"].as_bool(),
+        Some(true),
+        "the refusal flags isError: {result}"
+    );
+    let payload = structured(&result);
+    assert_eq!(
+        payload["code"].as_str(),
+        Some("stale_revision"),
+        "the refusal carries its code: {payload}"
+    );
+    assert!(
+        payload["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("revision")),
+        "the message names the culprit: {payload}"
+    );
+    assert_eq!(payload["kind"].as_str(), Some("state"));
+    assert_eq!(
+        payload["retryable"].as_bool(),
+        Some(true),
+        "a stale revision is retryable: {payload}"
+    );
+    let advice = payload["advice"]
+        .as_str()
+        .expect("a refusal carries an advice code");
+    let closed: Vec<&str> = Advice::ALL.iter().map(|code| code.as_str()).collect();
+    assert!(
+        closed.contains(&advice),
+        "`{advice}` is not on the closed advice list {closed:?}"
+    );
+    assert_eq!(
+        advice,
+        Advice::Repreview.as_str(),
+        "a stale revision says re-preview"
+    );
+
+    // The one next call names a verb this connection lists, and following it
+    // works: the advised call reads the live document on the same connection.
+    let next_verb = payload["next"]["verb"]
+        .as_str()
+        .expect("the refusal names one next call");
+    assert!(
+        listed.contains(&next_verb.to_owned()),
+        "next call `{next_verb}` is one the door lists: {listed:?}"
+    );
+    let next_args = payload["next"]["args"].clone();
+    assert_eq!(
+        next_args["limit"].as_u64(),
+        Some(64),
+        "the next call carries its fixed args: {next_args}"
+    );
+    let followed = structured(&client.call(next_verb, &next_args.to_string()));
+    assert_eq!(
+        followed["revision"].as_u64(),
+        Some(0),
+        "the advised call answers on the same connection: {followed}"
+    );
+
+    // A name that is not a tool at all stays a JSON-RPC error, never a result.
+    let unknown = client.send_maybe_refused(
+        "tools/call",
+        &format!("{{{META},\"name\":\"no.such.verb\",\"arguments\":{{}}}}"),
+    );
+    assert!(
+        unknown.get("result").is_none(),
+        "an unknown tool is not a tool result: {unknown}"
+    );
+    let error = &unknown["error"];
+    assert_eq!(
+        error["code"].as_i64(),
+        Some(-32602),
+        "unknown_tool is invalid_params: {error}"
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("unknown_tool")),
+        "the error names its code: {error}"
+    );
+    assert_eq!(
+        error["data"]["code"].as_str(),
+        Some("unknown_tool"),
+        "the payload names the code beside the error: {error}"
+    );
+    assert_eq!(
+        error["data"]["advice"].as_str(),
+        Some(Advice::SearchVerb.as_str()),
+        "a protocol refusal still carries its advice: {error}"
+    );
+
+    assert!(client.close_and_wait(), "server exits cleanly on stdin EOF");
     let _ = std::fs::remove_dir_all(&dir);
 }
