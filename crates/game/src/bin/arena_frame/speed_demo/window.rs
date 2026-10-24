@@ -40,6 +40,8 @@ impl ArenaApp {
         match demo.push(presenter, list) {
             Ok(()) => {
                 demo.frame(&mut list.camera);
+                // SD10: the demo's speed line takes the place of the fight's health bars.
+                super::hud::stage(presenter, &demo.hud());
                 // Night: the street lamps nearest the camera are the frame's lights.
                 if demo.night {
                     let eye: [f32; 3] = list.camera.eye.into();
@@ -48,6 +50,8 @@ impl ArenaApp {
             }
             Err(why) => {
                 presenter.set_fog_enabled(true);
+                // The demo is gone: drop its HUD rather than leave the last line frozen.
+                presenter.clear_overlay();
                 tell!("arena notice: speed demo dropped: {why}");
                 self.speed = None;
             }

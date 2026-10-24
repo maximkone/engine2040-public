@@ -21,6 +21,13 @@ Write each section in three lines or less. If two sections come back empty on a 
 | Tests | The acceptance command per touched row: crate check, crate test, then the proof or capture gate. |
 | Unknowns | List them with who can answer and what done looks like. Stop on ambiguity. Do not guess. |
 
+### Tool before hand
+
+Before a manual step, ask in order: is there a skill, a `node tools/` script, or an MCP tool for this?
+Board: `node tools/board-slice.mjs --focus`. Plan: `node tools/plan-atlas.mjs --row <ID>`. Files a change retests: `node tools/affected.mjs --files <path>`.
+Compile errors: `node tools/gh-check.mjs --remote-only --only <paths> cargo check -p <crate> --tests`. Never local cargo, never `git add -A`.
+A step done by hand that a tool already owns is a mistake, not a shortcut.
+
 ## 2. Where things are
 
 - Order: `docs/FOCUS.md` "## Now". Rows: `node tools/board-slice.mjs --ready`, `--focus`, `<ID>` (never read a shard whole).

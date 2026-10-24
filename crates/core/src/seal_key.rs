@@ -104,6 +104,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_refusal_prints_its_own_sentence() {
+        assert_eq!(
+            SealKeyError::NotHex.to_string(),
+            "seal key must be even-length hex"
+        );
+        assert_eq!(SealKeyError::TooShort.to_string(), "seal key is too short");
+        assert_eq!(
+            SealKeyError::Missing.to_string(),
+            "operator seal key is missing"
+        );
+    }
+
+    #[test]
     fn minimum_length_key_parses() {
         let key = parse_seal_key(&"0123456789abcdef".repeat(4)).expect("64 hex chars parse");
         assert_eq!(key.len(), MIN_SEAL_KEY_BYTES);
