@@ -35,6 +35,7 @@ impl TabViewer for Viewer<'_> {
             Panel::History => self.history_tab(ui),
             Panel::Timeline => self.timeline_tab(ui),
             Panel::Poses => self.poses_tab(ui),
+            Panel::Graph => self.graph_tab(ui),
         }
     }
 

@@ -89,6 +89,8 @@ pub enum Panel {
     Timeline,
     /// Named pose shelf: rows by name, Enter picks, `S` saves the held tape.
     Poses,
+    /// Material graph: node boxes with typed ports, validated links, pan/zoom.
+    Graph,
 }
 
 impl Panel {
@@ -107,6 +109,7 @@ impl Panel {
             Self::History => "History",
             Self::Timeline => "Timeline",
             Self::Poses => "Poses",
+            Self::Graph => "Graph",
         }
     }
 

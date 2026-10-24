@@ -37,9 +37,9 @@ pub struct PanelDescriptor {
     pub panel: Panel,
 }
 
-/// The twelve dock panels in default order: the single source of truth behind
+/// The thirteen dock panels in default order: the single source of truth behind
 /// [`builtin_registry`] and [`ensure_builtin_panels`].
-pub const BUILTIN: [(&str, Panel); 12] = [
+pub const BUILTIN: [(&str, Panel); 13] = [
     ("hierarchy", Panel::Hierarchy),
     ("inspector", Panel::Inspector),
     ("viewport", Panel::Viewport),
@@ -49,6 +49,7 @@ pub const BUILTIN: [(&str, Panel); 12] = [
     ("history", Panel::History),
     ("timeline", Panel::Timeline),
     ("poses", Panel::Poses),
+    ("graph", Panel::Graph),
     ("browser", Panel::Browser),
     ("activity", Panel::Activity),
     ("log", Panel::Log),
@@ -79,7 +80,7 @@ impl PanelRegistry {
     }
 }
 
-/// The twelve dock panels in default order.
+/// The thirteen dock panels in default order.
 pub fn builtin_registry() -> PanelRegistry {
     let mut registry = PanelRegistry::new();
     for (id, panel) in BUILTIN {
@@ -119,7 +120,7 @@ mod tests {
         }
         assert!(shell.is_open(Panel::Log));
         assert_eq!(builtin_registry().panels(), Panel::all());
-        assert_eq!(builtin_registry().panels().len(), 12);
+        assert_eq!(builtin_registry().panels().len(), 13);
     }
 
     #[test]
@@ -136,7 +137,7 @@ mod tests {
         assert_eq!(Panel::Activity.title(), "activity");
         assert!(Panel::all().contains(&Panel::Activity));
         assert_eq!(builtin_registry().panels(), Panel::all());
-        assert_eq!(builtin_registry().panels().len(), 12);
+        assert_eq!(builtin_registry().panels().len(), 13);
     }
 
     #[test]

@@ -295,6 +295,52 @@ Not taken: `BadMachine/egui-marquee` (clean marquee state machine, no licence
 file); `huxingyi/simpleuv` and `jpcy/xatlas` are above the star cap here and
 xatlas is already bound by `crates/geo/src/uv.rs`.
 
+## 8. Landed the same day (2026-10-24)
+
+The wave below was built after this report, from the same tree. Each row names the
+door surface or crate API, not a plan. Commit short shas are on `master`.
+
+| Gap | Landed surface | Commit |
+|---|---|---|
+| E1 | `editor::select::{Selection, marquee, Clipboard}`, `gizmo::drag_set` (one op per object, one revision) | `7d479e946`, `6fc36c796` |
+| E2 | `editor::palette` index + frecency + `PaletteState`, overlay, Ctrl+K | `7d479e946`, `6fc36c796`, `81a0ee23c` |
+| E3 | `stage.pin.add/list/clear` in a non-default stage pack | `b349cabd8` |
+| E4 | `editor::thumbnail::ThumbnailCache`, `browser::rows_with_thumbs` (a miss is `—`) | `6fc36c796` |
+| E5 | `Panel::History`, `History::{rows_newest_first, activate, name, version}` | `6fc36c796`, `81a0ee23c` |
+| E6 | `editor::timeline` sheet (keys, easing, region) + `Panel::Timeline` | `79ff81cfe`, `f9244f27d` |
+| E7 | `editor::graph_canvas` typed ports + `Panel::Graph` | `f9244f27d`, `a4f75e839` |
+| E8 | `view.compare` `region` + `ignore` rects | `6b8ef7df3`, `0fd6a37f2` |
+| E9 | `editor::console::ConsolePanel`, `editor::perf_panel` overlay | `81a0ee23c`, `a4f75e839` |
+| E10 | `editor::watch::{Watch, drop_report, ReimportReceipt}` | `6fc36c796`, `79ff81cfe` |
+| E11 | `render::post::lut` (`.cube` parse, trilinear, f16 table), chain tap, `LookPreset` | `af34a4894`, `57dc567fe`, `eca148329` |
+| E12 | `view.frame` score, `stage.camera.*`, `stage.shot.*` | `dac09035d` |
+| E13 | `engine_ui::layout` solver + pins, `ui.layout.solve/resize` verbs | `f77a2f545`, `f6ea70eb4`, `6d56102d0` |
+| A1 | `material::graph` typed nodes, `material.graph.set/get`, `material.bake` 4 maps | `3127a6673`, `28ff4afbb` |
+| A2 | `geo.uv/lod/hull/bake` preview+apply, `UvScore` with texel-density spread | `9b1c12af8`, `be0066121` |
+| A3 | `render::buffers::DebugFrame` (normal, depth, albedo, id, digests), `lookup_id` | `57dc567fe` |
+| A4 | `anim::clip_rot` lane, socket, blob, bake/sample, `anim.rot.preview`, cook sidecar | `a6326d85f`, `733cbe75e`, `be0066121` |
+| A5 | TVER writer/paint, `world.terrain.*`, layers, `world.scatter`, `world.wfc` | `3ace33cb1`, `60e0639c7`, `6dc17a9a7` |
+| A6 | `fx.preset.list/preview/set/clear` with a deterministic emitter preview | `f48581da1` |
+| A8 | `asset.impostor` + an impostor row in `asset.budget` | `be8b8f072` |
+| A9 | `engine_audio::cue_sheet` + anchors/clock, `audio.cues`, `audio.cue.resolve` | `ce1529853`, `da8e385a3`, `6d56102d0` |
+| W1 | `asset.lint` with codes and fixes | `92a6e3cf6` |
+| W2 | `view.sheet` contact sheet, worst-first | `888802e4f` |
+| W3 | `asset.search` (text, kind, palette) | `be0066121` |
+| W4 | `editor::pose_shelf` + `Panel::Poses` | `6fc36c796`, `f9244f27d` |
+| W5 | `look.propose` predicted vs measured | `888802e4f` |
+| W6 | `asset.budget` per-asset cost rows | `92a6e3cf6` |
+| W7 | `History::name` / `version` named states | `6fc36c796` |
+| W8 | `editor::art_path` five-rung ladder + overlay | `f9244f27d`, `a4f75e839` |
+
+Still open after the wave, and why: live GPU readback for `DebugFrame` (the
+forward pass keeps no normal/albedo/id target yet); GPU upload and WGSL fetch for
+the LUT (CPU oracle and f16 table are ready); terrain render/nav integration
+(the data path is done); the `Watch` call site in the running editor loop; canvas
+evaluation in the editor (the material pack evaluates); a Perfetto trace; and one
+honest mismatch to fix: `render` turns crowd cards at 45 m while `anim`'s far tier
+starts at 60 m, so `asset.impostor` reports the anim threshold and its warning
+names the render one.
+
 ## Reproduce
 
 ```pwsh

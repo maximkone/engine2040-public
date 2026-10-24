@@ -30,6 +30,7 @@ use crate::outline::{
 use crate::shell::{Panel, Shell, ShellError};
 
 mod overlay;
+mod surfaces;
 mod viewer;
 use crate::spine_inspect::{inspect_spine, SpineInspectError};
 use crate::templates::TemplateKind;
@@ -117,6 +118,8 @@ pub struct ShellUi {
     pose_tape: Option<crate::pose_tape::PoseTape>,
     /// Last pose notice (saved line or refusal text).
     pose_notice: Option<String>,
+    /// Graph, guided-path and perf surfaces (state plus their draw code).
+    surfaces: surfaces::Surfaces,
 }
 
 /// One attached spine frame: the extraction tick and digest plus a node per
@@ -173,6 +176,7 @@ impl ShellUi {
             pose_pick: None,
             pose_tape: None,
             pose_notice: None,
+            surfaces: surfaces::Surfaces::default(),
         }
     }
 
@@ -338,6 +342,7 @@ impl ShellUi {
         );
         let mut viewer = Viewer {
             shell,
+            surfaces: &mut self.surfaces,
             gizmo,
             viewport_tex,
             fix_preview,
@@ -369,6 +374,8 @@ impl ShellUi {
             pose_notice,
         };
         DockArea::new(dock).show_inside(ui, &mut viewer);
+        drop(viewer);
+        self.overlays(ui);
     }
 }
 
@@ -405,6 +412,7 @@ struct Viewer<'a> {
     pose_pick: &'a mut Option<String>,
     pose_tape: &'a mut Option<crate::pose_tape::PoseTape>,
     pose_notice: &'a mut Option<String>,
+    surfaces: &'a mut surfaces::Surfaces,
 }
 
 impl Viewer<'_> {

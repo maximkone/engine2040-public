@@ -16,6 +16,9 @@ pub mod activity;
 #[cfg(feature = "ui")]
 pub mod app;
 /// Digest-chained audit receipts over the crash-safe journal (rotation-capped).
+/// Guided-path overlay rows (W8): rung rows and the `N` key advance, headless
+/// so the draw code only paints.
+pub mod art_overlay;
 /// Guided art path (W8): the five-step ladder from import to score, rooted in
 /// the host's per-step readiness. Std-only and deterministic.
 pub mod art_path;
@@ -71,6 +74,9 @@ pub mod outline;
 /// listed assets, ranked with highlight ranges for the palette panel.
 /// Std-only.
 pub mod palette;
+/// Perf overlay (E9): host-measured frame, tick and GPU rows banded against a
+/// caller budget. Std-only; the window host fills the numbers.
+pub mod perf_panel;
 pub mod play;
 /// Play-in-editor: game-window-equivalent fixed-tick loop in the viewport,
 /// pause/step/restart over play snapshots. Behind `ui` with the engine-app

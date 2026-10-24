@@ -204,6 +204,28 @@ pub fn drop_report(
     (changes, receipts)
 }
 
+/// Adapter for the window host: one activity row per receipt.
+///
+/// The verb says whether the intake took the file (`import.accepted` or
+/// `import.refused`) and the tick is the report tick, so the activity feed
+/// orders reimports with edits. The path stays on the receipt for a panel that
+/// shows [`ReimportReceipt::text`]; no intake runs here.
+pub fn receipt_activities(receipts: &[ReimportReceipt]) -> Vec<crate::activity::Activity> {
+    receipts
+        .iter()
+        .map(|receipt| crate::activity::Activity {
+            author: crate::activity::Author::Agent,
+            verb: if receipt.accepted {
+                "import.accepted"
+            } else {
+                "import.refused"
+            },
+            subject: None,
+            tick: receipt.at_tick,
+        })
+        .collect()
+}
+
 /// One reimport receipt row: the file, the tick it was reported on and whether
 /// the intake took it. The panel draws one line per row via
 /// [`ReimportReceipt::text`].
@@ -351,5 +373,32 @@ mod tests {
         );
         assert_ne!(accepted, refused, "the verdict is part of the row");
         assert_eq!(refused.at_tick, 42);
+    }
+
+    #[test]
+    fn a_refused_drop_becomes_one_refused_activity_row() {
+        let dir = std::env::temp_dir().join(format!("e2040-watch-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("crate.glb");
+        std::fs::write(&path, b"a").unwrap();
+        let mut watch = Watch::new(2);
+        watch.watch(&path).unwrap();
+        std::fs::write(&path, b"bb").unwrap();
+        assert!(watch.poll(0).is_empty(), "inside the coalescing window");
+        let (changes, receipts) = drop_report(&mut watch, 2, |_| false);
+        assert_eq!(changes.len(), 1, "the host gets the change list untouched");
+        assert_eq!(receipts.len(), 1);
+        assert!(!receipts[0].accepted, "the predicate refused this path");
+        assert_eq!(receipts[0].at_tick, 2);
+        assert_eq!(receipts[0].path, path);
+        let activities = receipt_activities(&receipts);
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].verb, "import.refused");
+        assert_eq!(activities[0].tick, 2);
+        assert!(activities[0].text().contains("import.refused"));
+        // The same change taken by the intake is the accepted verb.
+        let taken = receipt_activities(&[ReimportReceipt::from_change(&changes[0], 2, true)]);
+        assert_eq!(taken[0].verb, "import.accepted");
     }
 }
