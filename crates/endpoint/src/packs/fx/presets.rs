@@ -571,6 +571,10 @@ impl EmitterPresetRow {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "a fieldless door argument DTO keeps the brace form its sibling DTOs use, so its JSON schema stays an object"
+)]
 pub struct FxPresetListArgs {}
 
 /// What `fx.preset.list` answers.
@@ -1030,7 +1034,7 @@ mod preset_verbs {
         assert_eq!(listed.count, 5, "three shipped plus two authored");
         let names: Vec<&str> = listed.presets.iter().map(|row| row.name.as_str()).collect();
         assert_eq!(names, vec!["ash", "blood", "dust", "sparks", "zap"]);
-        assert!(listed.presets[0].builtin == false);
+        assert!(!listed.presets[0].builtin);
         assert!(listed.presets.iter().filter(|row| row.builtin).count() == 3);
         assert_eq!(
             listed.presets[0].digest,

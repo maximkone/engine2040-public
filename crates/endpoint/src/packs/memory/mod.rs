@@ -16,11 +16,22 @@
 //! Recall scope and order are the store's: a session's own facts plus the ones
 //! another session shared, in `(type, tick, id)` order, never a clock.
 //!
+//! `memory.record` is the fourth verb and a different store: the lesson rows
+//! `tools/memory/memory.mjs` keeps, one JSONL file the whole repo shares (BG14).
+//! Its rules are the tool's rules, held in [`crate::memory_store`]: one of three
+//! kinds, a source path under the repo, a caller-supplied UTC stamp and — the
+//! point of the row — the 16 hex digits of the tape hash the lesson was learned
+//! under. A row without one is refused with `record_bad_hash`, and the file is
+//! left exactly as it was. The same store reads back as the `e2040://memory`
+//! resource, filtered by `kind`, `path` and `hash`, in stamp order, one canonical
+//! JSON line per row, so the door and the tool answer the same bytes.
+//!
 //! Units: confidence in thousandths, ticks as write counts, bytes for the
 //! value bound. Determinism: the same writes in the same order always produce
 //! the same store; the table lives until the door restarts.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use engine_editor::capability::{Capability, OpMask};
@@ -32,6 +43,8 @@ use rmcp::serde::{Deserialize, Serialize};
 
 use super::{PackDef, PackError, VerbSpec};
 use crate::mcp::{McpServer, McpToolError};
+use crate::memory_store::{self, StoreError};
+use crate::resources::MEMORY_URI;
 use crate::tool_capabilities::CapabilityCard;
 
 /// Pack name.
@@ -42,6 +55,8 @@ pub const TOOL_MEMORY_WRITE: &str = "memory.write";
 pub const TOOL_MEMORY_RECALL: &str = "memory.recall";
 /// Verb: mark one of the session's own facts shared.
 pub const TOOL_MEMORY_SHARE: &str = "memory.share";
+/// Verb: append one lesson row to the repo's memory store.
+pub const TOOL_MEMORY_RECORD: &str = "memory.record";
 
 /// The process-wide store plus the sessions already registered in it.
 fn table() -> &'static Mutex<(MemoryStore, BTreeSet<u64>)> {
@@ -65,7 +80,7 @@ fn lock_table() -> Result<MutexGuard<'static, (MemoryStore, BTreeSet<u64>)>, Mcp
 fn memory_key(cap: &Capability) -> MemoryKey {
     let mut fold = engine_core::Fnv64::new();
     fold.write_u64(cap.session);
-    fold.write_u32(u32::from(cap.edit_budget.min(u32::MAX)));
+    fold.write_u32(cap.edit_budget);
     fold.write_u8(cap.ops.0);
     let grants = if cap.ops.contains(OpMask::ALL) {
         MEMORY_WRITE
@@ -149,6 +164,10 @@ pub struct MemoryWriteOutput {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "a fieldless door argument DTO keeps the brace form its sibling DTOs use, so its JSON schema stays an object"
+)]
 pub struct MemoryRecallArgs {}
 
 /// What `memory.recall` answers.
@@ -180,6 +199,44 @@ pub struct MemoryShareArgs {
 pub struct MemoryShareOutput {
     /// The fact, now shared.
     pub fact: MemoryFactDto,
+}
+
+/// What `memory.record` offers: one lesson row, in the fields the memory tool
+/// takes.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MemoryRecordArgs {
+    /// Lesson kind: `decision`, `failed-fix` or `tuned-value`.
+    pub kind: String,
+    /// The 16 hex digits of the tape hash (or golden) the lesson was learned
+    /// under; `0x` may prefix it. A row without one is refused.
+    pub hash: String,
+    /// The source path the lesson is about, repo-relative.
+    pub path: String,
+    /// The lesson itself.
+    pub text: String,
+    /// When the lesson was taken: `YYYY-MM-DDTHH:MM:SSZ` in UTC. The door keeps
+    /// no clock, so the caller states it.
+    pub utc: String,
+    /// The run id or commit that proves it.
+    pub evidence: Option<String>,
+    /// An alternative JSONL store to append to; default
+    /// `tools/memory/memory.jsonl` under the repo root.
+    pub store: Option<String>,
+}
+
+/// What `memory.record` answers.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MemoryRecordOutput {
+    /// The row as the store holds it, with its derived id.
+    pub row: memory_store::Record,
+    /// Rows the store holds after this write.
+    pub rows: u32,
+    /// The resource read that shows the row.
+    pub uri: String,
 }
 
 /// One fact as the door reports it for `viewer`.
@@ -302,6 +359,114 @@ fn memory_share_in(
     })
 }
 
+/// One store refusal as the door's typed error: the rule that failed, named.
+///
+/// Each arm spells its code at the constructor: the door keeps one refusal
+/// classification and it reads the literals the crate produces, so a code that
+/// only ever reaches the wire through a variable is a code no model can
+/// branch on.
+fn store_refusal(error: StoreError) -> McpToolError {
+    match error {
+        StoreError::BadKind { .. } => McpToolError::new(
+            "record_bad_kind",
+            format!("{error}; next: kind is `decision`, `failed-fix` or `tuned-value`"),
+        )
+        .with_data(rmcp::serde_json::json!({ "code": "record_bad_kind" })),
+        StoreError::BadHash { .. } => McpToolError::new(
+            "record_bad_hash",
+            format!(
+                "{error}; next: pass the 16 hex digits of the tape digest or the golden the \
+                 lesson was learned on"
+            ),
+        )
+        .with_data(rmcp::serde_json::json!({ "code": "record_bad_hash" })),
+        StoreError::BadPath { .. } => McpToolError::new(
+            "record_bad_path",
+            format!("{error}; next: path is repo-relative, such as crates/anim/src/motion_bake.rs"),
+        )
+        .with_data(rmcp::serde_json::json!({ "code": "record_bad_path" })),
+        StoreError::EmptyText => McpToolError::new(
+            "record_empty_text",
+            format!("{error}; next: say what the lesson learned"),
+        )
+        .with_data(rmcp::serde_json::json!({ "code": "record_empty_text" })),
+        StoreError::BadStamp { .. } => McpToolError::new(
+            "record_bad_stamp",
+            format!("{error}; next: utc is YYYY-MM-DDTHH:MM:SSZ in UTC"),
+        )
+        .with_data(rmcp::serde_json::json!({ "code": "record_bad_stamp" })),
+        StoreError::Line { .. } | StoreError::TooRows { .. } | StoreError::TooBig { .. } => {
+            McpToolError::new(
+                "record_store_line",
+                format!(
+                    "{error}; next: repair the store with `node tools/memory/memory.mjs query` \
+                     and retry"
+                ),
+            )
+            .with_data(rmcp::serde_json::json!({ "code": "record_store_line" }))
+        }
+        StoreError::Io { .. } => McpToolError::new(
+            "record_store_io",
+            format!(
+                "{error}; next: point `store` at a writable JSONL path, or leave it empty for \
+                 the repo store"
+            ),
+        )
+        .with_data(rmcp::serde_json::json!({ "code": "record_store_io" })),
+    }
+}
+
+/// The store a record write goes to: the caller's, or the repo's own.
+fn record_store(store: Option<&String>) -> PathBuf {
+    store
+        .map(PathBuf::from)
+        .unwrap_or_else(memory_store::store_path)
+}
+
+/// `memory.record` handler: append one lesson row to the repo's memory store.
+fn memory_record(
+    service: &McpServer,
+    args: &MemoryRecordArgs,
+) -> Result<MemoryRecordOutput, McpToolError> {
+    service.dispatch(TOOL_MEMORY_RECORD, |state| memory_record_in(state, args))
+}
+
+/// `memory.record` body: the tool's own rules, then one appended line.
+///
+/// A narrower token than the door's full token never writes here either, the
+/// same rule the typed-fact store applies.
+fn memory_record_in(
+    state: &mut crate::mcp::ServerState,
+    args: &MemoryRecordArgs,
+) -> Result<MemoryRecordOutput, McpToolError> {
+    if !state.cap.ops.contains(OpMask::ALL) {
+        return Err(McpToolError::new(
+            "memory_not_granted",
+            "this session's token does not carry the memory grant; next: write from the \
+             session that holds the full token, as `memory.write` requires",
+        )
+        .with_data(rmcp::serde_json::json!({ "code": "memory_not_granted" })));
+    }
+    let row = memory_store::build(
+        &args.kind,
+        &args.hash,
+        &args.path,
+        &args.utc,
+        &args.text,
+        args.evidence.as_deref(),
+    )
+    .map_err(store_refusal)?;
+    let store = record_store(args.store.as_ref());
+    memory_store::append(&store, &row).map_err(store_refusal)?;
+    let rows = memory_store::read_rows(&store).map_err(store_refusal)?;
+    let uri = format!("{MEMORY_URI}?path={}", row.path);
+    Ok(MemoryRecordOutput {
+        rows: u32::try_from(rows.len()).unwrap_or(u32::MAX),
+        row,
+        uri,
+    })
+}
+
 crate::e2_tool!(
     /// `memory.write`: one typed fact under the session's token.
     MemoryWriteTool,
@@ -335,14 +500,29 @@ crate::e2_tool!(
     invoke = memory_share
 );
 
-/// The shipped memory pack: three verbs, write and share commit, recall
-/// observes.
+crate::e2_tool!(
+    /// `memory.record`: append one lesson row to the repo's memory store.
+    MemoryRecordTool,
+    name = TOOL_MEMORY_RECORD,
+    description = "Record one lesson the build left behind, in the shape `tools/memory/memory.mjs` keeps: a kind (decision, failed-fix or tuned-value), a repo-relative source path, a UTC stamp, the lesson text and the 16 hex digits of the tape hash or golden it was learned under. A row without that hash refuses with record_bad_hash and the store keeps every byte it held. The row reads back on the e2040://memory resource, in stamp order. Commits one line.",
+    readonly = false,
+    args = MemoryRecordArgs,
+    output = MemoryRecordOutput,
+    invoke = memory_record
+);
+
+/// The shipped memory pack: four verbs. Three of them keep typed facts in the
+/// session store, `memory.record` appends one lesson row to the repo's store;
+/// recall and the resource are the observers.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
-        "memory: typed facts behind the session's capability token. memory.write keeps one \
-         fact, memory.recall answers the session's own facts plus the shared ones in store \
-         order, memory.share marks one of the session's own facts shared",
+        "memory: typed facts behind the session's capability token, and the lessons a \
+         build leaves behind. memory.write keeps one fact, memory.recall answers the \
+         session's own facts plus the shared ones in store order, memory.share marks one \
+         of the session's own facts shared, memory.record appends one lesson row (kind, \
+         path, stamp, text and the tape hash it was learned under) to the store the \
+         e2040://memory resource reads",
         false,
     );
     pack.add(VerbSpec::of::<MemoryWriteTool>(
@@ -357,6 +537,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<MemoryShareTool>(
         TOOL_MEMORY_SHARE,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<MemoryRecordTool>(
+        TOOL_MEMORY_RECORD,
         PACK,
         CapabilityCard::Commit,
     )?);
@@ -522,18 +707,24 @@ mod tests {
     }
 
     #[test]
-    fn pack_registers_three_verbs_with_their_cards() {
+    fn pack_registers_four_verbs_with_their_cards() {
         let pack = pack().expect("registers");
         assert_eq!(pack.name(), PACK);
         assert_eq!(
             pack.verb_names(),
-            vec![TOOL_MEMORY_WRITE, TOOL_MEMORY_RECALL, TOOL_MEMORY_SHARE]
+            vec![
+                TOOL_MEMORY_WRITE,
+                TOOL_MEMORY_RECALL,
+                TOOL_MEMORY_SHARE,
+                TOOL_MEMORY_RECORD
+            ]
         );
         assert!(!pack.default_loaded());
         for (name, card) in [
             (TOOL_MEMORY_WRITE, CapabilityCard::Commit),
             (TOOL_MEMORY_RECALL, CapabilityCard::Observe),
             (TOOL_MEMORY_SHARE, CapabilityCard::Commit),
+            (TOOL_MEMORY_RECORD, CapabilityCard::Commit),
         ] {
             let verb = pack
                 .verbs()
@@ -542,6 +733,230 @@ mod tests {
                 .expect("registered");
             assert_eq!(verb.card(), card, "{name}");
         }
+    }
+
+    /// A JSONL store under the system temp dir, one per call site.
+    fn lesson_store(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "e2040-memory-record-{tag}-{}-{n}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    fn lesson_args(
+        store: &std::path::Path,
+        kind: &str,
+        hash: &str,
+        path: &str,
+        utc: &str,
+    ) -> MemoryRecordArgs {
+        MemoryRecordArgs {
+            kind: kind.to_owned(),
+            hash: hash.to_owned(),
+            path: path.to_owned(),
+            text: "the lesson text".to_owned(),
+            utc: utc.to_owned(),
+            evidence: Some("49f3615e4".to_owned()),
+            store: Some(store.display().to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_record_appends_the_tools_own_row_and_the_resource_reads_it_back() {
+        let store = lesson_store("write");
+        let writer = server(41);
+        // Written late first: the read still answers in stamp order.
+        let late = MemoryRecordTool::invoke(
+            &writer,
+            lesson_args(
+                &store,
+                "decision",
+                "d57b5c8ae3096614",
+                "crates/anim/src/b.rs",
+                "2026-10-24T09:00:00Z",
+            ),
+        )
+        .expect("a full token records");
+        let early = MemoryRecordTool::invoke(
+            &writer,
+            lesson_args(
+                &store,
+                "failed-fix",
+                "0xD57B5C8AE3096614",
+                "crates\\anim\\src\\a.rs",
+                "2026-10-23T09:00:00Z",
+            ),
+        )
+        .expect("the second row records");
+        assert_eq!(late.rows, 1, "{late:?}");
+        assert_eq!(early.rows, 2, "{early:?}");
+        assert_eq!(
+            early.row.hash, "d57b5c8ae3096614",
+            "0x upper-case normalizes"
+        );
+        assert_eq!(
+            early.row.path, "crates/anim/src/a.rs",
+            "the path is `/`-separated"
+        );
+        assert_eq!(
+            early.row.id,
+            memory_store::row_id(
+                "failed-fix",
+                "d57b5c8ae3096614",
+                "crates/anim/src/a.rs",
+                "2026-10-23T09:00:00Z",
+                "the lesson text",
+                "49f3615e4",
+            ),
+            "one row, one id in both readers"
+        );
+        assert_eq!(early.uri, "e2040://memory?path=crates/anim/src/a.rs");
+
+        // The file holds exactly the two canonical lines the tool would write.
+        let text = std::fs::read_to_string(&store).expect("the store reads");
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            vec![late.row.line().as_str(), early.row.line().as_str()],
+            "{text}"
+        );
+
+        // The resource body for the same store: stamp order, both rows.
+        let rows = memory_store::read_ordered(&store).expect("the store parses");
+        let body = crate::resources::memory_body(&rows, &memory_store::Filter::default());
+        let lines: Vec<&str> = body.lines().filter(|line| line.starts_with('{')).collect();
+        assert_eq!(
+            lines,
+            vec![early.row.line().as_str(), late.row.line().as_str()]
+        );
+        assert!(body.contains("rows: 2 of 2 | filter: all rows"), "{body}");
+
+        // Recording the same lesson again keeps one line: the id is the key.
+        let again = MemoryRecordTool::invoke(
+            &writer,
+            lesson_args(
+                &store,
+                "failed-fix",
+                "d57b5c8ae3096614",
+                "crates/anim/src/a.rs",
+                "2026-10-23T09:00:00Z",
+            ),
+        )
+        .expect("the same lesson records again");
+        assert_eq!(again.rows, 2, "one row, one line");
+        assert_eq!(again.row.id, early.row.id);
+        let _ = std::fs::remove_file(&store);
+    }
+
+    #[test]
+    fn a_lesson_row_without_a_tape_hash_never_reaches_the_store() {
+        let store = lesson_store("refuse");
+        let writer = server(42);
+
+        // F2P: the row the book asks for. A lesson with no hash is not memory.
+        for (field, hash, code) in [
+            ("empty hash", "", "record_bad_hash"),
+            ("short hash", "d57b5c8ae309661", "record_bad_hash"),
+            ("long hash", "d57b5c8ae30966144", "record_bad_hash"),
+            ("not hex", "nope", "record_bad_hash"),
+        ] {
+            let refused = MemoryRecordTool::invoke(
+                &writer,
+                lesson_args(
+                    &store,
+                    "decision",
+                    hash,
+                    "crates/anim/src/a.rs",
+                    "2026-10-24T09:00:00Z",
+                ),
+            )
+            .expect_err("the door refuses the row");
+            assert_eq!(refused.code, code, "{field}");
+            assert!(
+                refused.message.contains("16 hex"),
+                "the recovery names the hash shape: {}",
+                refused.message
+            );
+        }
+
+        // The other fields refuse by name, and the store never appears.
+        let bad_kind = MemoryRecordTool::invoke(
+            &writer,
+            MemoryRecordArgs {
+                kind: "rumour".to_owned(),
+                ..lesson_args(
+                    &store,
+                    "decision",
+                    "d57b5c8ae3096614",
+                    "crates/anim/src/a.rs",
+                    "2026-10-24T09:00:00Z",
+                )
+            },
+        )
+        .expect_err("an unknown kind");
+        assert_eq!(bad_kind.code, "record_bad_kind");
+        for path in ["/abs/a.rs", "../a.rs", "C:/a.rs", "   "] {
+            let refused = MemoryRecordTool::invoke(
+                &writer,
+                MemoryRecordArgs {
+                    path: path.to_owned(),
+                    ..lesson_args(
+                        &store,
+                        "decision",
+                        "d57b5c8ae3096614",
+                        "crates/anim/src/a.rs",
+                        "2026-10-24T09:00:00Z",
+                    )
+                },
+            )
+            .expect_err("the path is outside the repo");
+            assert_eq!(refused.code, "record_bad_path", "{path}");
+        }
+        let bad_stamp = MemoryRecordTool::invoke(
+            &writer,
+            lesson_args(&store, "decision", "d57b5c8ae3096614", "a.rs", "yesterday"),
+        )
+        .expect_err("a stamp is a shape");
+        assert_eq!(bad_stamp.code, "record_bad_stamp");
+        let no_text = MemoryRecordTool::invoke(
+            &writer,
+            MemoryRecordArgs {
+                text: "   ".to_owned(),
+                ..lesson_args(
+                    &store,
+                    "decision",
+                    "d57b5c8ae3096614",
+                    "a.rs",
+                    "2026-10-24T09:00:00Z",
+                )
+            },
+        )
+        .expect_err("an empty lesson is no lesson");
+        assert_eq!(no_text.code, "record_empty_text");
+        assert!(
+            memory_store::read_rows(&store)
+                .expect("no store is an empty memory")
+                .is_empty(),
+            "every refusal left the store untouched"
+        );
+
+        // A narrower token never records, the same rule as memory.write.
+        let narrow = narrow(43);
+        let refused = MemoryRecordTool::invoke(
+            &narrow,
+            lesson_args(
+                &store,
+                "decision",
+                "d57b5c8ae3096614",
+                "a.rs",
+                "2026-10-24T09:00:00Z",
+            ),
+        )
+        .expect_err("a narrow token cannot record");
+        assert_eq!(refused.code, "memory_not_granted");
+        assert!(!store.exists(), "the refusal created no store");
     }
 }
 
@@ -555,6 +970,11 @@ static PACK_ROW: super::PackModule = super::PackModule {
     order: 13,
     name: PACK,
     default_loaded: false,
-    tools: &["memory.write", "memory.recall", "memory.share"],
+    tools: &[
+        "memory.write",
+        "memory.recall",
+        "memory.share",
+        "memory.record",
+    ],
     build: pack,
 };

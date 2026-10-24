@@ -1213,7 +1213,7 @@ fn coverage_refusal(error: &AnimError, rows: &[BoneMapping]) -> McpToolError {
         AnimError::UnknownRole(index) => {
             let source = rows
                 .get(*index)
-                .map_or("?".to_owned(), |row| row.source.clone());
+                .map_or_else(|| "?".to_owned(), |row| row.source.clone());
             McpToolError::new(
                 "unknown_bone",
                 format!("`{source}` maps to no role; recovery: leave it out or override it"),
@@ -1222,7 +1222,7 @@ fn coverage_refusal(error: &AnimError, rows: &[BoneMapping]) -> McpToolError {
         AnimError::DuplicateBone(index) => {
             let source = rows
                 .get(*index)
-                .map_or("?".to_owned(), |row| row.source.clone());
+                .map_or_else(|| "?".to_owned(), |row| row.source.clone());
             McpToolError::new(
                 "duplicate_bone",
                 format!(
@@ -1883,14 +1883,12 @@ mod clip_tests {
                 &mut want,
             );
             assert_eq!(sample.values.len(), 2);
-            for track in 0..2 {
-                for axis in 0..3 {
+            for (track, (got, want_row)) in sample.values.iter().zip(want.iter()).enumerate() {
+                for (axis, (g, w)) in got.iter().zip(want_row.iter()).enumerate() {
                     assert!(
-                        (sample.values[track][axis] - want[track][axis]).abs() <= 1e-5,
-                        "tick {} track {track} axis {axis}: {} vs {}",
+                        (*g - *w).abs() <= 1e-5,
+                        "tick {} track {track} axis {axis}: {g} vs {w}",
                         sample.tick,
-                        sample.values[track][axis],
-                        want[track][axis]
                     );
                 }
             }

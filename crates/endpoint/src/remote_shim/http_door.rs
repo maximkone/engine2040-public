@@ -304,7 +304,7 @@ fn route(server: &McpServer, token: &str, head: &Head, body: &[u8]) -> Reply {
             Ok(value) => Reply::json(200, value.to_string()),
             Err(reply) => reply,
         },
-        ("GET", _) | ("POST", _) => {
+        ("GET" | "POST", _) => {
             Reply::refused(404, "not_found", "known routes: GET /tools, POST /tx/batch")
         }
         _ => Reply::refused(

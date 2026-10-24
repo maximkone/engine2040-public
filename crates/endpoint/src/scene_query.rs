@@ -1570,6 +1570,7 @@ impl SyncTool<McpServer> for SceneQueryTool {
 }
 
 mod cone;
+mod nav_level;
 mod pairs;
 mod reach;
 mod space_kinds;
@@ -1581,6 +1582,8 @@ use space_kinds::SpaceArgs;
 mod compact_tests;
 #[cfg(test)]
 mod diff_tests;
+#[cfg(test)]
+mod nav_level_tests;
 #[cfg(test)]
 mod reach_door_tests;
 #[cfg(test)]
