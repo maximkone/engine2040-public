@@ -14,6 +14,16 @@ use std::collections::BTreeMap;
 pub const FOOTSTEP_CODE: u32 = 1;
 /// Hit cue code; routed to [`Callee::Combat`] by the default wiring.
 pub const HIT_CUE_CODE: u32 = 2;
+/// Windup-start clip marker: the tick the attack's windup begins, read by
+/// [`super::phase_warp::ClipMarkers::from_cues`]. A marker, not a callback:
+/// nothing routes it.
+pub const WINDUP_MARKER_CODE: u32 = 3;
+/// Impact clip marker: the clip's impact frame, which the phase warp lands on
+/// the sim's impact tick. A marker, not a callback: nothing routes it.
+pub const IMPACT_MARKER_CODE: u32 = 4;
+/// Recover clip marker: the first tick after the impact, where the clip plays
+/// 1:1 again. A marker, not a callback: nothing routes it.
+pub const RECOVER_MARKER_CODE: u32 = 5;
 
 /// Recorded callback recipient; data only, never a function pointer.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
