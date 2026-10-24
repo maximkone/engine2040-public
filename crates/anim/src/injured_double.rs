@@ -67,6 +67,7 @@ impl From<super::injured::InjuredError> for DoubleError {
     fn from(e: super::injured::InjuredError) -> Self {
         match e {
             super::injured::InjuredError::BadJoint(j) => Self::BadJoint(j),
+            super::injured::InjuredError::LossCount { got } => Self::TooMany { got },
             super::injured::InjuredError::Layer(source) => Self::Layer(source),
         }
     }
@@ -206,6 +207,25 @@ pub fn apply_double_override(
     Ok(rebuilt)
 }
 
+/// Stage the gait after two losses: both legs lost crawl on the trunk and the
+/// kept arms, every other pair narrows to its single-loss gait. The plan ramps
+/// to a legal state inside [`LEGAL_TICKS`](super::injured::LEGAL_TICKS); same
+/// pair plus same seed replays the same ticks.
+pub fn staged_double(
+    first: Loss,
+    second: Loss,
+    seed: u64,
+) -> Result<super::injured::Staged, DoubleError> {
+    let rebuilt = rebuild_double(first, second, seed)?;
+    Ok(super::injured::Staged::from_parts(
+        &[first, second],
+        rebuilt.mask(),
+        rebuilt.contacts(),
+        rebuilt.com(),
+        seed,
+    )?)
+}
+
 #[expect(
     clippy::manual_unwrap_or_default,
     reason = "explicit zero keeps digest total"
@@ -234,6 +254,7 @@ pub fn digest(rebuilt: &DoubleRebuilt) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::super::hit_react::{ARM_L, ARM_R, FIGHTER_JOINTS, LEG_L, LEG_R, PELVIS, SPINE};
+    use super::super::injured::{Gait, JOINT_LIMIT, STANCE_MIN};
     use super::*;
 
     const IDENTITY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
@@ -297,6 +318,24 @@ mod tests {
                     !stance_contains(a.contacts()[0], a.contacts()[1], [5.0, 5.0]),
                     "far point fails the polygon"
                 );
+                // The pair stages a gait that settles inside the BX5 bar, with
+                // no lane over its limit.
+                let mut plan = staged_double(first, second, s).expect("gait plan stages");
+                assert_eq!(
+                    plan.run_to_legal(),
+                    Some(plan.settle_ticks()),
+                    "seed {s}: legal inside 20 ticks"
+                );
+                for (lane, w) in plan.weights().iter().enumerate() {
+                    if lane == lost_a || lane == lost_b {
+                        assert_eq!(*w, 0, "seed {s}: lost lane stays 0");
+                    } else {
+                        assert!(
+                            *w >= STANCE_MIN && *w <= JOINT_LIMIT[lane],
+                            "seed {s}: lane {lane} inside its limit"
+                        );
+                    }
+                }
                 let both = super::super::injured::compose(a.mask(), &hit).expect("masks compose");
                 assert_eq!(both.weight(lost_a), 0, "first stays dropped under hit");
                 assert_eq!(both.weight(lost_b), 0, "second stays dropped under hit");
@@ -392,5 +431,60 @@ mod tests {
         assert_eq!(same, base);
         assert_eq!(PELVIS, 0);
         assert_eq!(SPINE, 5);
+    }
+
+    #[test]
+    fn injured_crawl_after_both_legs_reaches_legal_state_within_20_ticks() {
+        for seed in 600..660u64 {
+            let rebuilt = rebuild_double(Loss::LegL, Loss::LegR, seed).expect("pair rebuilds");
+            assert_eq!(
+                rebuilt.contacts(),
+                [false, false],
+                "no foot carries a crawl"
+            );
+            let mut crawl = staged_double(Loss::LegL, Loss::LegR, seed).expect("crawl stages");
+            assert_eq!(crawl.gait(), Gait::Crawl);
+            assert!(crawl.gait().grounded(), "the trunk bears the crawl");
+            assert!(Gait::Crawl.cycle_ticks() > 0, "a crawl has a cycle");
+            assert_eq!(
+                crawl.weight(LEG_L),
+                0,
+                "seed {seed}: left leg stays dropped"
+            );
+            assert_eq!(
+                crawl.weight(LEG_R),
+                0,
+                "seed {seed}: right leg stays dropped"
+            );
+            assert_eq!(
+                crawl.run_to_legal(),
+                Some(crawl.settle_ticks()),
+                "seed {seed}: legal inside 20 ticks"
+            );
+            assert!(crawl.is_legal(), "seed {seed}: crawl is legal");
+            for (lane, w) in crawl.weights().iter().enumerate() {
+                if lane == LEG_L || lane == LEG_R {
+                    assert_eq!(*w, 0, "seed {seed}: lost lane stays 0");
+                } else {
+                    assert!(
+                        *w >= STANCE_MIN && *w <= JOINT_LIMIT[lane],
+                        "seed {seed}: lane {lane} inside its limit"
+                    );
+                }
+            }
+            // Same pair plus same seed replays the same plan bytes.
+            let mut again =
+                staged_double(Loss::LegL, Loss::LegR, seed).expect("crawl stages again");
+            let _ = again.run_to_legal();
+            assert_eq!(
+                super::super::injured::digest_staged(&crawl),
+                super::super::injured::digest_staged(&again)
+            );
+        }
+        // A leg plus an arm narrows to the single-loss hop, not a crawl.
+        let mut pair = staged_double(Loss::LegR, Loss::ArmL, 611).expect("pair stages");
+        assert_eq!(pair.gait(), Gait::Hop);
+        let _ = pair.run_to_legal();
+        assert!(pair.is_legal());
     }
 }

@@ -15,7 +15,16 @@
     {"file": "iron_orm.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398528, "source_jpg_bytes": 1471493, "rgba8_bytes": 4194304, "psnr_db": 42.2},
     {"file": "floor_base.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 699488, "source_jpg_bytes": 737414, "rgba8_bytes": 2097152, "psnr_db": 42.1},
     {"file": "floor_normal.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 699504, "source_jpg_bytes": 995888, "rgba8_bytes": 2097152, "psnr_db": 41.5},
-    {"file": "floor_orm.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 699488, "source_jpg_bytes": 743302, "rgba8_bytes": 2097152, "psnr_db": 42.2}
+    {"file": "floor_orm.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 699488, "source_jpg_bytes": 743302, "rgba8_bytes": 2097152, "psnr_db": 42.2},
+    {"file": "marble_base.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398528, "source_jpg_bytes": 305029, "rgba8_bytes": 4194304, "psnr_db": 51.9},
+    {"file": "marble_normal.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398544, "source_jpg_bytes": 110230, "rgba8_bytes": 4194304, "psnr_db": 69.2},
+    {"file": "marble_orm.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398528, "source_jpg_bytes": 288392, "rgba8_bytes": 4194304, "psnr_db": 54.7},
+    {"file": "marble_tiles_base.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398528, "source_jpg_bytes": 957660, "rgba8_bytes": 4194304, "psnr_db": 46.2},
+    {"file": "marble_tiles_normal.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398544, "source_jpg_bytes": 601407, "rgba8_bytes": 4194304, "psnr_db": 49.1},
+    {"file": "marble_tiles_orm.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398528, "source_jpg_bytes": 1309071, "rgba8_bytes": 4194304, "psnr_db": 44.5},
+    {"file": "sand_dense_base.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398528, "source_jpg_bytes": 681515, "rgba8_bytes": 4194304, "psnr_db": 49.5},
+    {"file": "sand_dense_normal.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398544, "source_jpg_bytes": 993025, "rgba8_bytes": 4194304, "psnr_db": 44.9},
+    {"file": "sand_dense_orm.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398528, "source_jpg_bytes": 1161769, "rgba8_bytes": 4194304, "psnr_db": 47.2}
   ],
-  "total": {"ktx2_bytes": 14686640, "source_jpg_bytes": 12717707, "rgba8_bytes": 44040192}
+  "total": {"ktx2_bytes": 27273440, "source_jpg_bytes": 19125805, "rgba8_bytes": 81788928}
 }
