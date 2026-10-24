@@ -15,6 +15,169 @@ use engine_input::{
     apply_deadzone, Bindings, BoundAction, FighterError, FighterId, FighterInput, PhysicalButton,
 };
 
+use crate::fps_view::pad_rumble::{focus_lost, rumble_for_cue, RumbleRow, MOTORS_OFF_MS};
+use engine_audio::FightCue;
+
+/// Last device that acted on the input map: it decides which prompt glyph set the HUD draws.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DeviceKind {
+    /// Keyboard and mouse.
+    #[default]
+    Keyboard,
+    /// Gamepad.
+    Pad,
+}
+
+/// The prompt glyph set the HUD draws for the last device: letter keys for the keyboard, face
+/// buttons for the pad. One set at a time, so a prompt never mixes `E` with `A`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum GlyphSet {
+    /// Keyboard letters.
+    #[default]
+    Keyboard,
+    /// Pad face buttons.
+    Pad,
+}
+
+impl DeviceKind {
+    /// The glyph set this device draws.
+    #[must_use]
+    pub fn glyphs(self) -> GlyphSet {
+        match self {
+            Self::Keyboard => GlyphSet::Keyboard,
+            Self::Pad => GlyphSet::Pad,
+        }
+    }
+}
+
+/// One input event the window folds into [`PadState`]. Pure data: the winit and gilrs glue
+/// translates its own events into these and nothing else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PadEvent {
+    /// The window lost focus (`WindowEvent::Focused(false)`).
+    FocusLost,
+    /// The window holds focus again.
+    FocusGained,
+    /// A pad was plugged in (or answered for the first time).
+    PadConnected,
+    /// The active pad went away: the Steam Deck rule pauses the local duel.
+    PadDisconnected,
+    /// A pad button went down: the pad becomes the prompt device.
+    PadPress,
+    /// A keyboard key went down: the keyboard becomes the prompt device.
+    KeyPress,
+    /// One fight cue wants to rumble.
+    Cue(FightCue),
+}
+
+/// What one [`PadState::step`] decided: the motors to play, when they must be off, the prompt
+/// glyph set and whether a local duel is paused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PadStep {
+    /// Motor row for this tick; a silent row means nothing to play.
+    pub motors: RumbleRow,
+    /// Event-time deadline the motors must be off by (ms), when step asked for a cut.
+    pub motors_off_at_ms: Option<u32>,
+    /// Prompt glyph set after the event.
+    pub glyphs: GlyphSet,
+    /// True while a pad disconnect holds a local duel paused.
+    pub paused: bool,
+}
+
+/// Pure pad policy: focus, connection, last device and the pause rule as one step function.
+/// The window feeds it its events and plays what it returns; nothing here touches a device.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PadState {
+    focused: bool,
+    last: DeviceKind,
+    paused: bool,
+    motors: RumbleRow,
+}
+
+impl Default for PadState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PadState {
+    /// A focused window on the keyboard with no pad and no rumble playing.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            focused: true,
+            last: DeviceKind::Keyboard,
+            paused: false,
+            motors: RumbleRow::default(),
+        }
+    }
+
+    /// Fold one event at event time `at_ms` into the state and return the decision. Focus loss
+    /// asks for the motors off inside [`MOTORS_OFF_MS`]; a disconnect pauses at once (within the
+    /// same tick) and a cue plays its row unchanged while focused and unpaused.
+    pub fn step(&mut self, event: PadEvent, at_ms: u32) -> PadStep {
+        let mut deadline = None;
+        match event {
+            PadEvent::FocusLost => {
+                self.focused = false;
+                self.motors = focus_lost();
+                deadline = Some(at_ms.saturating_add(MOTORS_OFF_MS));
+            }
+            PadEvent::FocusGained => {
+                self.focused = true;
+                self.motors = RumbleRow::default();
+            }
+            PadEvent::PadConnected => {
+                self.paused = false;
+            }
+            PadEvent::PadDisconnected => {
+                // Steam Deck rule: the duel pauses on the tick the pad leaves.
+                self.paused = true;
+                self.motors = RumbleRow::default();
+                deadline = Some(at_ms);
+            }
+            PadEvent::PadPress => self.last = DeviceKind::Pad,
+            PadEvent::KeyPress => self.last = DeviceKind::Keyboard,
+            PadEvent::Cue(cue) => {
+                self.motors = rumble_for_cue(cue, self.focused && !self.paused);
+                if self.motors.ms > 0 {
+                    deadline = Some(at_ms.saturating_add(self.motors.ms));
+                }
+            }
+        }
+        PadStep {
+            motors: self.motors,
+            motors_off_at_ms: deadline,
+            glyphs: self.last.glyphs(),
+            paused: self.paused,
+        }
+    }
+
+    /// Prompt glyph set for the last device.
+    #[must_use]
+    pub fn glyphs(&self) -> GlyphSet {
+        self.last.glyphs()
+    }
+
+    /// True while a pad disconnect holds a local duel paused.
+    #[must_use]
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// The row playing now (silent when nothing plays).
+    #[must_use]
+    pub fn motors(&self) -> RumbleRow {
+        self.motors
+    }
+
+    /// True when the window holds focus.
+    #[must_use]
+    pub fn focused(&self) -> bool {
+        self.focused
+    }
+}
+
 /// One gamepad snapshot as plain data: no device handles, no threads.
 ///
 /// The window layer fills one of these per fixed tick from whatever pad
@@ -707,5 +870,165 @@ mod tests {
             steady.calls, 0,
             "pad merge plus build must not allocate per tick"
         );
+    }
+
+    /// The seven cue rows, one cue each, with the row it must reach.
+    fn cue_rows() -> [(FightCue, usize); 7] {
+        use crate::fps_view::pad_rumble::{
+            BLOCKED_ROW, DODGED_ROW, HEAVY_HIT_ROW, KNOCKDOWN_ROW, LIGHT_HIT_ROW, PARRIED_ROW,
+            STAMINA_OUT_ROW,
+        };
+        [
+            (
+                FightCue::Hit {
+                    attacker: 1,
+                    victim: 0,
+                    damage: 1,
+                },
+                LIGHT_HIT_ROW,
+            ),
+            (
+                FightCue::Hit {
+                    attacker: 1,
+                    victim: 0,
+                    damage: u16::MAX,
+                },
+                HEAVY_HIT_ROW,
+            ),
+            (
+                FightCue::Blocked {
+                    attacker: 1,
+                    victim: 0,
+                    chip: 20,
+                },
+                BLOCKED_ROW,
+            ),
+            (
+                FightCue::Parried {
+                    attacker: 1,
+                    victim: 0,
+                },
+                PARRIED_ROW,
+            ),
+            (
+                FightCue::Dodged {
+                    attacker: 1,
+                    victim: 0,
+                },
+                DODGED_ROW,
+            ),
+            (FightCue::StaminaOut { fighter: 0 }, STAMINA_OUT_ROW),
+            (
+                FightCue::Knockdown {
+                    attacker: 1,
+                    victim: 0,
+                },
+                KNOCKDOWN_ROW,
+            ),
+        ]
+    }
+
+    #[test]
+    fn pad_state_focus_loss_cuts_motors_within_ten_ms() {
+        use crate::fps_view::pad_rumble::KNOCKDOWN_ROW;
+        let mut state = PadState::new();
+        let played = state.step(
+            PadEvent::Cue(FightCue::Knockdown {
+                attacker: 1,
+                victim: 0,
+            }),
+            1_000,
+        );
+        assert_eq!(
+            played.motors,
+            crate::fps_view::pad_rumble::RUMBLE_TABLE[KNOCKDOWN_ROW]
+        );
+        assert_eq!(played.motors_off_at_ms, Some(1_260), "the row's own length");
+        let cut = state.step(PadEvent::FocusLost, 1_100);
+        let motors = cut.motors;
+        assert_eq!(
+            (motors.low, motors.high, motors.trigger_l, motors.trigger_r),
+            (0, 0, 0, 0),
+            "focus loss leaves no motor on"
+        );
+        let off_at = cut.motors_off_at_ms.expect("focus loss asks for a cut");
+        assert!(
+            off_at <= 1_100 + MOTORS_OFF_MS,
+            "motors off at {off_at} ms, deadline {} ms",
+            1_100 + MOTORS_OFF_MS
+        );
+        assert!(!state.focused());
+        // A cue while the window is away stays silent.
+        let away = state.step(
+            PadEvent::Cue(FightCue::Blocked {
+                attacker: 1,
+                victim: 0,
+                chip: 1,
+            }),
+            1_200,
+        );
+        assert_eq!(away.motors, RumbleRow::default());
+        assert_eq!(away.motors_off_at_ms, None);
+        // Back again: the next cue plays.
+        state.step(PadEvent::FocusGained, 1_300);
+        let back = state.step(
+            PadEvent::Cue(FightCue::Blocked {
+                attacker: 1,
+                victim: 0,
+                chip: 1,
+            }),
+            1_400,
+        );
+        assert!(back.motors.low > 0, "a focused pad rumbles again");
+    }
+
+    #[test]
+    fn pad_state_disconnect_pauses_the_duel_within_one_tick() {
+        let mut state = PadState::new();
+        state.step(PadEvent::PadPress, 0);
+        assert!(!state.paused());
+        let gone = state.step(PadEvent::PadDisconnected, 16);
+        assert!(gone.paused, "the disconnect pauses at once");
+        assert_eq!(
+            gone.motors_off_at_ms,
+            Some(16),
+            "motors cut on the same tick"
+        );
+        assert!(state.paused());
+        // Reconnecting resumes, and a pad already acted, so pad glyphs stay.
+        let back = state.step(PadEvent::PadConnected, 32);
+        assert!(!back.paused);
+        assert_eq!(back.glyphs, GlyphSet::Pad);
+    }
+
+    #[test]
+    fn pad_state_glyphs_follow_the_last_device() {
+        let mut state = PadState::new();
+        assert_eq!(state.glyphs(), GlyphSet::Keyboard, "the keyboard starts");
+        assert_eq!(state.step(PadEvent::PadPress, 0).glyphs, GlyphSet::Pad);
+        assert_eq!(
+            state.step(PadEvent::KeyPress, 16).glyphs,
+            GlyphSet::Keyboard,
+            "a key press flips the prompts back"
+        );
+        assert_eq!(state.step(PadEvent::PadPress, 32).glyphs, GlyphSet::Pad);
+        assert_eq!(DeviceKind::Pad.glyphs(), GlyphSet::Pad);
+        assert_eq!(DeviceKind::Keyboard.glyphs(), GlyphSet::Keyboard);
+    }
+
+    #[test]
+    fn pad_state_seven_cue_rows_reach_the_motors_unchanged() {
+        use crate::fps_view::pad_rumble::RUMBLE_TABLE;
+        let mut state = PadState::new();
+        for (cue, row) in cue_rows() {
+            let step = state.step(PadEvent::Cue(cue), 500);
+            assert_eq!(step.motors, RUMBLE_TABLE[row], "{cue:?} plays its own row");
+            let want_deadline = if RUMBLE_TABLE[row].ms == 0 {
+                None
+            } else {
+                Some(500 + RUMBLE_TABLE[row].ms)
+            };
+            assert_eq!(step.motors_off_at_ms, want_deadline, "{cue:?} deadline");
+        }
     }
 }

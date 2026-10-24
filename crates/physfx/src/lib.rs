@@ -50,7 +50,8 @@
 //!   those joints bend about the pelvis side axis inside a flexion range, the rest are balls.
 //! - `PhysFx::hit_ragdoll` spreads a blow over the bones near it, its total unchanged, and makes
 //!   the joints brace: a PD motor holds each joint at its spawn angle with a strength that falls
-//!   from 1 to 0 over `HIT_FADE_S`.
+//!   from the body's muscle over `HIT_FADE_S` to a resting tone (`RAGDOLL_TONE` of the muscle),
+//!   which a ragdoll also has from its spawn, so a fallen body is never a sack.
 //! - `PhysFx::sever` takes one bone out of a ragdoll into a `Limb` group of its own, removes the
 //!   joint to its parent and leaves the chain below jointed to it, so the limb falls away while
 //!   the ragdoll keeps the rest of its bones. The cut is authority; this only paints it.
@@ -113,7 +114,10 @@ pub use engine_physics::ragdoll::BoneShape;
 #[cfg(feature = "rapier")]
 pub use error::{Error, Field};
 #[cfg(feature = "rapier")]
-pub use fx::{PhysFx, RagdollReceipt, Severed, TetherInfo, HIT_FADE_S};
+pub use fx::{
+    PhysFx, RagdollReceipt, Severed, TetherInfo, HIT_FADE_S, MAX_DRIVE_ANGLE, MAX_DRIVE_OMEGA,
+    RAGDOLL_TONE,
+};
 #[cfg(feature = "rapier")]
 pub use rig::{Hinge, Rig};
 #[cfg(feature = "rapier")]
