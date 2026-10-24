@@ -1,0 +1,847 @@
+{
+  "name": "ds-pixel-ui-layout-o042",
+  "reference": {
+    "w": 640,
+    "h": 360
+  },
+  "note": "x and y are offsets from the anchor edge, in reference pixels. kind nine = 9-slice piece stretched to w x h; bar = frame piece + fill piece inside the frame inset, value 0..1, from start or end; icon = piece at native size; text = font-5x7 at an integer scale, colored by a token. O-042 screens: hud, menu (main), pause, settings, inventory.",
+  "screens": {
+    "hud": [
+      {
+        "id": "p1-name",
+        "kind": "text",
+        "anchor": "top-left",
+        "x": 16,
+        "y": 8,
+        "text": "PLAYER 1",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "p1-hp",
+        "kind": "bar",
+        "anchor": "top-left",
+        "x": 16,
+        "y": 18,
+        "w": 240,
+        "h": 12,
+        "frame": "bar-frame",
+        "fill": "bar-fill-hp",
+        "value": 0.72,
+        "from": "start"
+      },
+      {
+        "id": "p1-stamina",
+        "kind": "bar",
+        "anchor": "top-left",
+        "x": 16,
+        "y": 32,
+        "w": 160,
+        "h": 8,
+        "frame": "bar-frame",
+        "fill": "bar-fill-stamina",
+        "value": 0.48,
+        "from": "start"
+      },
+      {
+        "id": "p1-round-1",
+        "kind": "icon",
+        "anchor": "top-left",
+        "x": 16,
+        "y": 44,
+        "piece": "icon-star",
+        "tint": "accent"
+      },
+      {
+        "id": "p1-round-2",
+        "kind": "icon",
+        "anchor": "top-left",
+        "x": 34,
+        "y": 44,
+        "piece": "icon-star",
+        "tint": "line"
+      },
+      {
+        "id": "p2-name",
+        "kind": "text",
+        "anchor": "top-right",
+        "x": 16,
+        "y": 8,
+        "text": "PLAYER 2",
+        "scale": 1,
+        "color": "ink",
+        "align": "end"
+      },
+      {
+        "id": "p2-hp",
+        "kind": "bar",
+        "anchor": "top-right",
+        "x": 16,
+        "y": 18,
+        "w": 240,
+        "h": 12,
+        "frame": "bar-frame",
+        "fill": "bar-fill-hp",
+        "value": 0.55,
+        "from": "end"
+      },
+      {
+        "id": "p2-stamina",
+        "kind": "bar",
+        "anchor": "top-right",
+        "x": 16,
+        "y": 32,
+        "w": 160,
+        "h": 8,
+        "frame": "bar-frame",
+        "fill": "bar-fill-stamina",
+        "value": 0.8,
+        "from": "end"
+      },
+      {
+        "id": "p2-round-1",
+        "kind": "icon",
+        "anchor": "top-right",
+        "x": 16,
+        "y": 44,
+        "piece": "icon-star",
+        "tint": "accent"
+      },
+      {
+        "id": "p2-round-2",
+        "kind": "icon",
+        "anchor": "top-right",
+        "x": 34,
+        "y": 44,
+        "piece": "icon-star",
+        "tint": "accent"
+      },
+      {
+        "id": "timer-panel",
+        "kind": "nine",
+        "anchor": "top-center",
+        "x": 0,
+        "y": 6,
+        "w": 64,
+        "h": 40,
+        "piece": "panel"
+      },
+      {
+        "id": "timer-label",
+        "kind": "text",
+        "anchor": "top-center",
+        "x": 0,
+        "y": 13,
+        "text": "TIME",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      },
+      {
+        "id": "timer-value",
+        "kind": "text",
+        "anchor": "top-center",
+        "x": 0,
+        "y": 24,
+        "text": "58",
+        "scale": 2,
+        "color": "accent",
+        "align": "center"
+      },
+      {
+        "id": "slot-1",
+        "kind": "nine",
+        "anchor": "bottom-center",
+        "x": -39,
+        "y": 12,
+        "w": 22,
+        "h": 22,
+        "piece": "slot-selected"
+      },
+      {
+        "id": "slot-2",
+        "kind": "nine",
+        "anchor": "bottom-center",
+        "x": -13,
+        "y": 12,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "slot-3",
+        "kind": "nine",
+        "anchor": "bottom-center",
+        "x": 13,
+        "y": 12,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "slot-4",
+        "kind": "nine",
+        "anchor": "bottom-center",
+        "x": 39,
+        "y": 12,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "slot-1-icon",
+        "kind": "icon",
+        "anchor": "bottom-center",
+        "x": -39,
+        "y": 15,
+        "piece": "icon-sword",
+        "tint": "ink"
+      },
+      {
+        "id": "slot-2-icon",
+        "kind": "icon",
+        "anchor": "bottom-center",
+        "x": -13,
+        "y": 15,
+        "piece": "icon-shield",
+        "tint": "ink"
+      },
+      {
+        "id": "slot-3-icon",
+        "kind": "icon",
+        "anchor": "bottom-center",
+        "x": 13,
+        "y": 15,
+        "piece": "icon-heart",
+        "tint": "hp"
+      },
+      {
+        "id": "slot-4-icon",
+        "kind": "icon",
+        "anchor": "bottom-center",
+        "x": 39,
+        "y": 15,
+        "piece": "icon-coin",
+        "tint": "accent"
+      },
+      {
+        "id": "key-1",
+        "kind": "text",
+        "anchor": "bottom-center",
+        "x": -39,
+        "y": 2,
+        "text": "1",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      },
+      {
+        "id": "key-2",
+        "kind": "text",
+        "anchor": "bottom-center",
+        "x": -13,
+        "y": 2,
+        "text": "2",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      },
+      {
+        "id": "key-3",
+        "kind": "text",
+        "anchor": "bottom-center",
+        "x": 13,
+        "y": 2,
+        "text": "3",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      },
+      {
+        "id": "key-4",
+        "kind": "text",
+        "anchor": "bottom-center",
+        "x": 39,
+        "y": 2,
+        "text": "4",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      }
+    ],
+    "menu": [
+      {
+        "id": "menu-panel",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 0,
+        "y": 0,
+        "w": 210,
+        "h": 226,
+        "piece": "panel"
+      },
+      {
+        "id": "title",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": -80,
+        "text": "ARENA",
+        "scale": 4,
+        "color": "accent",
+        "align": "center"
+      },
+      {
+        "id": "subtitle",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": -50,
+        "text": "MAIN MENU",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      },
+      {
+        "id": "btn-continue",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": -22,
+        "w": 160,
+        "h": 24,
+        "group": "button",
+        "state": "disabled",
+        "text": "CONTINUE",
+        "scale": 1,
+        "color": "muted"
+      },
+      {
+        "id": "btn-start",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": 10,
+        "w": 160,
+        "h": 24,
+        "group": "button-primary",
+        "state": "hover",
+        "text": "START",
+        "scale": 2,
+        "color": "onAccent"
+      },
+      {
+        "id": "btn-options",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": 42,
+        "w": 160,
+        "h": 24,
+        "group": "button",
+        "state": "normal",
+        "text": "OPTIONS",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "btn-quit",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": 74,
+        "w": 160,
+        "h": 24,
+        "group": "button",
+        "state": "normal",
+        "text": "QUIT",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "close",
+        "kind": "icon",
+        "anchor": "top-right",
+        "x": 10,
+        "y": 10,
+        "piece": "icon-close",
+        "tint": "muted"
+      }
+    ],
+    "pause": [
+      {
+        "id": "pause-panel",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 0,
+        "y": 0,
+        "w": 240,
+        "h": 250,
+        "piece": "panel"
+      },
+      {
+        "id": "pause-title",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": -88,
+        "text": "PAUSED",
+        "scale": 3,
+        "color": "accent",
+        "align": "center"
+      },
+      {
+        "id": "pause-sub",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": -62,
+        "text": "GAME IS PAUSED",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      },
+      {
+        "id": "btn-resume",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": -36,
+        "w": 160,
+        "h": 24,
+        "group": "button-primary",
+        "state": "hover",
+        "text": "RESUME",
+        "scale": 1,
+        "color": "onAccent"
+      },
+      {
+        "id": "btn-restart",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": -4,
+        "w": 160,
+        "h": 24,
+        "group": "button",
+        "state": "normal",
+        "text": "RESTART",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "btn-psettings",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": 28,
+        "w": 160,
+        "h": 24,
+        "group": "button",
+        "state": "normal",
+        "text": "SETTINGS",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "btn-pquit",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": 60,
+        "w": 160,
+        "h": 24,
+        "group": "button",
+        "state": "normal",
+        "text": "QUIT",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "pause-hint",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": 94,
+        "text": "ESC RESUMES",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      },
+      {
+        "id": "pause-icon",
+        "kind": "icon",
+        "anchor": "top-right",
+        "x": 10,
+        "y": 10,
+        "piece": "icon-pause",
+        "tint": "muted"
+      }
+    ],
+    "settings": [
+      {
+        "id": "set-panel",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 0,
+        "y": 0,
+        "w": 300,
+        "h": 260,
+        "piece": "panel"
+      },
+      {
+        "id": "set-title",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": -92,
+        "text": "SETTINGS",
+        "scale": 3,
+        "color": "accent",
+        "align": "center"
+      },
+      {
+        "id": "set-music",
+        "kind": "text",
+        "anchor": "center",
+        "x": -120,
+        "y": -42,
+        "text": "MUSIC",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "set-music-bar",
+        "kind": "bar",
+        "anchor": "center",
+        "x": 30,
+        "y": -46,
+        "w": 180,
+        "h": 12,
+        "frame": "bar-frame",
+        "fill": "bar-fill-mana",
+        "value": 0.7,
+        "from": "start"
+      },
+      {
+        "id": "set-sfx",
+        "kind": "text",
+        "anchor": "center",
+        "x": -120,
+        "y": -10,
+        "text": "SFX",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "set-sfx-bar",
+        "kind": "bar",
+        "anchor": "center",
+        "x": 30,
+        "y": -14,
+        "w": 180,
+        "h": 12,
+        "frame": "bar-frame",
+        "fill": "bar-fill-gold",
+        "value": 0.9,
+        "from": "start"
+      },
+      {
+        "id": "set-shake",
+        "kind": "text",
+        "anchor": "center",
+        "x": -120,
+        "y": 8,
+        "text": "SHAKE",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "set-shake-slot",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 30,
+        "y": 8,
+        "w": 22,
+        "h": 22,
+        "piece": "slot-selected"
+      },
+      {
+        "id": "set-shake-on",
+        "kind": "text",
+        "anchor": "center",
+        "x": 62,
+        "y": 8,
+        "text": "ON",
+        "scale": 1,
+        "color": "accent"
+      },
+      {
+        "id": "set-hits",
+        "kind": "text",
+        "anchor": "center",
+        "x": -120,
+        "y": 40,
+        "text": "HITS",
+        "scale": 1,
+        "color": "ink"
+      },
+      {
+        "id": "set-hits-slot",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 30,
+        "y": 40,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "set-hits-off",
+        "kind": "text",
+        "anchor": "center",
+        "x": 62,
+        "y": 40,
+        "text": "OFF",
+        "scale": 1,
+        "color": "muted"
+      },
+      {
+        "id": "btn-back",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": 84,
+        "w": 160,
+        "h": 24,
+        "group": "button-primary",
+        "state": "normal",
+        "text": "BACK",
+        "scale": 1,
+        "color": "onAccent"
+      },
+      {
+        "id": "set-hint",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": 110,
+        "text": "MOUSE OR PAD",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      }
+    ],
+    "inventory": [
+      {
+        "id": "inv-panel",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 0,
+        "y": 0,
+        "w": 300,
+        "h": 240,
+        "piece": "panel-raised"
+      },
+      {
+        "id": "inv-title",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": -88,
+        "text": "INVENTORY",
+        "scale": 2,
+        "color": "accent",
+        "align": "center"
+      },
+      {
+        "id": "inv-cap",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": -70,
+        "text": "8 SLOTS",
+        "scale": 1,
+        "color": "muted",
+        "align": "center"
+      },
+      {
+        "id": "inv-slot-0-0",
+        "kind": "nine",
+        "anchor": "center",
+        "x": -45,
+        "y": -50,
+        "w": 22,
+        "h": 22,
+        "piece": "slot-selected"
+      },
+      {
+        "id": "inv-slot-0-1",
+        "kind": "nine",
+        "anchor": "center",
+        "x": -45,
+        "y": -20,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "inv-slot-1-0",
+        "kind": "nine",
+        "anchor": "center",
+        "x": -15,
+        "y": -50,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "inv-slot-1-1",
+        "kind": "nine",
+        "anchor": "center",
+        "x": -15,
+        "y": -20,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "inv-slot-2-0",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 15,
+        "y": -50,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "inv-slot-2-1",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 15,
+        "y": -20,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "inv-slot-3-0",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 45,
+        "y": -50,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "inv-slot-3-1",
+        "kind": "nine",
+        "anchor": "center",
+        "x": 45,
+        "y": -20,
+        "w": 22,
+        "h": 22,
+        "piece": "slot"
+      },
+      {
+        "id": "inv-icon-0",
+        "kind": "icon",
+        "anchor": "center",
+        "x": -45,
+        "y": -50,
+        "piece": "icon-sword",
+        "tint": "ink"
+      },
+      {
+        "id": "inv-icon-1",
+        "kind": "icon",
+        "anchor": "center",
+        "x": -15,
+        "y": -50,
+        "piece": "icon-shield",
+        "tint": "ink"
+      },
+      {
+        "id": "inv-icon-2",
+        "kind": "icon",
+        "anchor": "center",
+        "x": 15,
+        "y": -50,
+        "piece": "icon-heart",
+        "tint": "hp"
+      },
+      {
+        "id": "inv-icon-3",
+        "kind": "icon",
+        "anchor": "center",
+        "x": 45,
+        "y": -50,
+        "piece": "icon-coin",
+        "tint": "accent"
+      },
+      {
+        "id": "inv-icon-4",
+        "kind": "icon",
+        "anchor": "center",
+        "x": -45,
+        "y": -20,
+        "piece": "icon-star",
+        "tint": "ink"
+      },
+      {
+        "id": "inv-icon-5",
+        "kind": "icon",
+        "anchor": "center",
+        "x": -15,
+        "y": -20,
+        "piece": "icon-gear",
+        "tint": "ink"
+      },
+      {
+        "id": "inv-icon-6",
+        "kind": "icon",
+        "anchor": "center",
+        "x": 15,
+        "y": -20,
+        "piece": "icon-timer",
+        "tint": "ink"
+      },
+      {
+        "id": "inv-icon-7",
+        "kind": "icon",
+        "anchor": "center",
+        "x": 45,
+        "y": -20,
+        "piece": "icon-pause",
+        "tint": "ink"
+      },
+      {
+        "id": "inv-gold",
+        "kind": "text",
+        "anchor": "center",
+        "x": 0,
+        "y": 24,
+        "text": "GOLD 1280",
+        "scale": 1,
+        "color": "accent",
+        "align": "center"
+      },
+      {
+        "id": "btn-close",
+        "kind": "button",
+        "anchor": "center",
+        "x": 0,
+        "y": 56,
+        "w": 160,
+        "h": 24,
+        "group": "button",
+        "state": "pressed",
+        "text": "CLOSE",
+        "scale": 1,
+        "color": "ink"
+      }
+    ]
+  }
+}
