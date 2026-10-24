@@ -24,7 +24,8 @@
 //! - the tension level, on the ticks it changes (rises at once, falls after a
 //!   hold, see [`TensionTracker`]), and a kill stinger on a knockdown;
 //! - the crowd bed, started once and then ridden by `outcome.bed_gain` every
-//!   tick it moves;
+//!   tick it moves, plus the crowd's own cheer one-shots (`crowd_cheer`) when
+//!   the reaction table fires a `Reaction::Cheer` (LOUD, 2026-10-24);
 //! - one break sound per break tick (RZ4, [`AudioSpace::feed_break`]), placed
 //!   where the blow struck.
 //!
@@ -41,10 +42,13 @@ use std::sync::Arc;
 use engine_anim::events::FOOTSTEP_CODE;
 use engine_arena::{EndWhy, SpearEvent};
 use engine_audio::combat_cues::{cue_for_event, footstep, Surface};
-use engine_audio::{cue_names, FeedError, FeedTx, FightCue, ImpactRouter, Tension, TensionTracker};
+use engine_audio::{
+    cue_names, FeedError, FeedTx, FightCue, ImpactRouter, Reaction, Tension, TensionTracker,
+};
 use engine_spatial::to_cm;
 
 use crate::clip_events::ClipFootstep;
+use crate::swing_time::STRIKE_TICKS;
 use crate::{FallLanding, FighterView, TickOutcome};
 
 /// Slots tracked for footsteps (the canonical roster cap, owned by the clip
@@ -60,6 +64,11 @@ const TELEPORT_M: f32 = 1.5;
 pub const CHEST_CM: i32 = 100;
 /// Smallest bed-gain move worth a feed write.
 const BED_EPSILON: f32 = 1.0 / 256.0;
+/// Level of the swing whoosh: well under the blow it leads into.
+const WHOOSH_GAIN: f32 = 0.6;
+/// Gain of a crowd cheer one-shot by reaction level 1..=3 (LOUD): a level-3
+/// roar is the loudest thing the crowd does, still under the bed's priority.
+const CHEER_GAIN: [f32; 3] = [0.55, 0.7, 0.85];
 /// Seed of the impact table's round robin: the one the arena feed is opened
 /// with, so a replay starts at the same take.
 const CUE_SEED: u64 = 2040;
@@ -74,7 +83,7 @@ pub struct SpaceParts {
     pub footsteps: bool,
     /// Tension levels and the kill stinger.
     pub tension: bool,
-    /// The crowd bed and its gain.
+    /// The crowd bed and its gain, plus the crowd's cheer one-shots.
     pub bed: bool,
 }
 
@@ -112,6 +121,8 @@ pub struct SpaceStats {
     pub tension_sends: u64,
     /// Bed gain writes sent.
     pub bed_writes: u64,
+    /// Crowd cheer one-shots played (`crowd_cheer`).
+    pub cheers: u64,
     /// Writes the bank refused for a missing cue name (also counted by the
     /// feed as `unknown_cue`).
     pub unknown_cue: u64,
@@ -126,6 +137,8 @@ pub struct SpaceStats {
     pub breaks: u64,
     /// Landing sounds played (FEEL7), one per landed slot.
     pub lands: u64,
+    /// Swing whooshes played (EG19c), one per swing that reached its strike.
+    pub swings: u64,
 }
 
 /// Window-side audio presentation state: where the listener is, what the
@@ -145,6 +158,11 @@ pub struct AudioSpace {
     /// first): its stride cue stands down on that tick, so one foot is one
     /// cue.
     clip_stepped: [u32; MAX_SLOTS],
+    /// Ticks from each slot's press to its blow (the armed weapon's startup),
+    /// set by [`Self::arm_swings`] (EG19c).
+    swing_lead: [u32; MAX_SLOTS],
+    /// The tick each slot's swing whoosh is due on, while a press waits.
+    whoosh_due: [Option<u32>; MAX_SLOTS],
     stats: SpaceStats,
     /// The impact table over the live [`CueBank`](engine_audio::CueBank) the
     /// feed resolves against: which cue an impact plays and which take of it
@@ -197,6 +215,8 @@ impl AudioSpace {
             bed_gain_sent: 1.0,
             stride: [Stride::default(); MAX_SLOTS],
             clip_stepped: [u32::MAX; MAX_SLOTS],
+            swing_lead: [0; MAX_SLOTS],
+            whoosh_due: [None; MAX_SLOTS],
             stats: SpaceStats::default(),
             router: None,
         }
@@ -263,6 +283,7 @@ impl AudioSpace {
         let sent = tx.listener(tick, self.listener_cm, self.yaw_deg);
         self.note(sent);
         if self.parts.events {
+            self.feed_swings(tx, tick, &outcome.started, views);
             self.feed_events(tx, tick, &outcome.cues, views);
             // FEEL7: a landing is a fight event with weight; it rides the
             // same part switch and lands on the fighter's feet.
@@ -276,6 +297,46 @@ impl AudioSpace {
         }
         if self.parts.bed {
             self.feed_bed(tx, tick, outcome.bed_gain);
+            self.feed_cheers(tx, tick, &outcome.reactions);
+        }
+    }
+
+    /// Tell the swing whoosh how long each slot's swing takes: the ticks from
+    /// the press to the blow, the armed weapon's startup (slot order; a slot
+    /// not named keeps its last lead). Cold path: the window calls it with the
+    /// tick's presses, from the match's weapon rows.
+    pub fn arm_swings(&mut self, leads: &[u32]) {
+        for (slot, lead) in self.swing_lead.iter_mut().zip(leads) {
+            *slot = *lead;
+        }
+    }
+
+    /// The swing whoosh (EG19c): a press (`started`) schedules a whoosh for
+    /// the tick the blade starts its strike, [`STRIKE_TICKS`] before the blow
+    /// lands, and the due whooshes sound at their fighter's chest. The windup
+    /// is silent and the blade is heard moving, so the hit's thud follows a
+    /// swing the ear has already followed. A press while one is waiting moves
+    /// the whoosh to the new swing.
+    fn feed_swings(&mut self, tx: &mut FeedTx, tick: u32, started: &[u8], views: &[FighterView]) {
+        for &slot in started {
+            if let (Some(lead), Some(due)) = (
+                self.swing_lead.get(usize::from(slot)).copied(),
+                self.whoosh_due.get_mut(usize::from(slot)),
+            ) {
+                *due = Some(tick.saturating_add(lead.saturating_sub(STRIKE_TICKS)));
+            }
+        }
+        for slot in 0..MAX_SLOTS {
+            if self.whoosh_due[slot].is_none_or(|due| due > tick) {
+                continue;
+            }
+            self.whoosh_due[slot] = None;
+            let at = u8::try_from(slot)
+                .ok()
+                .and_then(|slot| position_of(views, slot));
+            let sent = tx.play(tick, cue_names::SWING, WHOOSH_GAIN, at);
+            self.note(sent);
+            self.stats.swings += 1;
         }
     }
 
@@ -516,6 +577,27 @@ impl AudioSpace {
         self.note(sent);
     }
 
+    /// The crowd's one-shots (LOUD): every `Reaction::Cheer` the reaction
+    /// table fired this tick plays `crowd_cheer` over the bed, its gain from
+    /// the cheer's level. The table owns the spacing (`CHEER_COOLDOWN_TICKS`
+    /// 45), so a burst of cues inside the cooldown is one cheer here. `Ooh`
+    /// and `Gasp` have no recorded cue yet and ride the bed alone.
+    fn feed_cheers(&mut self, tx: &mut FeedTx, tick: u32, reactions: &[Reaction]) {
+        for reaction in reactions {
+            let Reaction::Cheer { level } = *reaction else {
+                continue;
+            };
+            let index = usize::from(level)
+                .saturating_sub(1)
+                .min(CHEER_GAIN.len() - 1);
+            let sent = tx.play(tick, cue_names::CROWD_CHEER, CHEER_GAIN[index], None);
+            if sent.is_ok() {
+                self.stats.cheers += 1;
+            }
+            self.note(sent);
+        }
+    }
+
     fn feed_bed(&mut self, tx: &mut FeedTx, tick: u32, bed_gain: f32) {
         if self.bed == BedState::Absent {
             return;
@@ -606,6 +688,8 @@ pub fn spear_cue(event: SpearEvent) -> Option<(&'static str, f32, u8)> {
             match why {
                 EndWhy::Wall => Some((cue_names::IMPACT_STONE, 1.0, at)),
                 EndWhy::Arrived => Some((cue_names::HIT, 0.8, at)),
+                // A blade through the rope: the steel tears it (row SG13).
+                EndWhy::Cut => Some((cue_names::SEVER, 0.9, at)),
                 _ => None,
             }
         }
@@ -697,5 +781,96 @@ mod landing_tests {
         assert_eq!(plays[0].pos_cm, Some([100, 0, 200]));
         assert!(plays[1].gain > plays[0].gain, "the long fall lands harder");
         assert_eq!(space.stats().lands, 2);
+    }
+
+    /// Every swing cue one run of ticks plays, as `(tick, gain, position)`.
+    fn whooshes(
+        leads: &[u32],
+        presses: &[(u32, u8)],
+        ticks: u32,
+    ) -> Vec<(u32, f32, Option<[i32; 3]>)> {
+        let bank = Arc::new(CueBank::placeholder(RATE).expect("shipped table"));
+        let swing = bank.id(cue_names::SWING).expect("the shipped swing cue");
+        let (mut tx, mut rx) = feed(64, bank);
+        let mut space = AudioSpace::with_parts(SpaceParts::EVENTS_ONLY);
+        space.arm_swings(leads);
+        let views = [
+            FighterView {
+                slot: 0,
+                pos_m: [1.0, 0.0, 2.0],
+                yaw: 0.0,
+            },
+            FighterView {
+                slot: 1,
+                pos_m: [-1.0, 0.0, 0.0],
+                yaw: 0.0,
+            },
+        ];
+        for tick in 0..ticks {
+            let started: Vec<u8> = presses
+                .iter()
+                .filter(|(at, _)| *at == tick)
+                .map(|(_, slot)| *slot)
+                .collect();
+            let outcome = TickOutcome {
+                started,
+                ..TickOutcome::default()
+            };
+            space.feed(&mut tx, tick, &outcome, &views);
+        }
+        let mut out = Vec::new();
+        while let Some(cmd) = rx.pop() {
+            if let Command::Play(play) = cmd {
+                if play.cue == swing {
+                    out.push((play.tick, play.gain, play.pos_cm));
+                }
+            }
+        }
+        assert_eq!(
+            space.stats().swings,
+            u64::try_from(out.len()).expect("a few plays")
+        );
+        out
+    }
+
+    /// EG19c: the swing whoosh sounds as the blade starts its strike, the
+    /// strike leg before the blow lands, at the swinger's chest: a gladius
+    /// pressed on tick 10 (startup 15) whooshes on tick 19, a dagger (12) on 16.
+    #[test]
+    fn swing_on_press_the_whoosh_sounds_as_the_strike_begins() {
+        // Slot 0 swings the gladius (15), slot 1 the dagger (12); the dagger's
+        // strike comes first, so its whoosh is the first to sound.
+        let plays = whooshes(&[15, 12], &[(10, 0), (10, 1)], 40);
+        assert_eq!(plays.len(), 2);
+        assert_eq!(
+            plays[0].0,
+            10 + 12 - STRIKE_TICKS,
+            "the dagger strikes at tick 16"
+        );
+        assert_eq!(
+            plays[1].0,
+            10 + 15 - STRIKE_TICKS,
+            "the gladius strikes at tick 19"
+        );
+        assert_eq!(plays[0].2, Some([-100, 100, 0]), "at the dagger's chest");
+        assert_eq!(plays[1].2, Some([100, 100, 200]), "at the swinger's chest");
+        assert!(
+            plays[1].1 > 0.0 && plays[1].1 < 1.0,
+            "under the blow it leads into"
+        );
+        // No press, no whoosh; a press never sounds twice.
+        assert!(whooshes(&[15, 12], &[], 40).is_empty());
+        assert_eq!(whooshes(&[15, 12], &[(3, 0)], 80).len(), 1);
+    }
+
+    /// A second press while the first whoosh waits moves it to the new swing,
+    /// and a lead shorter than the strike sounds on the press tick itself.
+    #[test]
+    fn swing_on_press_a_new_press_moves_the_whoosh_and_a_quick_swing_sounds_at_once() {
+        let plays = whooshes(&[15, 4], &[(10, 0), (14, 0)], 40);
+        assert_eq!(plays.len(), 1, "the first press's whoosh never sounds");
+        assert_eq!(plays[0].0, 14 + 15 - STRIKE_TICKS);
+        let quick = whooshes(&[15, 4], &[(10, 1)], 40);
+        assert_eq!(quick[0].0, 10, "a four-tick swing is all strike");
     }
 }
