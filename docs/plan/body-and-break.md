@@ -330,6 +330,7 @@ Rows live on the board; slice any row with `node tools/board-slice.mjs <ID>`. No
 | DX14 | bond-grade calibration corpus | B | - |
 | DX16 | bond-graph damage propagation | B | - |
 | DX17 | impact-keyed fracture table over bonded chunks | A | - |
+| DX18 | staged collapse (sag before collapse) on the bonded support graph | B | - |
 | BX5 | injured locomotion | A | - |
 | BX6 | capability observation and reaction | A | - |
 | BX7 | cut presentation | A | BX8 |

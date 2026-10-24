@@ -65,6 +65,13 @@ pub mod hitstop_kind;
 pub mod limbloss;
 /// Nerve meter beside the feel survey: u8 resolve/break/dread/anchor levels.
 pub mod nerve;
+
+/// The look layers' numbers in one validated row (SW24: `PresentationFeel`).
+pub mod presentation;
+/// Retiarius net and wrist cord (SG12): a 3 m cast in an arc, the entangle
+/// stagger with no attack, the 30-tick haul and the recovery. Pure integers,
+/// no heap, never wired into the tick from here.
+pub mod net;
 pub mod projectile;
 /// One round against the bodies it can meet: the tick it is hit on, as an
 /// event the render thread only reads (RY3, beside the flight module).

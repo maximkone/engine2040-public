@@ -37,6 +37,38 @@ export function findViolations(crateDir, member, union, root = new Map()) {
   }
   return bad;
 }
+// The metadata twin of checkUnify: cargo has already resolved `workspace =
+// true` inheritance, dependency renames, default-features and target gating, so
+// this reads the feature set a member really builds with. Host builds only: a
+// target-gated dependency (uuid's `js` on wasm32) is a separate resolve, and the
+// union unifies the host graph.
+export const HACK_CRATE = "engine-workspace-hack";
+
+export function resolveViolations(metadata) {
+  const hack = (metadata?.packages ?? []).find((p) => p.name === HACK_CRATE);
+  if (!hack) return [`${HACK_CRATE}: the union crate is missing from the workspace fix: restore crates/workspace-hack with its externals`];
+  const union = new Map();
+  for (const dep of hack.dependencies ?? []) {
+    if (dep.path) continue;
+    union.set(dep.name, { features: new Set(dep.features ?? []), noDefaults: dep.uses_default_features === false });
+  }
+  const members = new Set(metadata.workspace_members ?? []);
+  const bad = new Set();
+  for (const pkg of metadata.packages ?? []) {
+    if (!members.has(pkg.id) || pkg.name === HACK_CRATE) continue;
+    for (const dep of pkg.dependencies ?? []) {
+      if (dep.path || dep.target) continue;
+      const allow = union.get(dep.name);
+      if (!allow) continue;
+      for (const f of dep.features ?? []) {
+        if (!allow.features.has(f)) bad.add(`${pkg.name}: ${dep.name} feature "${f}" is outside the workspace-hack union fix: add "${f}" to ${dep.name} in crates/workspace-hack/Cargo.toml, or drop it from ${pkg.name}`);
+      }
+      if (allow.noDefaults && dep.uses_default_features !== false) bad.add(`${pkg.name}: ${dep.name} needs default-features = false, the union turns them off fix: set default-features = false on ${dep.name} in the ${pkg.name} manifest`);
+    }
+  }
+  return [...bad];
+}
+
 export function checkUnify(repoDir) {
   const union = parseDeps(readFileSync(join(repoDir, "crates", "workspace-hack", "Cargo.toml"), "utf8"));
   let rootText = "";
