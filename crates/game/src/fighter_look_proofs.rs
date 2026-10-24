@@ -521,6 +521,10 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
             }
         }
     }
+    eprintln!(
+        "zzdiag duel_feet {frames_per_tick} ik={ik}: worst pop {:?}",
+        laws.pop_detail()
+    );
     DuelFeet {
         line: laws.line().expect("the duel folded frames"),
         drift_cm,
