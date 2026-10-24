@@ -24,6 +24,8 @@ fn request(dir: &str) -> LookJudgeArgs {
         capture_dir: dir.to_owned(),
         preview_dir: None,
         q1_dir: None,
+        // ARX05: the door sets the wording; a caller never names one.
+        wording: None,
     }
 }
 
