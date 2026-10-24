@@ -118,6 +118,8 @@ impl EventCode {
     pub const FPS_FRAME_SPLIT: Self = Self(18);
     /// The door refused one call: the message names the tool and its code.
     pub const DOOR_REFUSED: Self = Self(19);
+    /// A play job reached its end state: the message names the job and word.
+    pub const PLAY_JOB_ENDED: Self = Self(20);
 
     /// Raw stable value for serialization into tapes and bundles.
     #[must_use]
@@ -171,6 +173,7 @@ pub fn name(code: u32) -> Option<&'static str> {
         17 => "fps.hit",
         18 => "fps.frame.split",
         19 => "door.refused",
+        20 => "play.job.ended",
         _ => return None,
     })
 }
@@ -416,6 +419,8 @@ mod tests {
             EventCode::RENDER_FRAME_OVER_BUDGET,
             EventCode::HEAL_APPLIED,
             EventCode::HEAL_FAILED,
+            EventCode::DOOR_REFUSED,
+            EventCode::PLAY_JOB_ENDED,
         ];
         for code in codes {
             let raw = code.raw();
