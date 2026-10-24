@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<!-- designs/O-042/page.html: kit sheet of the Engine2040 UI-1 pack (game-ui lane, order O-042). Pictures composed by the O-042 builder from atlas.png, font-5x7.png and layout.json; heading uses ds-pixel-5x7.ttf. Color only via tokens.css. -->
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engine2040 UI-1 Kit</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+  @font-face { font-family: "DS Pixel 5x7"; src: url("ds-pixel-5x7.ttf") format("truetype"); }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; }
+  body { width: 100vw; height: 100vh; overflow: hidden; background: var(--bg); color: var(--ink); font-family: var(--font-body); }
+  .stage { height: 100%; padding: 26px 40px 24px; display: grid; grid-template-rows: auto 1fr auto; row-gap: 14px; background: linear-gradient(180deg, var(--bg) 0%, var(--panel) 100%); }
+  .top { display: block; }
+  h1 { font-family: var(--font-gui); font-size: 64px; white-space: nowrap; line-height: 1; letter-spacing: 0.02em; color: var(--accent); }
+  .sub { margin-block-start: 8px; font-size: 22px; font-weight: 600; color: var(--muted); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-block-start: 10px; }
+  .chips span { font-size: 17px; font-weight: 700; padding: 6px 12px; border: 2px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+  .shots { display: flex; gap: 20px; min-height: 0; align-items: center; justify-content: center; }
+  .shots figure { flex: 0 0 auto; }
+  .shots img { display: block; width: 560px; height: 315px; border: 3px solid var(--line); border-radius: 6px; }
+  .shots figcaption { margin-block-start: 6px; font-size: 15px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .bottom { display: flex; align-items: center; gap: 24px; }
+  .bottom img { display: block; width: 512px; height: 128px; border: 3px solid var(--line); border-radius: 6px; }
+  .spec { flex: 1; }
+  .spec .font { font-family: var(--font-gui); font-size: 24px; line-height: 1.2; color: var(--ink); }
+  .spec .font b { color: var(--accent); font-weight: 400; }
+  .cta { display: inline-block; margin-block-start: 12px; font-size: 20px; font-weight: 800; padding: 10px 20px; border-radius: 6px; background: var(--accent); color: var(--on-accent); }
+</style>
+</head>
+<body data-oid="cover.hero">
+<div class="stage">
+  <div class="top">
+    <div>
+      <h1 data-oid="cover.title">Engine2040 UI-1 Kit</h1>
+      <p class="sub" data-oid="cover.subtitle">Main, pause, settings, HUD and inventory as data the engine loads. CC0.</p>
+    </div>
+  </div>
+  <div class="shots">
+    <figure><img src="preview-menu.png" alt="Main menu composed from the atlas"><figcaption>Main menu from layout.json</figcaption></figure>
+    <figure><img src="preview-inventory.png" alt="Inventory composed from the atlas"><figcaption>Inventory from layout.json</figcaption></figure>
+  </div>
+  <div class="bottom">
+    <img src="preview-atlas.png" alt="The atlas pieces at 4x">
+    <div class="spec">
+      <p class="font">THE QUICK <b>BROWN</b> FOX JUMPS<br>over the lazy dog 0123456789</p>
+      <div class="chips"><span>atlas.png + json 27 pieces</span><span>font png + json + ttf</span><span>layout.json 5 screens</span><span>icons 1x 2x</span></div>
+      <span class="cta" data-oid="cover.cta">How to adopt: DELIVERY.md</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

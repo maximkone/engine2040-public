@@ -197,6 +197,53 @@ mod tests {
     /// A seeded type error in forward.wgsl fails with naga's line:col, which
     /// the brace check the live swap used before would accept.
     #[test]
+    fn dual_quat_skinning_shader_is_gated_at_32_bytes_a_joint() {
+        // AM30: the dual-quaternion path is its own file, so this gate covers it without the
+        // forward entries; the numbers are the ones the Rust palette writes.
+        let src = include_str!("shaders/skin_dual_quat.wgsl");
+        validate_source("skin_dual_quat.wgsl", src).expect("the dual-quat path validates");
+        for name in [
+            "fn dq_skin_point",
+            "fn dq_skin_vector",
+            "fn dq_blend",
+            "fn dq_transform_point",
+            "fn dq_translation",
+        ] {
+            assert!(src.contains(name), "{name} is in the shader");
+        }
+        assert!(src.contains("DQ_JOINT_BYTES: u32 = 32u"), "32 bytes a joint");
+        assert!(src.contains("array<DualQuat, 64>"), "the 64-joint cap");
+        assert!(
+            src.contains("dot(a.real, b.real) >= 0.0"),
+            "the shortest-arc flip is in the blend"
+        );
+        // The palette the anim side bakes is 32 B a joint (`DUAL_QUAT_PALETTE_BYTES`), and the
+        // biggest palette this shader reads is 64 joints, the same cap as the matrix one.
+        let palette_bytes = 64 * 32;
+        assert_eq!(palette_bytes, 2_048, "64 joints at 32 B");
+        assert_eq!(43 * 32, 1_376, "the 43-bone rig's dual palette");
+        // The next step prepends this chunk to forward.wgsl, so the chunk must compile beside
+        // the forward file's own helpers and bindings: no redefinition, no unresolved name.
+        let forward = shipped_files()
+            .expect("shipped shader dir")
+            .into_iter()
+            .find(|(name, _)| name == "forward.wgsl")
+            .expect("forward.wgsl ships")
+            .1;
+        // `SkinParams`' first pad word is the flag's home (byte 8): zero today, so a matrix frame
+        // uploads the same bytes it always did.
+        assert!(
+            forward.contains("_pad0: u32"),
+            "the flag takes the first pad word, it does not move a field"
+        );
+        let composed = format!("{src}{}", shipped_source("forward.wgsl", &forward));
+        validate_source("forward.wgsl+dq", &composed)
+            .expect("the dual-quat chunk composes with forward.wgsl");
+    }
+
+    /// A seeded type error in forward.wgsl fails with naga's line:col, which
+    /// the brace check the live swap used before would accept.
+    #[test]
     fn shader_validate_seeded_type_error_names_line_and_column() {
         let mut src = shipped_files()
             .expect("shipped shader dir")

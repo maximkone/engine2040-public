@@ -17,6 +17,7 @@ use crate::combat_cues::{footstep, CuePlay, Surface};
 #[cfg(test)]
 use crate::crowd::FightCue;
 use crate::cue::{CueBank, CueId, Group, VariantPicker};
+use crate::duck::BeatDuck;
 use crate::spatial::{MixCmd, SpatialMixer};
 use crate::{MixerStats, VoiceId};
 
@@ -33,6 +34,8 @@ pub struct CombatMix {
     inner: SpatialMixer,
     pickers: Vec<VariantPicker>,
     played: u64,
+    /// SW178: the finisher-beat duck on the music and crowd buses.
+    duck: BeatDuck,
 }
 
 impl CombatMix {
@@ -56,6 +59,7 @@ impl CombatMix {
             inner,
             pickers,
             played: 0,
+            duck: BeatDuck::new(),
         }
     }
 
@@ -104,6 +108,23 @@ impl CombatMix {
     /// Cap simultaneous voices of `group` (0 mutes the group).
     pub fn set_group_limit(&mut self, group: Group, limit: u8) {
         self.inner.mixer_mut().set_group_limit(group, limit);
+    }
+
+    /// SW178: one tick of the finisher-beat duck. `beat` is the game's
+    /// finisher beat this tick; the answer is the gain the music and crowd
+    /// buses scale by, 0.5 inside the beat and 1.0 once restored.
+    pub fn tick_beat_duck(&mut self, beat: bool) -> f32 {
+        self.duck.tick(beat)
+    }
+
+    /// The music bus gain now (the same value the crowd bus uses).
+    pub fn music_gain(&self) -> f32 {
+        self.duck.gain()
+    }
+
+    /// The crowd bus gain now: the stands duck with the bed.
+    pub fn crowd_gain(&self) -> f32 {
+        self.duck.gain()
     }
 
     /// Live voices in `group`.
@@ -171,6 +192,60 @@ mod tests {
         assert_eq!(IMPACT_LIMIT, Group::Impact.default_limit());
         assert_eq!(SWING_LIMIT, Group::Swing.default_limit());
         assert_eq!(FOOTSTEP_LIMIT, Group::Footstep.default_limit());
+    }
+
+    /// SW178: the finisher beat halves the music and crowd buses over four
+    /// ticks, holds the half gain while it lasts, restores over twelve, and no
+    /// tick steps the gain by more than 0.15.
+    #[test]
+    fn mixer_ducks_music_and_crowd_under_the_finisher_beat() {
+        let mut mix = CombatMix::new(bank(), RATE, 2040);
+        assert_eq!(mix.music_gain(), 1.0, "a fresh mixer is at full gain");
+        assert_eq!(mix.crowd_gain(), 1.0, "the stands start full");
+        let mut prev = mix.music_gain();
+        for tick in 0..crate::duck::DUCK_TICKS {
+            let gain = mix.tick_beat_duck(true);
+            assert!(
+                (prev - gain).abs() <= crate::duck::MAX_STEP,
+                "duck tick {tick} stepped {}",
+                (prev - gain).abs()
+            );
+            assert_eq!(gain, mix.crowd_gain(), "crowd ducks with the music");
+            prev = gain;
+        }
+        assert!(
+            (mix.music_gain() - 0.5).abs() <= 0.02,
+            "inside the beat the music gain is 0.5 +- 0.02, got {}",
+            mix.music_gain()
+        );
+        for _ in 0..crate::duck::DUCK_TICKS {
+            mix.tick_beat_duck(true);
+        }
+        assert!(
+            (mix.music_gain() - 0.5).abs() <= 0.02,
+            "a held beat stays at the half gain"
+        );
+        for tick in 0..crate::duck::RESTORE_TICKS {
+            let gain = mix.tick_beat_duck(false);
+            assert!(
+                (prev - gain).abs() <= crate::duck::MAX_STEP,
+                "restore tick {tick} stepped {}",
+                (prev - gain).abs()
+            );
+            prev = gain;
+        }
+        assert!(
+            (mix.music_gain() - 1.0).abs() <= 1e-6,
+            "after the restore the music gain is 1.0, got {}",
+            mix.music_gain()
+        );
+        assert_eq!(mix.crowd_gain(), 1.0, "the stands come back with the bed");
+        // The duck never touches the cue path: a hit still plays while ducked.
+        mix.set_camera([0, 0, 0], 0);
+        assert!(
+            mix.play_event(hit(), [0, 0, 0], [300, 0, 100]).is_some(),
+            "a ducked bus still plays its impacts"
+        );
     }
 
     #[test]
