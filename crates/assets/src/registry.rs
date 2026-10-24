@@ -29,7 +29,21 @@ pub type Guid = u64;
 
 /// Opaque ref into [`Registry`]. Refs store this, never paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Handle(pub u32);
+pub struct Handle(u32);
+
+impl Handle {
+    /// The handle for the row at `raw`.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The row the handle carries.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
 
 /// A [`Registry`] lookup failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +55,7 @@ pub enum HandleError {
 impl std::fmt::Display for HandleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Bad(handle) => write!(f, "bad handle {}", handle.0),
+            Self::Bad(handle) => write!(f, "bad handle {}", handle.raw()),
         }
     }
 }
@@ -87,7 +101,7 @@ pub use engine_core::hash_bytes as content_hash;
 /// GUID registry: dedup by content hash. SoA storage, borrowed args, no unwrap.
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
-    /// Guid per handle (index = `Handle.0`).
+    /// Guid per handle (index = `Handle::raw`).
     ids: Vec<Guid>,
     /// Hex sha per handle.
     shas: Vec<String>,
@@ -116,7 +130,7 @@ impl Registry {
         if let Some(h) = self.index.get(&id) {
             return *h;
         }
-        let h = Handle(self.ids.len() as u32);
+        let h = Handle::from_raw(self.ids.len() as u32);
         self.ids.push(id);
         self.shas.push(sha_hex(id));
         self.licenses.push(license.into());
@@ -125,7 +139,7 @@ impl Registry {
     }
     /// Row view for a handle; `None` on out-of-range handle.
     pub fn get(&self, h: Handle) -> Option<ManifestRow> {
-        let i = h.0 as usize;
+        let i = h.raw() as usize;
         let id = *self.ids.get(i)?;
         Some(ManifestRow {
             id,
@@ -135,13 +149,13 @@ impl Registry {
     }
     /// Guid for a handle; `None` on out-of-range handle.
     pub fn guid(&self, h: Handle) -> Option<Guid> {
-        self.ids.get(h.0 as usize).copied()
+        self.ids.get(h.raw() as usize).copied()
     }
     /// True when `bytes` still match the stored row; `Err` on bad handle.
     /// Test-only: no production caller reads freshness here.
     #[cfg(test)]
     pub fn is_fresh(&self, h: Handle, bytes: &[u8]) -> Result<bool, HandleError> {
-        let id = self.ids.get(h.0 as usize).ok_or(HandleError::Bad(h))?;
+        let id = self.ids.get(h.raw() as usize).ok_or(HandleError::Bad(h))?;
         Ok(content_hash(bytes) == *id)
     }
     /// Deterministic fold over ids in handle order (construct -> step -> hash).
@@ -610,18 +624,25 @@ mod tests {
         let h = r.import(b"ref-bytes", "Apache-2.0");
         let row = r.get(h).expect("handle resolves");
         assert_eq!(row.license, "Apache-2.0");
-        assert!(r.get(Handle(999)).is_none());
-        assert!(r.guid(Handle(999)).is_none());
-        assert!(r.is_fresh(Handle(999), b"ref-bytes").is_err());
+        assert!(r.get(Handle::from_raw(999)).is_none());
+        assert!(r.guid(Handle::from_raw(999)).is_none());
+        assert!(r.is_fresh(Handle::from_raw(999), b"ref-bytes").is_err());
         assert_eq!(r.is_fresh(h, b"ref-bytes"), Ok(true));
         assert_eq!(r.is_fresh(h, b"other"), Ok(false));
     }
 
     #[test]
+    fn a_handle_reads_back_the_index_it_was_given() {
+        for raw in [0u32, 7, 4095, u32::MAX] {
+            assert_eq!(Handle::from_raw(raw).raw(), raw, "{raw} reads back");
+        }
+    }
+
+    #[test]
     fn bad_handle_error_is_typed_and_printable() {
         let r = Registry::new();
-        let err = r.is_fresh(Handle(7), b"x").unwrap_err();
-        assert_eq!(err, HandleError::Bad(Handle(7)));
+        let err = r.is_fresh(Handle::from_raw(7), b"x").unwrap_err();
+        assert_eq!(err, HandleError::Bad(Handle::from_raw(7)));
         assert_eq!(err.to_string(), "bad handle 7");
     }
 
@@ -636,7 +657,7 @@ mod tests {
         let t = Instant::now();
         for i in 0..256u32 {
             let bytes = format!("asset-payload-{i:04}-pad-to-grow-bytes");
-            assert_eq!(r.is_fresh(Handle(i), bytes.as_bytes()), Ok(true));
+            assert_eq!(r.is_fresh(Handle::from_raw(i), bytes.as_bytes()), Ok(true));
         }
         assert!(t.elapsed().as_millis() < 100, "reload {:?}", t.elapsed());
     }
@@ -650,7 +671,7 @@ mod tests {
             b.import(payload, "MIT");
         }
         assert_eq!(a.hash(), b.hash());
-        assert_eq!(a.get(Handle(1)), b.get(Handle(1)));
+        assert_eq!(a.get(Handle::from_raw(1)), b.get(Handle::from_raw(1)));
     }
 }
 
