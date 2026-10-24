@@ -201,11 +201,12 @@ pub fn decode_vorbis(bytes: &[u8]) -> Result<Pcm, DecodeError> {
 }
 
 /// Load the arena cue table from `root` (the `content/audio` directory):
-/// every listed WAV is read, decoded with [`decode_wav`] and resampled to
-/// `sample_rate`, so the game plays cues by name and the mixer shares each
-/// clip's samples. A file that is missing or does not decode is listed in
-/// the [`LoadReport`] and its cue keeps its other takes, or falls back to a
-/// synthesized voice when none load; the bank is never left without a cue.
+/// every listed clip is read and decoded to `sample_rate` (OGG Vorbis with
+/// [`decode_vorbis`], any other name with [`decode_wav`]), so the game plays
+/// cues by name and the mixer shares each clip's samples. A file that is
+/// missing or does not decode is listed in the [`LoadReport`] and its cue
+/// keeps its other takes, or falls back to a synthesized voice when none
+/// load; the bank is never left without a cue.
 ///
 /// # Errors
 ///
@@ -214,7 +215,14 @@ pub fn decode_vorbis(bytes: &[u8]) -> Result<Pcm, DecodeError> {
 pub fn load_cue_bank(root: &Path, sample_rate: u32) -> Result<(CueBank, LoadReport), CueError> {
     CueBank::build(sample_rate, |file| {
         let bytes = std::fs::read(root.join(file)).ok()?;
-        decode_wav(&bytes).ok()
+        let vorbis = Path::new(file)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("ogg"));
+        if vorbis {
+            decode_vorbis(&bytes).ok()
+        } else {
+            decode_wav(&bytes).ok()
+        }
     })
 }
 
@@ -488,12 +496,17 @@ mod tests {
             "{:?}",
             report.missing_files
         );
-        assert_eq!(report.loaded_files, 40);
+        assert_eq!(report.loaded_files, 54);
         assert_eq!(
             report.synthesized,
             vec![
+                names::IMPACT_BONE,
+                names::STUMP,
+                names::STRUCTURE_GROAN,
+                names::RIPOSTE,
+                names::SEVER,
+                names::GORE,
                 names::SWING,
-                names::CROWD,
                 names::STINGER_KILL,
                 names::STINGER_ROAR
             ]
@@ -507,12 +520,19 @@ mod tests {
         assert_eq!(takes(names::HIT), 3);
         assert_eq!(takes(names::KNOCKDOWN), 4);
         assert_eq!(takes(names::FOOTSTEP), 4);
+        assert_eq!(takes(names::PARRY), 4);
+        assert_eq!(takes(names::BLOCK), 4);
+        assert_eq!(takes(names::CROWD), 2);
+        assert_eq!(takes(names::CROWD_CHEER), 2);
         for spec in &ARENA_CUES {
             let cue = bank.cue(bank.id(spec.name).expect("cue")).expect("id");
-            assert!(cue
-                .variants
-                .iter()
-                .all(|c| c.sample_rate == 48_000 && c.frames() > 0));
+            // A take is resampled to the output rate, or, when it is longer
+            // than the stream window (the crowd bed loops are 8-25 s), kept at
+            // its own rate and streamed.
+            assert!(cue.variants.iter().all(|c| {
+                c.frames() > 0
+                    && (c.sample_rate == 48_000 || crate::cue::should_stream(c.frames(), 1, 0))
+            }));
         }
         let hit = bank.cue(bank.id(names::HIT).expect("hit")).expect("cue");
         assert_eq!(
@@ -531,9 +551,85 @@ mod tests {
         let (bank, report) =
             load_cue_bank(Path::new("does/not/exist"), 48_000).expect("table builds");
         assert_eq!(report.loaded_files, 0);
-        assert_eq!(report.missing_files.len(), 40);
+        assert_eq!(report.missing_files.len(), 54);
         assert_eq!(report.synthesized.len(), crate::cue::ARENA_CUES.len());
         assert_eq!(bank.len(), crate::cue::ARENA_CUES.len());
+    }
+
+    /// Every clip the six new rows name exists on disk, decodes and reports
+    /// its own rate and length (the "loud" landing, 2026-10-24): the parry
+    /// and clash rows play the CC0 StarNinjas clashes, the block and armour
+    /// rows the Kenney wood and plate thuds, the crowd bed and `crowd_cheer`
+    /// the CC0 Freesound recordings. No audio device is opened.
+    #[test]
+    fn the_new_cc0_takes_decode_and_their_cues_pick_them() {
+        use crate::cue::{names, ARENA_CUES};
+        let root = content_root();
+        let rows = [
+            names::PARRY,
+            names::CLASH,
+            names::BLOCK,
+            names::IMPACT_ARMOR,
+            names::CROWD,
+            names::CROWD_CHEER,
+        ];
+        let mut printed = 0usize;
+        for spec in ARENA_CUES.iter().filter(|spec| rows.contains(&spec.name)) {
+            assert!(!spec.files.is_empty(), "{} must name files", spec.name);
+            for file in spec.files {
+                let bytes = std::fs::read(root.join(file))
+                    .unwrap_or_else(|error| panic!("{file}: not on disk: {error}"));
+                let pcm = if file.ends_with(".ogg") {
+                    decode_vorbis(&bytes)
+                } else {
+                    decode_wav(&bytes)
+                }
+                .unwrap_or_else(|error| panic!("{file}: does not decode: {error}"));
+                let frames = u64::try_from(pcm.frames()).unwrap_or(0);
+                let ms = frames * 1_000 / u64::from(pcm.sample_rate);
+                println!(
+                    "{file}: {} Hz, {} ch, {frames} frames, {ms} ms",
+                    pcm.sample_rate, pcm.channels
+                );
+                assert!(pcm.sample_rate >= 8_000, "{file}: an audio rate");
+                if spec.name == names::CROWD || spec.name == names::CROWD_CHEER {
+                    assert_eq!(pcm.sample_rate, 22_050, "{file}: converted at 22.05 kHz");
+                }
+                assert!(pcm.frames() > 0, "{file}: silent clip");
+                assert!(
+                    pcm.samples.iter().any(|sample| sample.abs() > 0.01),
+                    "{file}: recorded, not a silent buffer"
+                );
+                printed += 1;
+            }
+        }
+        assert_eq!(printed, 18, "six rows, eighteen takes");
+        // The bank the window builds from the real folder keeps every take of
+        // these rows, so the cue picks the decoded file and never the synth.
+        let (bank, report) = load_cue_bank(&root, 48_000).expect("table builds");
+        assert!(
+            report.missing_files.is_empty(),
+            "{:?}",
+            report.missing_files
+        );
+        for name in rows {
+            assert!(
+                !report.synthesized.contains(&name),
+                "{name} fell back to the synth"
+            );
+            let cue = bank.cue(bank.id(name).expect("cue")).expect("id");
+            // A short take is resampled to the output rate; a long bed (the
+            // crowd loops are 8-25 s) keeps its own rate and streams, so only
+            // the frames are pinned here.
+            assert!(
+                cue.variants.iter().all(|clip| clip.frames() > 0),
+                "{name}: every take decoded"
+            );
+            assert!(
+                !cue.variants.is_empty(),
+                "{name}: the recorded takes replaced the synth"
+            );
+        }
     }
 
     #[test]
