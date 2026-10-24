@@ -1178,6 +1178,15 @@ impl Sim {
         true
     }
 
+    /// The move tables this match's config selects.
+    fn tables(&self) -> &'static engine_combat::fight::Tables {
+        if self.config.table_version == TABLES_VERSION_V2 {
+            &TABLES_V2
+        } else {
+            &TABLES_V1
+        }
+    }
+
     /// Arm the spear grapple (`docs/plan/spear-grapple.md`) before the first
     /// tick. Refuses (`false`) past tick 0 and on the Rapier `sim` leg, whose
     /// controllers own the poses the tether would have to move.
@@ -1185,7 +1194,7 @@ impl Sim {
         if cfg!(feature = "sim") || self.tick != 0 {
             return false;
         }
-        self.spear = Some(spear::SpearState::new(self.fighters));
+        self.spear = Some(spear::SpearState::with_spear(self.spear.take(), self.fighters));
         true
     }
 
@@ -1390,6 +1399,9 @@ impl Sim {
                 *cell = Some(*input);
             }
         }
+        if let Some(spear) = self.spear.as_mut() {
+            spear.prepare(&mut row[..self.fighters], &self.fight);
+        }
         let inputs = &row[..self.fighters];
         // Latch the merged inputs for the DT1 recorder (tape plus brain
         // decisions); authority reads `inputs` below, never this copy. The
@@ -1421,11 +1433,7 @@ impl Sim {
             // strict combat leg; the live duel passes table version 2
             // (`ArenaConfig::rules`). Default v1 keeps every checkpoint
             // byte frozen.
-            let tables = if self.config.table_version == TABLES_VERSION_V2 {
-                &TABLES_V2
-            } else {
-                &TABLES_V1
-            };
+            let tables = self.tables();
             // Caller: the cues entry shares the v2 core bit for bit (the
             // combat parity test pins the event stream); the game maps each
             // cue into an audio `FightCue` next slice (EG19c reads them for
@@ -1442,7 +1450,7 @@ impl Sim {
         } else {
             try_step_into(inputs, &mut self.fight, &mut self.combat_scratch).ok()?;
         }
-        let tick_events = if self.combat_scratch.is_empty() {
+        let mut tick_events = if self.combat_scratch.is_empty() {
             Vec::new()
         } else {
             let logged = self.combat_scratch.clone();
@@ -1510,11 +1518,7 @@ impl Sim {
         // everything else while hit-stop holds.
         if self.fight.hitstop == 0 {
             if let Some(mut spear) = self.spear.take() {
-                let tables = if self.config.table_version == TABLES_VERSION_V2 {
-                    &TABLES_V2
-                } else {
-                    &TABLES_V1
-                };
+                let tables = self.tables();
                 spear.step(&mut spear::Env {
                     inputs,
                     states: &mut self.states,
@@ -1525,6 +1529,10 @@ impl Sim {
                     half_extent_m: self.config.half_extent_m,
                     rise: &mut self.rise,
                 });
+                // A man the shield push toppled falls like any knockdown.
+                let first = tick_events.len();
+                spear.topple_events(&mut tick_events);
+                self.feed_balance(&tick_events[first..])?;
                 self.spear = Some(spear);
             }
             // The pilum volley rides the arena's press-tick call cue: a cue
@@ -1539,11 +1547,7 @@ impl Sim {
                 } else {
                     None
                 };
-                let tables = if self.config.table_version == TABLES_VERSION_V2 {
-                    &TABLES_V2
-                } else {
-                    &TABLES_V1
-                };
+                let tables = self.tables();
                 pilum.step(&mut pilum::Env {
                     inputs,
                     states: &self.states,
@@ -1561,11 +1565,7 @@ impl Sim {
             // bolt and looses it. The channel is armed per match, so a match
             // without one never reaches this step.
             if let Some(mut bolt) = self.bolt.take() {
-                let tables = if self.config.table_version == TABLES_VERSION_V2 {
-                    &TABLES_V2
-                } else {
-                    &TABLES_V1
-                };
+                let tables = self.tables();
                 bolt.step(&mut bolt::Env {
                     inputs,
                     states: &self.states,
@@ -3198,7 +3198,7 @@ mod tests {
             ..base
         };
         assert_eq!(config.validate(), Ok(()));
-        assert!(TABLES_V2.attack_startup_ticks >= 30);
+        const { assert!(TABLES_V2.attack_startup_ticks >= 30) };
         assert_eq!(TABLES_V2.attack_startup_ticks, 30);
         assert!((6..=8).contains(&TABLES_V2.parry_window_ticks));
         assert_eq!(TABLES_V2.parry_window_ticks, 7);
@@ -3241,7 +3241,7 @@ mod tests {
                 first_hit = Some(row.tick);
             }
         }
-        assert_eq!(first_hit, Some(15), "tables v2 startup, not v1's 4");
+        assert_eq!(first_hit, Some(30), "tables v2 startup, not v1's 4");
         assert_ne!(run(&v1, &tape), run(&v2, &tape), "v1 and v2 hashes differ");
     }
 
@@ -4981,8 +4981,9 @@ mod tests {
     fn live_cut_spawns_a_limb_and_repeats() {
         use engine_combat::Cut;
         let base = short_config();
+        // The v2 tell is 30 ticks: the tape runs 10 past the blow.
         let config = ArenaConfig {
-            ticks: 20,
+            ticks: 40,
             table_version: TABLES_VERSION_V2,
             ..base
         };

@@ -38,6 +38,20 @@ pub const GRAVITY_MM_PER_TICK2: i32 = 3;
 /// Fixed-point scale of [`DebrisLedger::sleep_ratio_q16`].
 pub const RATIO_SCALE: u32 = 65536;
 
+/// A validated count knob as `usize`. Every cap is checked at or below its `usize` bound
+/// (`MAX_BUDGET_SHARDS` is the largest) before it is used, so the conversion is exact; a target
+/// too small to hold the knob saturates, and `validate` has already refused that knob.
+fn count(v: u32) -> usize {
+    usize::try_from(v).unwrap_or(usize::MAX)
+}
+
+/// Low 32 bits of a running counter: the hash documents the low word, so this reads the bytes
+/// instead of truncating with a cast.
+const fn low_word(v: u64) -> u32 {
+    let [b0, b1, b2, b3, ..] = v.to_le_bytes();
+    u32::from_le_bytes([b0, b1, b2, b3])
+}
+
 /// Canonical 8-fighter soak budget: 16 shards per event, 1024 total, sleep
 /// after 30 still ticks, LOD swap past 4 m, still means at most 1 mm/tick.
 pub fn arena_default_budget() -> DebrisBudget {
@@ -71,7 +85,7 @@ impl DebrisBudget {
         if self.per_event_cap == 0 || self.per_event_cap > MAX_PER_EVENT {
             return Err(BudgetError::BadPerEventCap);
         }
-        if self.max_shards == 0 || self.max_shards as usize > MAX_BUDGET_SHARDS {
+        if self.max_shards == 0 || count(self.max_shards) > MAX_BUDGET_SHARDS {
             return Err(BudgetError::BadMaxShards);
         }
         if self.sleep_ticks == 0 || self.sleep_ticks > MAX_SLEEP_TICKS {
@@ -211,7 +225,7 @@ impl DebrisLedger {
         cfg.validate()?;
         Ok(Self {
             cfg: *cfg,
-            shards: Vec::with_capacity(cfg.max_shards as usize),
+            shards: Vec::with_capacity(count(cfg.max_shards)),
             tick: 0,
             last_admit_tick: 0,
             admitted_total: 0,
@@ -270,7 +284,11 @@ impl DebrisLedger {
         if self.shards.is_empty() {
             return 0;
         }
-        (self.sleeping_count() as u64 * u64::from(RATIO_SCALE) / self.shards.len() as u64) as u32
+        // Both counts stay at or below `max_shards` (<= `MAX_BUDGET_SHARDS`), so the Q16
+        // product fits `u32` and the quotient is at most `RATIO_SCALE`.
+        let sleeping = u32::try_from(self.sleeping_count()).unwrap_or(u32::MAX);
+        let len = u32::try_from(self.shards.len()).unwrap_or(u32::MAX);
+        sleeping.saturating_mul(RATIO_SCALE) / len
     }
 
     /// View of the shard at canonical index; `None` when out of range.
@@ -342,14 +360,17 @@ impl DebrisLedger {
                 return Err(BudgetError::DuplicateSeed(seeds[i].id));
             }
         }
-        let keep = order.len().min(self.cfg.per_event_cap as usize);
+        let keep = order.len().min(count(self.cfg.per_event_cap));
         let mut report = AdmitReport {
             admitted: 0,
-            dropped_cap: (order.len() - keep) as u32,
+            // `MAX_ADMIT_BATCH` bounds `order.len()` well below `u32::MAX`; the checked form
+            // keeps that bound an error rather than a silent wrap.
+            dropped_cap: u32::try_from(order.len() - keep)
+                .map_err(|_| BudgetError::TooManySeeds)?,
             dropped_full: 0,
         };
         for &i in order.iter().take(keep) {
-            if self.shards.len() >= self.cfg.max_shards as usize {
+            if self.shards.len() >= count(self.cfg.max_shards) {
                 report.dropped_full += 1;
                 continue;
             }
@@ -495,9 +516,9 @@ impl DebrisLedger {
             h.write_u32(u32::from(s.sleeping));
             h.write_u32(u32::from(s.low_lod));
         }
-        h.write_u32((self.admitted_total & 0xffff_ffff) as u32);
-        h.write_u32((self.dropped_total & 0xffff_ffff) as u32);
-        h.write_u32((self.lod_swaps & 0xffff_ffff) as u32);
+        h.write_u32(low_word(self.admitted_total));
+        h.write_u32(low_word(self.dropped_total));
+        h.write_u32(low_word(self.lod_swaps));
         h.finish()
     }
 }
@@ -931,6 +952,17 @@ mod tests {
         assert!(ratio1 > 0, "grounded shards must sleep: ratio {ratio1}");
         assert!(swaps1 > 0, "the orbiting camera must flip LOD: {swaps1}");
         println!("soak shards={n1} sleep_q16={ratio1} lod_swaps={swaps1} hash={h1:016x}");
+    }
+
+    #[test]
+    fn casts_keep_the_soak_hash_and_ratio() {
+        // Pinned from the code before the CQ10 cast pass on `budget.rs`: the hash low words and
+        // the Q16 ratio must read the same number before and after.
+        let (hash, shards, ratio, swaps) = soak_script();
+        assert_eq!(
+            (hash, shards, ratio, swaps),
+            (0x39a5_3d85_def9_6604u64, 1024usize, 56320u32, 1310u64)
+        );
     }
 
     #[test]
