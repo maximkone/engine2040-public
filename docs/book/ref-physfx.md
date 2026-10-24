@@ -216,7 +216,32 @@ Test: `debris_count_stays_under_the_tier_cap` (`break_look.rs:644`) and
 - **Static boxes.** `add_static_box` has no removal. `BreakLook::new` adds one floor plus one box per anchor
   (`break_look.rs:275-288`), and those count against `caps.statics` for the life of the world.
 
-## 11. Where the code is
+## 11. Ragdoll tone and the tow brace
+
+Landed 2026-10-24 (`cb278da5b`). The joint motors live in `crates/physfx/src/fx/hit.rs`. The tow number lives in the game crate, `crates/game/src/ragdoll_look.rs`.
+
+- **Resting tone.** `RAGDOLL_TONE` is 0.2 of the body's muscle (`hit.rs:39`). Every ragdoll's motors start at that tone (`spawn_drive`, `hit.rs:256`).
+- **At the tone the motors hold no pose.** At rest each motor is a velocity motor aimed at zero, so it acts as joint friction (`drive`, `hit.rs:60`). A fallen body folds, settles and sleeps. It does not whip like a sack.
+- **A blow braces the body.** A blow sets the strength to the full muscle. It falls back to the tone over `HIT_FADE_S` (0.3 s, `hit.rs:23`).
+- **Holding a brace.** `PhysFx::brace_ragdoll(slot, strength)` (`hit.rs:217`) raises the brace to `strength`. The value is clamped to 0 to 1 and capped at the body's muscle. A lower value does nothing. Once the calls stop, the brace fades to the tone.
+- **Reading a brace.** `PhysFx::ragdoll_strength(slot)` (`hit.rs:244`) returns the current strength, or `None` when the slot has no ragdoll.
+- **Tow brace.** `TOW_BRACE` is 0.6 (`ragdoll_look.rs:100`). `FighterLook::observe_carries` (`ragdoll_look.rs:1393`) braces each towed body at that value (`ragdoll_look.rs:1435`). A towed fighter flies braced, and the rope still swings its limbs.
+- **Getting up.** The module doc says a towed body may get up once its root is slower than `LANDED_MS` (1.2 m/s, `ragdoll_look.rs:102`).
+- **Limp bodies.** A body file with zero muscle keeps zero tone (`hit.rs:33-38`, and the muscle cap in `brace_ragdoll`).
+- **Blow path.** The FEEL9 blow reaction calls `PhysFx::hit_ragdoll` from `crates/game/src/ragdoll_look/hit.rs` (lines 244 and 339). That chain is separate from the tone.
+
+**Limits.**
+
+- `TOW_BRACE` is one constant for every towed body. It is not per body.
+- Presentation only. Nothing here is hashed or read by the sim (section 8).
+- Stale text: section 10 says the ragdoll path has no caller outside the crate's tests. That is out of date. `brace_ragdoll` and `hit_ragdoll` have game callers (see above).
+
+**Tests.**
+
+- `node tools/gh-check.mjs cargo test -p engine-physfx --features rapier --lib hit` runs the `tests::hit` module (`crates/physfx/src/tests/hit.rs`). It includes `strength_goes_from_one_to_the_tone_over_three_tenths_of_a_second` (line 79), `a_braced_neck_gives_way_less_than_a_limp_one` (line 143), `a_toned_body_keeps_its_shape_where_a_limp_one_folds` (line 204) and `a_held_brace_stays_up_while_asked_and_fades_to_the_tone_after` (line 217).
+- `node tools/gh-check.mjs cargo test -p engine-game --features app --lib ragdoll_look` runs the look tests. `ragdoll_look_tow_lifts_a_body_along_the_track_then_it_lands_and_gets_up` is at `ragdoll_look.rs:2189`.
+
+## 12. Where the code is
 
 | File | Role |
 |---|---|
