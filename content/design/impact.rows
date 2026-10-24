@@ -1,0 +1,35 @@
+# impact design rows: the moment of the hit as one authored sequence per impact class and weapon.
+# Designers change numbers here without a Rust edit; the game test in
+# crates/game/src/impact_seq.rs checks them. Whole numbers only, `#` comments, no floats. Units live in the
+# key: `_permille` is parts per thousand, `_ticks` and `_frames` are steps of the presentation clock at 60 Hz
+# (the feel runs on a fixed 60 Hz clock whatever the monitor refreshes at), `_mm` is millimeters.
+# Presentation only: nothing here reaches the sim, its hit-stop count or its hash.
+#
+# One default row per impact class. The classes are light (a light blow, the sim holds 3 ticks), heavy (a heavy
+# blow, 6), parry (the answer, 8), block (a held guard soaks it) and knockdown (the victim goes to zero). A row
+# with `weapon=*` is the class default and names every key. A row naming a weapon id from weapons.rows changes
+# only the keys it names for that weapon's blows and takes the rest from its class default, so the gladius (the
+# kit's weapon) plays the default and a dagger or a club states how it differs.
+#
+# The sequence a row plays at the instant the blow lands, all channels at once (Sparkle Lite's feedback
+# sequence, Wallop Lite's composable stop; docs/research/plugins-2026-10-24):
+#   stop_frames        the clock stops this many frames (0 = as long as the sim holds, four with no count)
+#   stop_rate_permille the clock rate while stopped (1000 = no stop); overlapping stops last the longest and
+#                      run the lowest
+#   shake_ticks, shake_power_permille   screen-plane camera shake (the feel flow's reference shake)
+#   trauma_permille    fight-camera trauma added (roll, lens punch, the fight shake); the look reads it from
+#                      the class default, it does not know the weapon
+#   kick_mm, kick_ticks   the camera is pushed along the blow, attacker toward victim, and eases back
+#   bump_milli         a nudge along the screen x axis (a guard soaking a blow), milli pixels
+#   slowmo_ticks, slowmo_permille   time dilation after the blow (0 ticks = none)
+table impact version 1
+light     weapon=*      stop_frames=0 stop_rate_permille=100  shake_ticks=12 shake_power_permille=1000 trauma_permille=400 kick_mm=20 kick_ticks=10 bump_milli=0    slowmo_ticks=0  slowmo_permille=1000
+heavy     weapon=*      stop_frames=0 stop_rate_permille=60   shake_ticks=18 shake_power_permille=1500 trauma_permille=650 kick_mm=45 kick_ticks=12 bump_milli=0    slowmo_ticks=0  slowmo_permille=1000
+parry     weapon=*      stop_frames=0 stop_rate_permille=100  shake_ticks=8  shake_power_permille=700  trauma_permille=0   kick_mm=18 kick_ticks=8  bump_milli=0    slowmo_ticks=0  slowmo_permille=1000
+block     weapon=*      stop_frames=0 stop_rate_permille=1000 shake_ticks=0  shake_power_permille=0    trauma_permille=0   kick_mm=0  kick_ticks=0  bump_milli=1500 slowmo_ticks=0  slowmo_permille=1000
+knockdown weapon=*      stop_frames=0 stop_rate_permille=1000 shake_ticks=30 shake_power_permille=2000 trauma_permille=700 kick_mm=60 kick_ticks=16 bump_milli=0    slowmo_ticks=45 slowmo_permille=300 
+# A dagger lands light and quick; the heavier the weapon, the harder every light blow reads.
+light     weapon=pugio  shake_ticks=10 shake_power_permille=800  kick_mm=14 kick_ticks=8 
+light     weapon=spatha shake_ticks=14 shake_power_permille=1100 kick_mm=26 kick_ticks=11
+light     weapon=clava  shake_ticks=16 shake_power_permille=1300 kick_mm=34 kick_ticks=12
+light     weapon=pilum  shake_ticks=18 shake_power_permille=1450 kick_mm=40 kick_ticks=12
