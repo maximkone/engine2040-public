@@ -28,6 +28,10 @@ pub struct Chunk3 {
     clippy::too_many_arguments,
     reason = "wide signature kept until its inputs move into a params struct"
 )]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the rng draw is below 1000, so u64 -> f32 is exact"
+)]
 pub fn fracture3(
     x: f32,
     y: f32,
@@ -190,6 +194,16 @@ mod tests {
             // F32 bisection rounding scales with volume, so the sum bound is looser.
             assert!((sum - total).abs() < 1e-2, "sum {sum} total {total}");
         }
+    }
+
+    #[test]
+    fn casts_keep_the_cooked_cook_digest() {
+        // Pinned from the code before the CQ10 cast pass: a reviewed cast must not move a
+        // shipped byte.
+        assert_eq!(
+            bake_hash3(&fracture3(0.0, 0.0, 0.0, 10.0, 5.0, 4.0, 8, 42)),
+            11085430341522111189u64
+        );
     }
 
     #[test]
