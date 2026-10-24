@@ -10,7 +10,7 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   `crates/game/src/class_sheet.rs`, `content/design/weapons.rows`. Accept: a live-duel test
   pits a dagger row against a mace row and prints startup, recovery and stagger for each; the
   mace numbers are larger; rules v1 replays unchanged (`golden_hash_untouched`).
-- [ ] FEEL1b game: the window duel swings real weapons. `App::into_duel` arms each slot's kit weapon
+- [x] FEEL1b game: the window duel swings real weapons. `App::into_duel` arms each slot's kit weapon Landed 55a090d. `feel1b_duel_lands_the_clava_after_the_pugio_by_the_rows` lands each blow at press plus its own `App::weapon` startup and the clava's first hit after the pugio's by the rows' gap: 18 ticks today, not the 9 below (b6d382b doubled the startups: pugio 24, clava 42); the fold-only hash leg is `feel1b_default_duel_arms_the_kit_and_only_the_fold_moves`; run 40113669615 (4 tests).
   through `LiveMatch` (`Sim::arm_weapons`, FEEL1), the look times each swing by its own startup
   (`Sim::weapon`) and the HUD names the weapon. Files: `crates/arena/src/live.rs`,
   `crates/game/src/lib.rs`, `fighter_look_acts.rs`. Accept: a game test arms pugio against clava

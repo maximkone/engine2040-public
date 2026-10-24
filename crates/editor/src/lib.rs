@@ -1,5 +1,9 @@
 //! editor: headless-first dock shell. Layout is data: serializes, hashes x2, viewport last.
 
+// The derived `fn ui` reaches the draw seam by the crate's own name: generated
+// code cannot say `crate::` (it may be expanded outside this crate).
+extern crate self as engine_editor;
+
 /// Recorded editable-scene session (gate evidence): headless import, place,
 /// edit, save and reopen through the shell, browser and save codec.
 pub mod a2_session;
@@ -68,6 +72,11 @@ pub mod inspector;
 /// Automatic inspector rows from registry schemas: min/max/step/dropdown
 /// and read-only hints with undoable command-batch edits. Std-only.
 pub mod inspector_auto;
+/// Derived inspector fields: the runtime half of `#[derive(Inspector)]`, one
+/// table row per tuning field and the widget that draws it. Behind `inspector`
+/// with egui; headless builds stay std-only.
+#[cfg(feature = "inspector")]
+pub mod inspector_fields;
 pub mod instant;
 /// First-run checklist over templates and play-in-editor: tutorial-1 steps, hints-only
 /// guidance and the 15-minute time-to-first-fight budget. Std-only; the
