@@ -18,15 +18,16 @@
 //! channels, and its local rotation is the channel-order product of the Euler
 //! rotations. BVH applies each written rotation about the already-turned axes,
 //! so `Zrotation Xrotation Yrotation` composes `Rz * Rx * Ry`. That is exactly
-//! the anim contract's [`LocalPose`]: one offset in the parent frame, composed
+//! the anim contract's [`LocalPose`](engine_anim::contract::LocalPose): one offset in the parent frame, composed
 //! parent-first by `skinning_matrices`.
 //!
-//! Retarget: a source joint name finds the anim contract's [`BoneRole`] table,
+//! Retarget: a source joint name finds the anim contract's
+//! [`BoneRole`](engine_anim::contract::BoneRole) table,
 //! so `Hips`, `pelvis` and `mixamorig:Hips` all land on the same bone. A
 //! translation key keeps its bind-relative offset scaled by the bind
 //! bone-length ratio, and a rotation key carries over as authored because BVH
 //! has no rest rotations. Source bones with no role and required roles with no
-//! source bone are listed in the [`BvhRetarget`] receipt, never dropped
+//! source bone are listed in the [`BvhRetarget`](crate::bvh::BvhRetarget) receipt, never dropped
 //! silently.
 //!
 //! Determinism: f32 `+ - * /`, `sqrt`, and `sin`/`cos` for the Euler decode
@@ -149,7 +150,7 @@ pub enum BvhError {
         /// Byte offset the token starts at.
         at: usize,
     },
-    /// A joint's channel count is not a number in `0..=`[`MAX_CHANNELS`].
+    /// A joint's channel count is not in `0..=MAX_CHANNELS`.
     BadChannels {
         /// Joint index in file order.
         joint: usize,

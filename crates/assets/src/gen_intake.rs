@@ -14,7 +14,8 @@
 //! prop cook (LOD chain and hulls), the bundle. Offline cook only, never the tick:
 //! plain `f32`/`f64` arithmetic with `sqrt` and no trigonometry, fixed iteration
 //! orders, so the same GLB and inputs cook the same bytes twice. Units: metres.
-//! Errors: typed [`IntakeError`] with a stable [`IntakeError::code`].
+//! Errors: typed [`IntakeError`](crate::gen_intake::IntakeError) with a stable
+//! [`IntakeError::code`](crate::gen_intake::IntakeError::code).
 
 use super::bundle_cook::{cook_bundle_bytes, BundleCookError, StagedCooked};
 use super::cooked::{CookedMaterial, CookedMesh};

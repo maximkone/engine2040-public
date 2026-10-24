@@ -12,6 +12,7 @@
 
 use engine_arena::world::{MatchWorld, Obstacle};
 use engine_core::hash::hash_bytes;
+use engine_render::material_kind::MaterialKind;
 use engine_render::present::MeshKey;
 #[cfg(feature = "app")]
 use engine_render::present::{TextureKey, TextureSource, TextureUpload};
@@ -334,6 +335,18 @@ pub fn kit_mesh_key(actor: &KitActor) -> MeshKey {
     digest[8..12].copy_from_slice(&actor.id.to_le_bytes());
     digest[12..16].copy_from_slice(&actor.id.to_be_bytes());
     MeshKey::new(KIT_MESH_ID_BASE + u64::from(actor.id), digest)
+}
+
+/// LF8: the shading family of one kit mesh. Only the torch (iron) and the
+/// banner (cloth) leave the stone default; the sand, walls, stands, gate,
+/// crate and debris keep the stone path. `None` means "do not touch".
+#[must_use]
+pub fn kit_material_kind(asset: KitAsset) -> Option<MaterialKind> {
+    match asset {
+        KitAsset::Torch => Some(MaterialKind::Metal),
+        KitAsset::Banner => Some(MaterialKind::Cloth),
+        _ => None,
+    }
 }
 
 /// Fit of one source mesh into its placement box: uniform scale on the
@@ -1164,6 +1177,14 @@ pub fn upload_kit(
         if presenter.upload_mesh(baked.key, &baked.mesh).is_ok() {
             let base_color = baked.texture.filter(|key| tex_ok.contains(key));
             let normal_map = baked.normal_map.filter(|key| sets_ok.contains(key));
+            if let Some(kind) = kit_material_kind(baked.actor.asset) {
+                presenter.set_material_kind(baked.key, kind);
+            }
+            // RL51: only a mesh whose cooked set rode in tiles by meters.
+            if normal_map.is_some() {
+                let detail = kit_pbr::surface_detail_for_file(baked.actor.asset.file_name());
+                presenter.set_surface_detail(baked.key, detail);
+            }
             draws.push(KitDraw {
                 key: baked.key,
                 material: baked.material.clone(),
@@ -1620,6 +1641,28 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), KIT_ACTOR_COUNT);
         assert_ne!(keys[0], MeshKey::new(1, [0xA1; 32]));
+    }
+
+    #[test]
+    fn lf8_kit_kinds_name_the_torch_iron_and_the_banner_cloth() {
+        assert_eq!(
+            kit_material_kind(KitAsset::Torch),
+            Some(MaterialKind::Metal)
+        );
+        assert_eq!(
+            kit_material_kind(KitAsset::Banner),
+            Some(MaterialKind::Cloth)
+        );
+        for asset in [
+            KitAsset::SandFloor,
+            KitAsset::Stands,
+            KitAsset::Walls,
+            KitAsset::GateTunnel,
+            KitAsset::Crate,
+            KitAsset::Debris,
+        ] {
+            assert_eq!(kit_material_kind(asset), None, "{asset:?} stays stone");
+        }
     }
 
     #[test]

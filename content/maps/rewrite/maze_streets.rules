@@ -1,0 +1,21 @@
+# Maze streets: a 31 x 31 block of wall B with one tree of streets W carved
+# through it, then a few extra openings so the streets form loops.
+# Symbols: B wall block, W street, G trail while digging, R the digging head.
+# Cells at odd x,y are street junctions; the outer ring stays wall.
+size 31 31
+alphabet BWGR
+
+put 1 1 R
+
+# The head digs two cells forward into wall (RBB -> GGR, in any direction),
+# and when it is boxed in it backs out over its own trail (RGG -> WWR).
+markov {
+  one { rule RBB = GGR }
+  one { rule RGG = WWR }
+}
+
+# The head ends where it began: make that junction a street too.
+one { rule R = W }
+
+# Open 12 wall cells that sit between two streets, so the maze has loops.
+one steps=12 { rule WBW = WWW }
