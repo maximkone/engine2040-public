@@ -9,6 +9,7 @@
 use super::{
     DrawRecord, PARTICLE_DRAW_WGSL, POOL_CAP_HARD, SOFT_FADE_RANGE_M, STRETCH_GAIN, STRETCH_MAX,
 };
+use crate::vfx_soft::{vfx_depth_layout, vfx_pack_frame, VfxFrame, VFX_FRAME_BYTES};
 
 // ---------------------------------------------------------------------------
 // Staged draw bytes (behind `window`): the CPU image of
@@ -20,24 +21,28 @@ use super::{
 
 /// Draw-uniform byte size for `shaders/particle.wgsl` (`DrawU`): one `mat4`
 /// view-projection, the camera right and up axes, the atlas grid and the
-/// fade plus stretch bars. WGSL puts every `vec3` member on a 16-byte bound,
-/// so the image is 112 bytes where the fields add up to 108.
-pub const PARTICLE_DRAW_UNIFORM_BYTES: usize = 112;
+/// fade plus stretch bars (112 bytes: WGSL puts every `vec3` member on a
+/// 16-byte bound, so the fields that add up to 108 pad out), then the 32-byte
+/// [`VfxFrame`] block (depth constants, depth-valid word, light).
+pub const PARTICLE_DRAW_UNIFORM_BYTES: usize = 144;
+
+/// Byte offset of the [`VfxFrame`] block inside the draw uniform.
+pub(super) const PARTICLE_VFX_AT: usize = PARTICLE_DRAW_UNIFORM_BYTES - VFX_FRAME_BYTES;
+
+/// [`PARTICLE_VFX_AT`] and the depth-valid word eight bytes in, as buffer
+/// addresses for the queue writes (a test pins both to the layout).
+pub(super) const PARTICLE_VFX_ADDR: u64 = 112;
+pub(super) const PARTICLE_DEPTH_ON_ADDR: u64 = 120;
 
 /// One packed draw instance: the `DrawP` image of `shaders/particle.wgsl`
 /// (position, size, velocity, alpha, the two flipbook cells, the blend
-/// weight, then the tint on a 16-byte bound).
+/// weight, the emitter kind, then the tint on a 16-byte bound).
 pub const PARTICLE_DRAW_INSTANCE_BYTES: usize = 64;
 
 /// Instances one staged batch carries at most; the pool's hard bound sizes
 /// it, so the instance buffer is sized once and never resizes on a frame,
 /// and no tier (up to the hard cap) can outgrow it.
 pub(super) const PARTICLE_DRAW_MAX_INSTANCES: usize = POOL_CAP_HARD;
-
-/// Scene-depth seam bytes the draw binds at group 0 binding 4: the shader
-/// declares the array but reads a constant zero gap until the closing slice
-/// feeds real depths, so one zeroed 64-byte block serves it.
-pub(super) const PARTICLE_DRAW_SCENE_DEPTH_BYTES: u64 = 64;
 
 /// Flipbook atlas grid the draw uniform binds. The Kenney sprite set is
 /// descriptors only (`content/vfx`); the shipped stand-in atlas is one white
@@ -60,14 +65,16 @@ fn particle_put_u32(out: &mut [u8], at: &mut usize, v: u32) {
 /// Pack the `DrawU` image: the frame view-projection in column-major order
 /// (the image the forward camera uniform carries), the billboard axes, the
 /// atlas grid and the fade plus stretch bars from [`SOFT_FADE_RANGE_M`],
-/// [`STRETCH_GAIN`] and [`STRETCH_MAX`]. `soft_on` packs as 0: the staged
-/// [`DrawRecord::fade`] rides the instance alpha, so the shader's own
-/// scene-depth gap stays off until the closing slice feeds `scene_depth`.
+/// [`STRETCH_GAIN`] and [`STRETCH_MAX`], then the [`VfxFrame`] block the soft
+/// contact and the lit sprites read. `soft_on` packs as 0: the staged
+/// [`DrawRecord::fade`] rides the instance alpha, and the scene-depth contact
+/// is the shader's own (`depth_on` in the block).
 /// Deterministic: fixed field order, no wall clock.
 pub(super) fn particle_pack_uniform(
     view_proj: [[f32; 4]; 4],
     cam_right: [f32; 3],
     cam_up: [f32; 3],
+    vfx: &VfxFrame,
 ) -> [u8; PARTICLE_DRAW_UNIFORM_BYTES] {
     let mut out = [0u8; PARTICLE_DRAW_UNIFORM_BYTES];
     let mut at = 0usize;
@@ -88,7 +95,9 @@ pub(super) fn particle_pack_uniform(
     particle_put_u32(&mut out, &mut at, PARTICLE_ATLAS_GRID[1]);
     particle_put_f32(&mut out, &mut at, STRETCH_MAX);
     particle_put_u32(&mut out, &mut at, 0);
-    debug_assert_eq!(at, PARTICLE_DRAW_UNIFORM_BYTES);
+    // The `soft_on` word closes the 112-byte head; the block starts on 16.
+    debug_assert_eq!(at, 112);
+    vfx_pack_frame(vfx, &mut out[PARTICLE_VFX_AT..]);
     out
 }
 
@@ -97,40 +106,41 @@ pub(super) fn particle_pack_uniform(
 /// carries the staged [`DrawRecord::fade`], so the soft fade the CPU staged
 /// reaches the blend, and the blend weight is `blend_b` (`mix(a, b, blend_b)`
 /// equals `a * blend_a + b * blend_b` once the pair sums to one). The velocity
-/// slot packs zero: a record holds no direction, so its quad draws round
-/// (shader stretch 1.0) until the closing slice feeds the velocity beside the
-/// depth gap. Deterministic: fixed order.
+/// slot carries the particle's velocity (the shader streaks sparks and blood
+/// along it), and the word after the blend weight is the emitter kind the
+/// shader shapes the sprite by. Deterministic: fixed order.
 pub(super) fn particle_pack_instance(record: &DrawRecord, out: &mut [u8]) {
     debug_assert_eq!(out.len(), PARTICLE_DRAW_INSTANCE_BYTES);
     let mut at = 0usize;
     for v in [record.pos[0], record.pos[1], record.pos[2], record.size_m] {
         particle_put_f32(out, &mut at, v);
     }
-    for _ in 0..3 {
-        particle_put_f32(out, &mut at, 0.0);
+    for v in record.vel {
+        particle_put_f32(out, &mut at, v);
     }
     particle_put_f32(out, &mut at, record.fade);
     particle_put_u32(out, &mut at, record.frame_a);
     particle_put_u32(out, &mut at, record.frame_b);
     particle_put_f32(out, &mut at, record.blend_b);
-    particle_put_f32(out, &mut at, 0.0);
+    particle_put_u32(out, &mut at, u32::from(record.kind));
     for v in record.tint {
         particle_put_f32(out, &mut at, v);
     }
     debug_assert_eq!(at, PARTICLE_DRAW_INSTANCE_BYTES);
 }
 
-/// Draw bind-group layout: the view uniform, the instance array, the flipbook
-/// atlas plus its filtering sampler, and the scene-depth seam the shader
-/// declares at binding 4. Fixed shape, never rebuilt.
+/// Draw bind-group layout: the view uniform, the instance array and the
+/// flipbook atlas plus its filtering sampler. The scene depth rides group 1
+/// (`vfx_soft::vfx_depth_layout`) so the fragment fades against it.
 pub(super) fn particle_draw_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let storage = || wgpu::BufferBindingType::Storage { read_only: true };
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("rp2-particle-draw-layout"),
         entries: &[
+            // The fragment entry reads `draw.light` and `draw.depth_on` too.
             particle_draw_buffer_entry(
                 0,
-                wgpu::ShaderStages::VERTEX,
+                wgpu::ShaderStages::VERTEX_FRAGMENT,
                 wgpu::BufferBindingType::Uniform,
             ),
             particle_draw_buffer_entry(1, wgpu::ShaderStages::VERTEX, storage()),
@@ -150,16 +160,16 @@ pub(super) fn particle_draw_layout(device: &wgpu::Device) -> wgpu::BindGroupLayo
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
-            particle_draw_buffer_entry(4, wgpu::ShaderStages::VERTEX, storage()),
         ],
     })
 }
 
 /// The flipbook pipeline: [`PARTICLE_DRAW_WGSL`] `draw_vs` plus `draw_fs`, no
 /// vertex buffers (the shader reads the instance array), one HDR colour target
-/// alpha blended and no depth attachment, so no pass shape can mismatch. The
-/// shader lays the quad out as corners 0..3, so the strip closes it with two
-/// triangles.
+/// blended premultiplied (each kind picks how much of its light adds) and no
+/// depth attachment, so no pass shape can mismatch: the shader fades against
+/// the stored depth itself (group 1, `vfx_soft`). The shader lays the quad out
+/// as corners 0..3, so the strip closes it with two triangles.
 pub(super) fn particle_draw_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -168,9 +178,10 @@ pub(super) fn particle_draw_pipeline(
         label: Some("rp2-particle-draw"),
         source: wgpu::ShaderSource::Wgsl(PARTICLE_DRAW_WGSL.into()),
     });
+    let depth = vfx_depth_layout(device);
     let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("rp2-particle-draw-pipe-layout"),
-        bind_group_layouts: &[Some(layout)],
+        bind_group_layouts: &[Some(layout), Some(&depth)],
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -187,7 +198,7 @@ pub(super) fn particle_draw_pipeline(
             entry_point: Some("draw_fs"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: crate::present::HDR_FORMAT,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
