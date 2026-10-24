@@ -898,6 +898,203 @@ mod tests {
             assert!(verb.readonly());
         }
     }
+
+    // -----------------------------------------------------------------------
+    // AIN4: the end-to-end seeded floor fault.
+    // -----------------------------------------------------------------------
+
+    /// The run seed and plan every step of the end-to-end fault uses.
+    const FLOOR_SEED: u64 = 2040;
+    const FLOOR_TICKS: u32 = 600;
+    /// The tick the seeded fault sinks a body past the floor.
+    const FLOOR_FAULT_TICK: u32 = 41;
+    /// The `sunk_cm_max` floor the run must stay inside, centimetres.
+    const FLOOR_CM: f64 = 3.0;
+    /// The receipt a quiet tick reads, centimetres.
+    const FLOOR_QUIET_CM: f64 = 0.4;
+    /// The receipt the fault tick reads, centimetres: well past the floor.
+    const FLOOR_FAULT_CM: f64 = 12.0;
+    /// The four bytes the seeded fault writes into its tape record: a collision in a
+    /// 600-tick quiet run is 600 / 2^32, so the marker alone names the fault.
+    const FLOOR_FAULT_MARK: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+
+    /// The tape record one tick of the run wrote: ten canonical input bytes, with
+    /// the seeded fault marker on the fault tick only.
+    fn floor_record(tick: u32, fault: Option<u32>) -> [u8; 10] {
+        let mut state = FLOOR_SEED ^ (u64::from(tick) << 32);
+        let mut record = [0u8; 10];
+        for lane in &mut record {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *lane = u8::try_from((state >> 56) & 0xff).unwrap_or(0);
+        }
+        if fault == Some(tick) {
+            record[..FLOOR_FAULT_MARK.len()].copy_from_slice(&FLOOR_FAULT_MARK);
+        }
+        record
+    }
+
+    /// The `sunk_cm_max` receipt a rerun of one tape record gives: quiet, but the
+    /// fault record sinks a body past the floor, so the tape alone carries the fault.
+    fn floor_receipt(record: &[u8]) -> f64 {
+        if record.starts_with(&FLOOR_FAULT_MARK) {
+            FLOOR_FAULT_CM
+        } else {
+            FLOOR_QUIET_CM
+        }
+    }
+
+    /// The first tick whose prefix maximum crosses the floor: the plain reading of
+    /// the same rule `bisect_floor` searches.
+    fn first_bad_tick(receipts: &[f64]) -> Option<u32> {
+        let mut highest = f64::NEG_INFINITY;
+        for (tick, value) in receipts.iter().enumerate() {
+            highest = highest.max(*value);
+            if highest > FLOOR_CM {
+                return u32::try_from(tick).ok();
+            }
+        }
+        None
+    }
+
+    /// One bundle root per test process, created empty first so the entry count is
+    /// the run's own: a clean run leaves it empty, a warned run leaves one bundle.
+    fn floor_root(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("e2040-ain4-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("bundle root creates");
+        root
+    }
+
+    #[test]
+    fn a_seeded_floor_fault_leaves_one_bundle_whose_tape_reruns_and_bisects_to_its_tick() {
+        let records: Vec<[u8; 10]> = (0..FLOOR_TICKS)
+            .map(|tick| floor_record(tick, Some(FLOOR_FAULT_TICK)))
+            .collect();
+        let run_receipts: Vec<f64> = records.iter().map(|record| floor_receipt(record)).collect();
+        assert_eq!(
+            first_bad_tick(&run_receipts),
+            Some(FLOOR_FAULT_TICK),
+            "the seeded fault is the run's first bad tick"
+        );
+
+        // The warned run: the caller writes once, when the first warning is known.
+        let root = floor_root("bundle");
+        engine_game::crash::set_adapter("ain4 test adapter");
+        let recorded = usize::try_from(FLOOR_FAULT_TICK).unwrap_or(0);
+        for (tick, record) in records.iter().enumerate().take(recorded + 1) {
+            engine_game::crash::record_fight_tick(
+                u32::try_from(tick).unwrap_or(u32::MAX),
+                record,
+                Some((u32::try_from(tick).unwrap_or(u32::MAX), 0x5eed_5eed)),
+            );
+        }
+        let view_line = "arena view: frames=42 sim_ticks=0.0..41.0 bodies=14 sunk_cm_max=12.0";
+        let warnings = vec![format!(
+            "arena WARN: sunk_cm_max value={FLOOR_FAULT_CM} floor={FLOOR_CM}"
+        )];
+        let bundle = engine_game::crash::write_warning_bundle(
+            &root,
+            "sunk_cm_max",
+            FLOOR_SEED,
+            FLOOR_TICKS,
+            FLOOR_FAULT_TICK + 1,
+            2,
+            view_line,
+            &warnings,
+        )
+        .expect("the warned run leaves its bundle");
+
+        // Exactly one bundle, and it names the seed, the tick span, the view line
+        // and the tape tail.
+        let bundles: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
+            .expect("bundle root reads")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(bundles.len(), 1, "one run leaves one bundle: {bundles:?}");
+        assert_eq!(bundles[0], bundle);
+        let report = std::fs::read_to_string(bundle.join("report.toml")).expect("report readable");
+        for needle in [
+            "seed = 2040",
+            "ticks = 600",
+            "ticks_done = 42",
+            view_line,
+            warnings[0].as_str(),
+            "tape = \"tape.bin\"",
+        ] {
+            assert!(
+                report.contains(needle),
+                "report misses {needle:?}:\n{report}"
+            );
+        }
+
+        // The bundle's tape reproduces the run: its 10-byte records re-derive the
+        // same receipts, so the same first bad tick, without the bundle's prose.
+        let tape = std::fs::read(bundle.join("tape.bin")).expect("tape readable");
+        assert_eq!(tape.len() % 10, 0, "canonical 10-byte records");
+        let replayed: Vec<f64> = tape.chunks_exact(10).map(floor_receipt).collect();
+        assert_eq!(replayed.len(), recorded + 1, "the tape tail holds the run");
+        assert_eq!(
+            replayed,
+            run_receipts[..=recorded].to_vec(),
+            "the tape reruns the same receipts"
+        );
+        assert_eq!(
+            first_bad_tick(&replayed),
+            Some(FLOOR_FAULT_TICK),
+            "the tape alone names the seeded tick"
+        );
+
+        // `replay.bisect` names the same tick, twice, from the same samples.
+        let args = ReplayBisectArgs {
+            seed: Some(FLOOR_SEED),
+            ticks: Some(FLOOR_TICKS),
+            participants: Some(2),
+            metric: Some("sunk_cm_max".to_string()),
+            floor: Some(FLOOR_CM),
+            receipts: Some(run_receipts.clone()),
+            ..ReplayBisectArgs::default()
+        };
+        let first = bisect_metric_report(&args, "sunk_cm_max").expect("metric bisect answers");
+        let second =
+            bisect_metric_report(&args, "sunk_cm_max").expect("metric bisect answers again");
+        assert!(!first.clean, "a faulted run is not clean");
+        assert_eq!(first.tick, Some(FLOOR_FAULT_TICK), "the seeded tick");
+        assert_eq!(
+            second.tick, first.tick,
+            "the same samples name the same tick"
+        );
+        assert_eq!(second.value, first.value, "the same crossing value");
+        assert_eq!(first.metric.as_deref(), Some("sunk_cm_max"));
+
+        // A clean run writes nothing: no warning means no bundle is written at all.
+        let clean_root = floor_root("clean");
+        let clean_records: Vec<f64> = (0..FLOOR_TICKS)
+            .map(|tick| floor_receipt(&floor_record(tick, None)))
+            .collect();
+        assert_eq!(
+            first_bad_tick(&clean_records),
+            None,
+            "a clean run stays inside the floor"
+        );
+        let clean_args = ReplayBisectArgs {
+            receipts: Some(clean_records),
+            ..args
+        };
+        let clean = bisect_metric_report(&clean_args, "sunk_cm_max").expect("clean bisect answers");
+        assert!(clean.clean, "a clean run bisects clean");
+        assert_eq!(clean.tick, None);
+        let written = std::fs::read_dir(&clean_root)
+            .expect("clean root reads")
+            .filter_map(Result::ok)
+            .count();
+        assert_eq!(written, 0, "a clean run writes no bundle");
+
+        std::fs::remove_dir_all(&root).expect("bundle temp cleaned");
+        std::fs::remove_dir_all(&clean_root).expect("clean temp cleaned");
+    }
 }
 
 // WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.

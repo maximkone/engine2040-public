@@ -96,7 +96,7 @@ pub(crate) fn fall_states(
     rules: &ArenaRules,
 ) -> [Option<FallLanding>; MAX_SLOTS] {
     let mut landings: [Option<FallLanding>; MAX_SLOTS] = [None; MAX_SLOTS];
-    let charge_falls = rules.version == crate::FIGHT_RULES_V2;
+    let charge_falls = crate::geometry_rules(rules.version);
     for (slot, state) in states.iter_mut().enumerate().take(fighters) {
         let at_mm = match_wire::pos_mm(state.pos)[1];
         if rise[slot] == 0 && at_mm <= 0 {
@@ -525,7 +525,15 @@ pub(crate) fn fold_rules(
         return hash;
     }
     let mut digest = engine_core::hash::Fnv64::with_state(hash);
-    digest.write_u32(rules.version);
+    // Every geometry version folds the v2 tag: v3 is byte-compatible with v2
+    // at this step, so a v2 tape and its v3 twin hash the same on every tick
+    // while v1 keeps its raw byte and stays frozen.
+    let tag = if crate::geometry_rules(rules.version) {
+        crate::FIGHT_RULES_V2
+    } else {
+        rules.version
+    };
+    digest.write_u32(tag);
     digest.write(rules.teams.get(..fighters).unwrap_or(&[]));
     if rules.collides() {
         digest.write_u8(0xC0);
