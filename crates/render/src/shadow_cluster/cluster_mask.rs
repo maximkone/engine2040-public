@@ -14,7 +14,7 @@
 //!
 //! Units: bits and bytes. Determinism: cell-major integer order, no clock in
 //! the bytes; the same assignment gives the same masks twice. Presentation
-//! only, never hashed. Errors are typed [`LightError`].
+//! only, never hashed. Errors are typed `LightError`.
 //!
 //! Reimplemented shape, zero donor bytes vendored:
 //! PORT(google/filament@479ee3548410f21c038e50f1fe9335fe09eb433b:filament/src/Froxelizer.cpp): light-group bitmask per froxel record.

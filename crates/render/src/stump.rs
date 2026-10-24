@@ -1,9 +1,9 @@
 //! stump: the cap mesh that closes a severed limb on the remaining body (RZ3).
 //!
-//! A cut leaves an open hole where a limb was. [`stump_cap`] builds the closed
+//! A cut leaves an open hole where a limb was. `stump_cap` builds the closed
 //! stub that fills it: a short cylinder with a top disc, a bottom disc and a
 //! wall, sharing its two rings so every edge is used by exactly two triangles
-//! (`StumpCap::is_closed`). [`place_mesh`] moves a cap or a limb body to a
+//! (`StumpCap::is_closed`). `place_mesh` moves a cap or a limb body to a
 //! world pose (meters, unit quaternion) with `+ - * /` and `sqrt` only, so a
 //! presentation frame that bakes a body's mesh into world space stays
 //! deterministic on one machine.
@@ -13,7 +13,7 @@
 //! owns the cap and the placement; the game owns when a cap is drawn. Units:
 //! meters, unit quaternions `[x, y, z, w]`, Y up. Determinism: presentation
 //! only; nothing here is hashed and no value reaches the fixed tick. Errors:
-//! [`StumpError`] for a radius, depth or segment count outside the table.
+//! `StumpError` for a radius, depth or segment count outside the table.
 //! Budget: cold build of `segments * 4` triangles; no allocation per frame
 //! except the mesh the caller asks for.
 
@@ -41,7 +41,7 @@ pub enum StumpError {
     Depth,
     /// Segment count outside `MIN_SEGMENTS..=MAX_SEGMENTS`.
     Segments,
-    /// A position or a rotation handed to [`place_mesh`] was not finite.
+    /// A position or a rotation handed to `place_mesh` was not finite.
     Pose,
 }
 

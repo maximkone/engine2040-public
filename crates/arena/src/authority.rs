@@ -275,11 +275,12 @@ fn direction_q10(from: [i32; 3], to: [i32; 3]) -> [i32; 2] {
 #[cfg(feature = "spine")]
 pub(crate) fn resolve_cuts_bare(
     states: &[FighterState],
+    fight: &FightState,
     tick: u32,
     limbs: &mut LimbPool,
     events: &[FightEvent],
 ) -> Vec<Cut> {
-    resolve_cuts(states, tick, limbs, events, &mut Vec::new())
+    resolve_cuts(states, fight, tick, limbs, events, &mut Vec::new())
 }
 
 /// Resolve one tick's landed hits into severed joints. V2 only: the cut event
@@ -294,10 +295,16 @@ pub(crate) fn resolve_cuts_bare(
 /// blow resolves with the worn bits as the joint guard. Unworn victims
 /// resolve exactly as before.
 ///
+/// BG15: the attacker's kit brings its steel to the blow — `fight`'s armed
+/// row for the attacking slot sets `wear_q16`, so the resolver's effective
+/// energy scales by the dulled edge. A slot swinging bare hands, or a match
+/// with no row armed, reads `0` and cuts exactly as it did.
+///
 /// Shared by the legacy step and the spine step; `states` holds exactly the
 /// active slots.
 pub(crate) fn resolve_cuts(
     states: &[FighterState],
+    fight: &FightState,
     tick: u32,
     limbs: &mut LimbPool,
     events: &[FightEvent],
@@ -321,6 +328,12 @@ pub(crate) fn resolve_cuts(
         let to = match_wire::pos_mm(states[v].pos);
         let facing = ((to[0] - from[0]).signum(), (to[2] - from[2]).signum());
         let sweep = match_wire::sweep_for_attacker(attacker, from, facing);
+        // The kit's own dulled edge (BG15); no armed row is a fresh edge.
+        let wear_q16 = fight
+            .fighters
+            .get(a)
+            .and_then(|swinger| swinger.heft)
+            .map_or(0, |heft| heft.edge_wear_q16());
         let blade = BladeSwing {
             attacker,
             victim,
@@ -329,10 +342,10 @@ pub(crate) fn resolve_cuts(
             p1_mm: [sweep.p1_mm[0], 1_000, sweep.p1_mm[2]],
             blade_half_mm: sweep.blade_half_mm,
             // A landed blade is a full-force cut for the first authority
-            // slice; damage scaling and edge wear land with the feel pass.
+            // slice; the edge wear it brings is the kit's own (BG15).
             energy_q16: MAX_ENERGY_Q16,
             sharpness_q16: MAX_SHARPNESS_Q16,
-            wear_q16: 0,
+            wear_q16,
         };
         let targets = rest_targets(to);
         let worn = states[v].worn;
@@ -592,5 +605,191 @@ mod tests {
         let (landing, hp) = drop_from(4.0, ArenaRules::V1);
         assert_eq!(landing.damage, 0);
         assert_eq!(hp, 1_000, "rules v1 and the golden stay untouched");
+    }
+
+    /// Eight swings of the same geometry over every severable joint of the
+    /// Rome kit at rest, at one edge wear, one blade strength and one worn
+    /// set: the joints severed and the energy those blows carry. BG15's cut
+    /// test, so the same geometry decides at every wear.
+    fn blows(wear_q16: u32, energy_q16: u32, worn: u8) -> (usize, u64) {
+        use engine_combat::{JointId, JointTarget, MAX_TARGETS_PER_SWING};
+        let anatomy = AnatomyTable::rome_kit();
+        let targets: Vec<JointTarget> = JointId::all()
+            .iter()
+            .filter(|joint| joint.is_severable())
+            .map(|&joint| JointTarget {
+                joint,
+                q0_mm: [-20, -80, 0],
+                q1_mm: [20, 80, 0],
+                radius_mm: 60,
+            })
+            .collect();
+        assert!(
+            targets.len() <= MAX_TARGETS_PER_SWING,
+            "the kit's severable joints must fit one swing"
+        );
+        let blank = Cut {
+            swing: 0,
+            attacker: 0,
+            victim: 1,
+            joint: 1,
+            flags: 0,
+            energy_q16: 0,
+            protection_q16: 0,
+        };
+        let mut severs = 0;
+        let mut delivered = 0;
+        for swing in 0..8u32 {
+            let blade = BladeSwing {
+                attacker: 0,
+                victim: 1,
+                swing,
+                p0_mm: [-100, 0, 0],
+                p1_mm: [100, 0, 0],
+                blade_half_mm: 10,
+                energy_q16,
+                sharpness_q16: MAX_SHARPNESS_Q16,
+                wear_q16,
+            };
+            let mut out = [blank; MAX_CUTS_PER_SWING];
+            let n = resolve_swing(&blade, &targets, &anatomy, worn, &CUT_V1, &mut out);
+            severs += n;
+            delivered += out
+                .iter()
+                .take(n)
+                .map(|hit| u64::from(hit.energy_q16))
+                .sum::<u64>();
+        }
+        (severs, delivered)
+    }
+
+    /// A mid blade: with the table's full-force sharpness its fresh edge
+    /// bites through a bare joint every time (851.968 Q16 over the 590.336
+    /// tissue) and cannot bite a shield arm at all (1.114.624 protected), so
+    /// the plated joints sit in the ramp where wear decides. The full-force
+    /// blade cannot show this: it saturates every joint, dull or not.
+    const MID_ENERGY_Q16: u32 = 425_984;
+
+    #[test]
+    fn bg15_damage_drops_proportional_to_the_edge_wear() {
+        use engine_combat::{effective_q16, ARMOR_ALL, MAX_WEAR_Q16};
+        // The scaling is exact: half the edge dulled is half the energy.
+        let swing = |wear: u32| BladeSwing {
+            attacker: 0,
+            victim: 1,
+            swing: 7,
+            p0_mm: [-100, 0, 0],
+            p1_mm: [100, 0, 0],
+            blade_half_mm: 10,
+            energy_q16: MAX_ENERGY_Q16,
+            sharpness_q16: MAX_SHARPNESS_Q16,
+            wear_q16: wear,
+        };
+        let fresh = effective_q16(&swing(0));
+        assert_eq!(effective_q16(&swing(MAX_WEAR_Q16 / 2)), fresh / 2);
+        assert_eq!(effective_q16(&swing(MAX_WEAR_Q16 / 4)), fresh * 3 / 4);
+        assert_eq!(effective_q16(&swing(MAX_WEAR_Q16)), 0);
+
+        // The delivered damage follows it exactly: the same joints bitten,
+        // half the energy in every one of them; a dead edge carries nothing.
+        let (fresh_joints, fresh_damage) = blows(0, MAX_ENERGY_Q16, 0);
+        let (half_joints, half_damage) = blows(MAX_WEAR_Q16 / 2, MAX_ENERGY_Q16, 0);
+        let (dead_joints, dead_damage) = blows(MAX_WEAR_Q16, MAX_ENERGY_Q16, 0);
+        assert!(
+            fresh_joints > 20,
+            "a fresh edge must still sever, got {fresh_joints}"
+        );
+        assert_eq!(
+            half_joints, fresh_joints,
+            "at full force a dulled edge still bites the same joints"
+        );
+        assert_eq!(
+            half_damage * 2,
+            fresh_damage,
+            "half the edge is half the delivered damage"
+        );
+        assert_eq!(dead_joints, 0, "a fully dulled edge severs nothing");
+        assert_eq!(dead_damage, 0, "a fully dulled edge carries no energy");
+
+        // And against plate the dulled edge loses joints outright, not just
+        // force: the same mid blade bites fewer as the edge dulls.
+        let (steel, quarter, half) = (
+            blows(0, MID_ENERGY_Q16, ARMOR_ALL).0,
+            blows(MAX_WEAR_Q16 / 4, MID_ENERGY_Q16, ARMOR_ALL).0,
+            blows(MAX_WEAR_Q16 / 2, MID_ENERGY_Q16, ARMOR_ALL).0,
+        );
+        println!(
+            "arena wear cuts: fresh={steel} quarter={quarter} half={half} over 8 swings on the plated kit"
+        );
+        assert!(
+            steel > 0,
+            "a fresh mid blade bites the plated kit, got {steel}"
+        );
+        assert!(
+            quarter < steel,
+            "a quarter-dulled edge severs fewer joints: {quarter} against {steel}"
+        );
+        assert!(
+            half < quarter,
+            "a half-dulled edge severs fewer still: {half} against {quarter}"
+        );
+    }
+
+    #[test]
+    fn bg15_the_kit_wear_reaches_the_resolver_not_zero() {
+        use engine_combat::heft::Heft;
+        use engine_combat::{effective_q16, MAX_WEAR_Q16};
+        // The shipped kit row carries its steel's condition, and the wear the
+        // resolver gets is that row's, never a hardcoded zero.
+        let gladius = Heft::from_rows(crate::heft::WEAPONS_ROWS, "gladius").expect("shipped row");
+        assert_eq!(gladius.edge_wear_permille, 120);
+        let wear = gladius.edge_wear_q16();
+        assert!(wear > 0, "the kit gladius arrives dulled, got {wear}");
+        assert!(
+            wear <= MAX_WEAR_Q16,
+            "the row's wear stays inside the resolver's range: {wear}"
+        );
+        // The energy the kit's blade actually delivers, against what the same
+        // blade would deliver fresh: the row's wear is in the number.
+        let blade = |wear_q16: u32| BladeSwing {
+            attacker: 0,
+            victim: 1,
+            swing: 3,
+            p0_mm: [-100, 0, 0],
+            p1_mm: [100, 0, 0],
+            blade_half_mm: 10,
+            energy_q16: MAX_ENERGY_Q16,
+            sharpness_q16: MAX_SHARPNESS_Q16,
+            wear_q16,
+        };
+        let (kit_joints, kit_damage) = blows(wear, MAX_ENERGY_Q16, 0);
+        let (fresh_joints, fresh_damage) = blows(0, MAX_ENERGY_Q16, 0);
+        assert_eq!(
+            u64::try_from(kit_joints).unwrap(),
+            u64::try_from(fresh_joints).unwrap(),
+            "the kit's edge still bites the same joints"
+        );
+        assert_eq!(
+            kit_damage,
+            u64::try_from(fresh_joints).unwrap() * effective_q16(&blade(wear)),
+            "each blow carries the kit row's dulled energy"
+        );
+        assert!(
+            kit_damage < fresh_damage,
+            "the kit's own dulled edge cuts weaker steel than fresh: {kit_damage} against {fresh_damage}"
+        );
+        assert!(
+            effective_q16(&blade(wear)) < effective_q16(&blade(0)),
+            "the resolver sees the kit's wear, not zero"
+        );
+        // A row that names no wear is a fresh edge, so an older mod table
+        // arms exactly as it did before BG15.
+        let unmarked = Heft::from_rows(
+            "table weapons version 2\nold mass_g=1000 damage_permille=120 speed_ticks=15 recovery_ticks=8 stagger_permille=400",
+            "old",
+        )
+        .expect("a row without the new key parses");
+        assert_eq!(unmarked.edge_wear_permille, 0);
+        assert_eq!(unmarked.edge_wear_q16(), 0);
     }
 }

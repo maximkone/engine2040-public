@@ -1,6 +1,6 @@
 //! restir_di: DI reservoir oracle plus denoise cost.
 //! Caller: `crate::rt_shadows::torch_visibility` ray. Units: pixels, ms.
-//! Determinism: seeded draws. Errors: [`DiError`]. Budget: caller buffers.
+//! Determinism: seeded draws. Errors: `DiError`. Budget: caller buffers.
 #![forbid(unsafe_code)]
 use engine_core::CounterRng;
 use std::fmt;

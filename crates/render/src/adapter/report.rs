@@ -2,10 +2,10 @@
 //!
 //! Owner: render lane. The pure half of render-proof honesty: a receipt that
 //! names an adapter also says who asked for it ([`SelectionSource`]), what was
-//! asked ([`AdapterChoice`]), what won, whether the win was a fallback, why,
+//! asked (`AdapterChoice`), what won, whether the win was a fallback, why,
 //! and what to do about it. [`select`] ranks the enumerated
-//! [`AdapterSummary`] rows exactly like `choose_with` and `choose_compatible`
-//! and wraps the winner in a [`BackendSelection`].
+//! `AdapterSummary` rows exactly like `choose_with` and `choose_compatible`
+//! and wraps the winner in a `BackendSelection`.
 //! A fallback is a software adapter winning (only with `E2040_ALLOW_SOFTWARE=1`)
 //! or the best adapter being unable to present to the window surface.
 //! Two policies: [`SelectionPolicy::Prefer`] returns the report and names the
@@ -241,7 +241,7 @@ impl Error for SelectionError {
 
 /// Pick the winning row of `list` for `request` and report it. `compatible`
 /// marks the surface-compatible rows (`None`: no surface, every row counts).
-/// Returns the winning index with its [`BackendSelection`]. A pick failure is
+/// Returns the winning index with its `BackendSelection`. A pick failure is
 /// [`SelectionError::Pick`]; a fallback under [`SelectionPolicy::Strict`] is
 /// [`SelectionError::Fallback`]. Pure; cold startup path only.
 pub fn select(

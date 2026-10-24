@@ -7,8 +7,8 @@
 //! the projection add; the frame number is the only time input. Determinism:
 //! integer frame and size math with fixed Halton bases 2 and 3, so the same
 //! frame and resolution give bit-identical offsets and wall clock never
-//! enters. Budget: image sizes are validated against [`MAX_POST_DIM`] before
-//! allocation and bad input fails with a typed [`PostError`] (whose
+//! enters. Budget: image sizes are validated against `MAX_POST_DIM` before
+//! allocation and bad input fails with a typed `PostError` (whose
 //! `BudgetExceeded` carries the allowed bound), never silent success.
 
 use crate::post::{PostError, MAX_POST_DIM};

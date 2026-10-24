@@ -16,7 +16,7 @@ pub struct BloomConfig {
     /// `threshold * knee + 1e-5`.
     pub knee: f32,
     /// Pyramid radius in `0..=8` (donor `radius`, default 2.5): larger radii
-    /// deepen the mip chain via [`kino_iterations`].
+    /// deepen the mip chain via `kino_iterations`.
     pub radius: f32,
     /// Add-back strength, `0..=2`.
     pub intensity: f32,
@@ -511,8 +511,8 @@ pub(super) fn kino_karis_weight(brightness: f32) -> f32 {
     1.0 / (brightness + 1.0)
 }
 
-/// The Kino soft-knee weight for one texel luma, `0..=1`: [`kino_curve`]
-/// plus [`kino_prefilter_weight`]. Below the knee foot nothing passes, far
+/// The Kino soft-knee weight for one texel luma, `0..=1`: `kino_curve`
+/// plus `kino_prefilter_weight`. Below the knee foot nothing passes, far
 /// above everything passes, smooth between. Linear HDR only. One owner for
 /// the curve: the CPU pyramid ([`apply_bloom`]) and the live dual-filter
 /// chain ([`crate::bloom_dual`]) both call it.
@@ -573,7 +573,7 @@ pub const BLOOM_PASS_FLAG_OFFSET: u64 = 20;
 
 /// GPU-side bloom pass plan: extract, blur, add descriptors reusing the
 /// CPU thresholds. No CPU curve change: threshold, knee and intensity
-/// mirror [`BloomConfig`], depth mirrors [`kino_iterations`] clamped to
+/// mirror [`BloomConfig`], depth mirrors `kino_iterations` clamped to
 /// the config cap. Presentation only, never the tick hash.
 /// Caller: `crates/render/src/present/gpu_present/presenter.rs` bloom state.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -878,7 +878,7 @@ pub const aces_fitted: fn(f32) -> f32 = neutral_fit_one;
 /// `crate::tonemap::tone_map` hold the same curve, and the shader
 /// consumers (the live blit, the offscreen capture, the post chain and its
 /// compute twin) all call it.
-/// Units: linear HDR in, display `0..=1` out. Errors: typed [`PostError`]
+/// Units: linear HDR in, display `0..=1` out. Errors: typed `PostError`
 /// on non-finite or non-positive exposure, white, or color.
 /// Determinism: pure; same inputs give same outputs twice.
 /// Caller: `run_chain_core` in this file (presenter frame oracle health).

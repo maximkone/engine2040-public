@@ -179,7 +179,7 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   jobs; `--arm scripted` prints `pass@1 1.000` and `--arm mutation` `0.000`.
   F2P: no door surface exists. P2P: the tool count pin and the 75/75 tapes
   unchanged. needs: none.
-- [ ] BG15 arena: kit wear never reaches a duel blow —
+- [x] BG15 arena: kit wear never reaches a duel blow — Landed 49f3615e4.
   `arena/src/authority.rs:334` and `limbs.rs:366` pass `wear_q16: 0` while
   `combat/src/cut.rs:311` already scales damage by wear. Carry the edge wear
   from the kit through the blow. Rules v2 only. Diff: regular. Tier B. Size M.
@@ -188,6 +188,39 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   shows damage drop proportional to wear; v1 golden unchanged. F2P: wear is
   always 0, so the scaling is dead. P2P: the v1 golden and the cut tests
   unchanged. needs: a rules v2 receipt.
+  Landed: the kit carries its steel as data. `weapons.rows` gained
+  `edge_wear_permille` (pugio 80, gladius 120, spatha 90, pilum 150, clava 0:
+  a blunt weapon has no edge to dull) and it is optional, so a table written
+  before BG15 arms a fresh edge; `Heft::edge_wear_q16` is that permille of the
+  resolver's own `MAX_WEAR_Q16`, and `authority::resolve_cuts` now takes the
+  `FightState` and sets the blade's `wear_q16` from the attacker's armed row,
+  so the dead `1 - wear` scaling bites. Legacy step and spine step pass the
+  same fight state (the spine's cut step moved into a named `extract_cuts` to
+  keep `sys_extract` under the long-fn ratchet), and
+  `Sim::edge_wear_q16(slot)` / `Sim::mean_edge_wear_q16()` read it back.
+  Proof: `cargo test -p engine-arena --lib bg15` 4 passed (run 40078011659) -
+  `arena wear cuts: fresh=49 quarter=25 half=0` at one mid blade over the
+  plated kit, delivered energy exactly halved at half wear and nothing at
+  full, and the five-round gladius duel `mean_edge_wear_q16=7864 hits=5
+  cuts=5` with every cut carrying 3,691,008 instead of the fresh 4,194,304;
+  `cargo test -p engine-combat --lib edge_wear` 1 passed (run 40076698681),
+  and `wear_permille=1001` is refused. Pinned hashes unmoved, as the pinned
+  fixtures arm nothing: arena digest `2b30084d1530cc78` on both the live and
+  the spine path (runs 40077515405, 40078134691) and the v1 golden
+  `d57b5c8ae3096614` (`proof_cli default_and_max_seed` PASS, run
+  40077271446); an armed bout's checkpoint does gain one u32 per slot under
+  tag `0xB5`, which is the point. Receipt
+  `docs/receipts/2026-10-24-bg15-edge-wear`, the new key in
+  `docs/design/FORMAT.md`, `node tools/rust-quality.mjs --crate engine-combat
+  --crate engine-arena` PASS score 100 with casts unchanged and `rustfmt
+  --check` clean. `limbs.rs:366` keeps its `wear_q16: 0`: that site is the
+  test `limbs_come_from_the_real_resolver_output` building its own blade, not
+  a producer of blows, and the row's P2P holds the cut tests as they are.
+  The arena suite is 322 passed / 3 failed on this tree and the 3 reds, plus
+  combat's `the_gladius_row_is_the_shipped_table` and three clippy
+  `assertions_on_constants` errors, are the readable tell `cbced6a3d` (OPT59)
+  leaving `weapons.rows` and its pins at startup 15 while the table moved to
+  30 - one row in `docs/BLOCKERS.md`, not a BG15 edit.
 - [ ] BG16 game: ladder arena variants are counts — `content/design/ladder.rows:32,34`
   set `new_arena=1` and `tools/beat-lint.mjs:160,198` only sums them; no
   variant key is read in `crates/game` or `crates/arena`. Make a rung name and

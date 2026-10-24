@@ -3,7 +3,7 @@
 //! Owner: render lane; slice 1 writes the target, slices b/c reduce it.
 //! Units: ids are plain `u32` texels, one per pixel, in draw-list order.
 //! Determinism: integer-only mapping, so same list gives same ids x2.
-//! Errors: saturation keeps every id below [`CLEAR`], never a wrap.
+//! Errors: saturation keeps every id below `CLEAR`, never a wrap.
 //! Budget: mapping is O(1); the tally is one pass, caller-owned buffer.
 //! GPU glue (format, clear, second attachment) lives once in
 //! `present/gpu_present/frame.rs` plus `shaders/forward.wgsl`; this module
@@ -13,14 +13,14 @@
 /// ever equals it. Mirrors `ID_CLEAR` in `present/gpu_present/frame.rs`.
 pub const CLEAR: u32 = u32::MAX;
 
-/// Largest id a draw may carry; one below [`CLEAR`] so saturation can
+/// Largest id a draw may carry; one below `CLEAR` so saturation can
 /// never collide with the clear value.
 pub const MAX_VALID_ID: u32 = u32::MAX - 1;
 
 /// Id for the draw at `index` in the submitted list: the index itself,
 /// saturated at [`MAX_VALID_ID`]. Fighter parts are tagged with their
 /// slot by list position: the caller stages one draw per fighter slot in
-/// slot order, so the id reads back as the slot. Never returns [`CLEAR`].
+/// slot order, so the id reads back as the slot. Never returns `CLEAR`.
 #[must_use]
 pub fn id_of_draw(index: usize) -> u32 {
     let max = MAX_VALID_ID as usize;
@@ -33,7 +33,7 @@ pub fn id_of_draw(index: usize) -> u32 {
 
 /// Id for fighter slot `slot`: the slot itself, saturated at
 /// [`MAX_VALID_ID`]. The caller stages one draw per fighter slot in slot
-/// order, so the id reads back as the slot. Never returns [`CLEAR`].
+/// order, so the id reads back as the slot. Never returns `CLEAR`.
 #[must_use]
 pub fn id_of_fighter_slot(slot: u8) -> u32 {
     let id = u32::from(slot);
@@ -44,7 +44,7 @@ pub fn id_of_fighter_slot(slot: u8) -> u32 {
     }
 }
 
-/// True when the read-back texel holds [`CLEAR`], meaning no draw landed
+/// True when the read-back texel holds `CLEAR`, meaning no draw landed
 /// on that pixel.
 #[must_use]
 pub fn is_clear(id: u32) -> bool {
@@ -54,7 +54,7 @@ pub fn is_clear(id: u32) -> bool {
 /// Tally read-back ids into per-draw pixel counts (CPU oracle for the
 /// slice-b GPU reduction): `counts[draw]` gains one per texel holding
 /// that draw's id. `counts.len()` is the draw count; texels holding
-/// [`CLEAR`] or an id outside the list are skipped, never indexed.
+/// `CLEAR` or an id outside the list are skipped, never indexed.
 /// Returns `(tallied, skipped)` so the caller sees dropped texels loudly.
 /// One pass, no allocation; the caller reuses `counts` across frames.
 pub fn tally_into(ids: &[u32], counts: &mut [u64]) -> (u64, u64) {

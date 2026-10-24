@@ -96,6 +96,14 @@ must read as the same answer as `avoid`, and `punish_ticks` must sit inside
 `crates/game/tests/it/design_combat.rs::every_move_carries_frame_data`
 holds both.
 
+The same rows carry `edge_wear_permille` (`0..=1000`, BG15): the condition
+the kit's steel arrives with. `Heft::edge_wear_q16`
+(`crates/combat/src/heft.rs`) turns it into the dulled fraction the cut
+resolver already scales a landed blow by, so a dulled gladius carries less
+energy into every sever than a fresh one. The key is optional: a row that
+names no wear is a fresh edge (`0`), and a blunt weapon names `0` because it
+has no edge to dull.
+
 The row's `avoid` answer has to be a window, not a wish: the parry may not
 answer the whole tell of the fastest weapon in `weapons.rows`, and may answer
 at most half of its own tell. Both gates are measured off tapes for the

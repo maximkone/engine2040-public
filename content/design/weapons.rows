@@ -22,10 +22,16 @@
 # fighter, so a heavier weapon starts later, recovers longer and staggers harder;
 # sorted by mass, startup, recovery and stagger never fall (combat heft test).
 # The gladius row equals the shipped table, so arming it changes no bout.
+# BG15 adds edge_wear_permille (0-1000, parts of a fully dulled edge): the
+# condition the kit's steel arrives with. The cut resolver scales a landed
+# blow's energy by `1 - wear`, so a dulled gladius severs less than a fresh
+# one; a row that names no wear is a fresh edge. A blunt weapon has no edge to
+# dull, so it names 0. Book note: Roman campaign steel came to the field
+# already used — a legionary sharpened on the march, not before every bout.
 # Book notes: weapons as data rows `[handsrust | Damage from Weapons and Claws]`.
 table weapons version 2
-pugio type=1 damage_permille=80 speed_ticks=12 hands=1 stagger_permille=300 stamina_cost=10 counter=2 avoid=dodge active_ticks=2 recovery_ticks=6 punish_ticks=4 mass_g=300
-gladius type=1 damage_permille=120 speed_ticks=15 hands=1 stagger_permille=400 stamina_cost=15 counter=1 avoid=parry active_ticks=2 recovery_ticks=8 punish_ticks=6 mass_g=1000
-spatha type=2 damage_permille=150 speed_ticks=18 hands=1 stagger_permille=500 stamina_cost=20 counter=3 avoid=block active_ticks=3 recovery_ticks=10 punish_ticks=8 mass_g=1300
-clava type=4 damage_permille=165 speed_ticks=21 hands=1 stagger_permille=550 stamina_cost=25 counter=3 avoid=block active_ticks=3 recovery_ticks=12 punish_ticks=9 mass_g=1700
-pilum type=3 damage_permille=180 speed_ticks=24 hands=1 stagger_permille=600 stamina_cost=30 counter=2 avoid=dodge active_ticks=3 recovery_ticks=14 punish_ticks=10 mass_g=2100
+pugio type=1 damage_permille=80 speed_ticks=12 hands=1 stagger_permille=300 stamina_cost=10 counter=2 avoid=dodge active_ticks=2 recovery_ticks=6 punish_ticks=4 mass_g=300 edge_wear_permille=80
+gladius type=1 damage_permille=120 speed_ticks=15 hands=1 stagger_permille=400 stamina_cost=15 counter=1 avoid=parry active_ticks=2 recovery_ticks=8 punish_ticks=6 mass_g=1000 edge_wear_permille=120
+spatha type=2 damage_permille=150 speed_ticks=18 hands=1 stagger_permille=500 stamina_cost=20 counter=3 avoid=block active_ticks=3 recovery_ticks=10 punish_ticks=8 mass_g=1300 edge_wear_permille=90
+clava type=4 damage_permille=165 speed_ticks=21 hands=1 stagger_permille=550 stamina_cost=25 counter=3 avoid=block active_ticks=3 recovery_ticks=12 punish_ticks=9 mass_g=1700 edge_wear_permille=0
+pilum type=3 damage_permille=180 speed_ticks=24 hands=1 stagger_permille=600 stamina_cost=30 counter=2 avoid=dodge active_ticks=3 recovery_ticks=14 punish_ticks=10 mass_g=2100 edge_wear_permille=150

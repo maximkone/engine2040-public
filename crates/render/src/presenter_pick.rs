@@ -6,7 +6,7 @@
 //! nothing here runs per frame.
 //! Consumer: `Presenter::init_offscreen` (through [`pick_adapter`]) and
 //! `Presenter::init_windowed` (through `crate::adapter::select`), which keep
-//! the [`BackendSelection`] on the presenter.
+//! the `BackendSelection` on the presenter.
 
 use crate::adapter::{
     AdapterBackend, AdapterError, AdapterKind, AdapterSummary, BackendSelection, SelectionError,

@@ -25,7 +25,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use engine_editor::capability::{Capability, OpMask};
 use engine_provider::memory::{
-    Draft, FactType, MEMORY_WRITE, MemoryError, MemoryKey, MemoryStore, Source,
+    Draft, FactType, MemoryError, MemoryKey, MemoryStore, Source, MEMORY_WRITE,
 };
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
@@ -86,13 +86,10 @@ fn refusal(error: MemoryError) -> McpToolError {
         MemoryError::BadConfidence { .. } => "next: confidence is 0..=1000",
         MemoryError::NoFact { .. } => "next: recall first and share an id you saw",
         MemoryError::NotYours { .. } => "next: only the session that wrote a fact shares it",
-        MemoryError::Malformed { .. } | MemoryError::SequenceExhausted => {
-            "next: restart the door"
-        }
+        MemoryError::Malformed { .. } | MemoryError::SequenceExhausted => "next: restart the door",
     };
-    McpToolError::new(error.code(), format!("{error}; {next}")).with_data(
-        rmcp::serde_json::json!({ "code": error.code() }),
-    )
+    McpToolError::new(error.code(), format!("{error}; {next}"))
+        .with_data(rmcp::serde_json::json!({ "code": error.code() }))
 }
 
 /// What `memory.write` offers.
@@ -252,10 +249,7 @@ fn memory_write_in(
     let fact = store.write(Some(&key), draft).map_err(refusal)?;
     let dto = fact_dto(fact, viewer);
     let stored = u32::try_from(store.len()).unwrap_or(u32::MAX);
-    Ok(MemoryWriteOutput {
-        fact: dto,
-        stored,
-    })
+    Ok(MemoryWriteOutput { fact: dto, stored })
 }
 
 /// `memory.recall` handler: the session's own facts plus every shared fact.
@@ -379,7 +373,10 @@ mod tests {
     }
 
     fn narrow(session: u64) -> McpServer {
-        McpServer::new(session, Capability::new(session, OpMask::INSERT, Vec::new(), 8))
+        McpServer::new(
+            session,
+            Capability::new(session, OpMask::INSERT, Vec::new(), 8),
+        )
     }
 
     fn write(server: &McpServer, kind: &str, value: &str, shared: bool) -> MemoryWriteOutput {
@@ -416,7 +413,9 @@ mod tests {
         // The writer shares its decision; the reader now recalls it too.
         let shared = MemoryShareTool::invoke(
             &writer,
-            MemoryShareArgs { id: decision.fact.id },
+            MemoryShareArgs {
+                id: decision.fact.id,
+            },
         )
         .expect("the writer shares its own fact");
         assert!(shared.fact.shared);
@@ -433,10 +432,11 @@ mod tests {
         assert!(!after.facts[1].own, "a shared fact is not the reader's own");
 
         // The private fact never leaks.
-        assert!(after
-            .facts
-            .iter()
-            .all(|fact| fact.value != "short matches"), "{:?}", after.facts);
+        assert!(
+            after.facts.iter().all(|fact| fact.value != "short matches"),
+            "{:?}",
+            after.facts
+        );
         assert!(private.fact.id < decision.fact.id, "ids rise with writes");
 
         // The writer recalls its own two facts; the reader's private note stays
@@ -511,11 +511,8 @@ mod tests {
         // Sharing another session's fact, or an id no fact carries.
         let mine = write(&writer, "fact", "mine only", false);
         let foreign = server(35);
-        let not_yours = MemoryShareTool::invoke(
-            &foreign,
-            MemoryShareArgs { id: mine.fact.id },
-        )
-        .expect_err("another session's fact");
+        let not_yours = MemoryShareTool::invoke(&foreign, MemoryShareArgs { id: mine.fact.id })
+            .expect_err("another session's fact");
         assert_eq!(not_yours.code, "memory_not_yours");
         let no_fact = MemoryShareTool::invoke(&writer, MemoryShareArgs { id: 9_999_999 })
             .expect_err("no such fact");
@@ -547,3 +544,17 @@ mod tests {
         }
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 13,
+    name: PACK,
+    default_loaded: false,
+    tools: &["memory.write", "memory.recall", "memory.share"],
+    build: pack,
+};

@@ -177,3 +177,32 @@ mod tests {
         );
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 0,
+    name: PACK,
+    default_loaded: true,
+    tools: &[
+        "scene.brief",
+        "scene.spatial",
+        "scene.place",
+        "level.build",
+        "game.play",
+        "scene.query",
+        "scene.watch",
+        "scene.next",
+        "scene.pick",
+        "world.query",
+        "scene.save",
+        "scene.load",
+        "prefab.save",
+        "prefab.place",
+    ],
+    build: pack,
+};

@@ -220,6 +220,11 @@ pub mod weapon_trail;
 pub mod window_audio_space;
 #[cfg(feature = "app")]
 pub mod windowed;
+/// A cut outlives the fight: four parts at three severities set from
+/// `combat::cut` events and healed by a camp day, over
+/// `content/rome/wound.toml`. A severed part never heals. The camp/roster
+/// view (rules v2) reads it; never hashed. Std-only.
+pub mod wounds;
 
 #[cfg(test)]
 mod fighter_draw;

@@ -1,4 +1,4 @@
-//! hud_pass: rasterizes one `engine-ui` [`HudFrame`] over a scene.
+//! hud_pass: rasterizes one `engine-ui` `HudFrame` over a scene.
 //!
 //! Consumer: the KAM1c windowed proof (`kam1c`), which draws the KAM1b 2.5D
 //! scene, composites the HUD on the readback frame and saves one PNG; the
@@ -11,7 +11,7 @@
 //! fixed rounding bias; a scissor replaces the clip, itself clipped to the
 //! surface; no clock, no floats.
 //! Failure mode: a pixel slice smaller than `width * height * 4` refuses with
-//! [`HudPassError`]; geometry outside the surface clips, never panics.
+//! `HudPassError`; geometry outside the surface clips, never panics.
 
 use engine_ui::text::{self, Atlas};
 use engine_ui::{HudCommand, HudFrame};

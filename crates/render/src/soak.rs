@@ -8,9 +8,9 @@
 //!
 //! Owner: engine-render. Units: milliseconds, KiB, frames at 60 Hz.
 //! Determinism: the same samples give the same report on every machine, and
-//! the packaged stream ([`samples`]) is seeded, so a test reads the same
+//! the packaged stream (`samples`) is seeded, so a test reads the same
 //! numbers everywhere. No wall clock, no tick, no state.
-//! Errors: typed [`SoakError`].
+//! Errors: typed `SoakError`.
 
 use engine_core::{splitmix64, Rng};
 use std::fmt::{self, Display, Formatter};

@@ -2,7 +2,7 @@
 //! image, so beside it this module keeps one CPU-side frame of the channels a
 //! person asks for when something is black: view-space normal (octahedral
 //! RGBA8), depth (u16), albedo (RGBA8) and material id (u16), each with its
-//! own [`Fnv64`] digest so "did one channel move?" is a number, not an eye.
+//! own `Fnv64` digest so "did one channel move?" is a number, not an eye.
 //!
 //! Owner: render lane; the builder is pure (borrowed slices in, owned frame
 //! out) and headless: no adapter, no window, no device call. Units: depth is
@@ -17,7 +17,7 @@
 //! `targets.depth_texture`) keeps depth per frame. The forward pass keeps no
 //! normal, albedo or id target yet, so the GPU half is a readback seam, not
 //! built here: map the depth texture plus the normal/albedo/id targets that
-//! pass would add, read them back, and call [`DebugFrame::from_gbuffer`].
+//! pass would add, read them back, and call `DebugFrame::from_gbuffer`.
 //! Until then callers hand over the same values they already hold on the CPU
 //! (pick/prepass fixtures, captured frames, tests).
 
@@ -121,7 +121,7 @@ pub struct DebugFrame {
     pub albedo: Vec<u8>,
     /// Material id exactly as written, one per pixel.
     pub material_id: Vec<u16>,
-    /// [`Fnv64`] per channel in [`DEBUG_DIGEST_CHANNELS`] order: normal,
+    /// `Fnv64` per channel in [`DEBUG_DIGEST_CHANNELS`] order: normal,
     /// depth, albedo, material id. Equal inputs give equal digests twice.
     pub digests: [u64; 4],
 }
@@ -373,14 +373,14 @@ pub(crate) fn decode_normal(bytes: &[u8], pixel: usize) -> [f32; 3] {
     [x / len, y / len, z / len]
 }
 
-/// [`Fnv64`] over a byte buffer.
+/// `Fnv64` over a byte buffer.
 fn digest_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = Fnv64::new();
     hasher.write(bytes);
     hasher.finish()
 }
 
-/// [`Fnv64`] over `u16` values, little-endian per value.
+/// `Fnv64` over `u16` values, little-endian per value.
 fn digest_u16s(values: &[u16]) -> u64 {
     let mut hasher = Fnv64::new();
     for value in values {

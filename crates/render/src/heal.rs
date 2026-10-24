@@ -2,11 +2,11 @@
 //! observe supervisor, keeping last-good and degrading on out-of-memory.
 //!
 //! Consumer: WIN1/ED1 frame loops survive GPU faults; in-crate the
-//! [`SimulatedSurface`] forced-loss tests are the consumer. Data owner:
-//! [`RenderHeal`] owns supervisor, ring, quality, last-good generation and
+//! `SimulatedSurface` forced-loss tests are the consumer. Data owner:
+//! `RenderHeal` owns supervisor, ring, quality, last-good generation and
 //! notices; the caller owns the presenter. Units: retries (`u32`), backoff
-//! (`u64` ms), quality tiers ([`QualityLevel`]). Determinism: tick-derived
-//! backoff from the shipped catalog, no clock. Errors: [`RenderHealError`];
+//! (`u64` ms), quality tiers (`QualityLevel`). Determinism: tick-derived
+//! backoff from the shipped catalog, no clock. Errors: `RenderHealError`;
 //! over-budget faults quarantine loudly with a notice plus the last-good frame.
 
 use engine_observe::heal::{HealError, HealKind};

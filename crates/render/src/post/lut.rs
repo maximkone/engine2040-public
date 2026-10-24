@@ -257,7 +257,7 @@ impl Lut3d {
     }
 
     /// Digest over the grid edge, both domain corners and every texel bit
-    /// through [`Fnv64`]: two parses of one file agree, a changed table does
+    /// through `Fnv64`: two parses of one file agree, a changed table does
     /// not. `TITLE` is free text and stays out of the digest.
     pub fn digest(&self) -> u64 {
         let mut hasher = Fnv64::new();

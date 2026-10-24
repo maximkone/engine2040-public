@@ -4,14 +4,14 @@
 //! viewport and the Q1 material chart (named next on the board). Units:
 //! none, pure reflectance math in linear space. Determinism: fixed
 //! scalar orders using `+ - * /` and `powi` only, so the same inputs
-//! give bit-identical outputs. Errors are typed [`MaterialError`];
+//! give bit-identical outputs. Errors are typed `MaterialError`;
 //! the headless twin names the missing window device while the window
 //! build binds the chart for real with 0 validation errors.
 //!
 //! CODELAW law 1: the R1 core (`v1.rs`: `d_ggx`,
 //! `v_smith_ggx_correlated`, `f_schlick_vec`, `fd_burley`) is composed,
 //! never mirrored. Its evaluated lobes arrive as plain arrays in the
-//! new [`BaseTerms`] type (`v1` defines no such struct), layer shapes
+//! new `BaseTerms` type (`v1` defines no such struct), layer shapes
 //! are new param types below; only the `window` device bind imports crate
 //! items (the shared compute entries from `decals.rs`).
 

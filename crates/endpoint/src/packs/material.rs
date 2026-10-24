@@ -1968,11 +1968,8 @@ mod tests {
         let server = server();
         let broken = BRICK.replace(r#""kind": "noise""#, r#""kind": "voronoi""#);
         assert_ne!(broken, BRICK, "the fixture carries the noise kind");
-        let err = MaterialFromGraphTool::invoke(
-            &server,
-            MaterialFromGraphArgs { graph: broken },
-        )
-        .expect_err("an unknown kind refuses");
+        let err = MaterialFromGraphTool::invoke(&server, MaterialFromGraphArgs { graph: broken })
+            .expect_err("an unknown kind refuses");
         assert_eq!(err.code, "bad_graph");
         assert!(
             err.message.contains("voronoi"),
@@ -1980,7 +1977,8 @@ mod tests {
             err.message
         );
         assert!(
-            err.message.contains("noise, tile, gradient, curve, warp, blend"),
+            err.message
+                .contains("noise, tile, gradient, curve, warp, blend"),
             "the refusal names the legal kinds: {}",
             err.message
         );
@@ -1995,3 +1993,29 @@ mod tests {
         assert_eq!(err.code, "bad_graph");
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 4,
+    name: PACK,
+    default_loaded: false,
+    tools: &[
+        "material.list",
+        "material.get",
+        "material.schema",
+        "material.preview",
+        "material.param",
+        "material.compare",
+        "material.set",
+        "material.graph.set",
+        "material.graph.get",
+        "material.from_graph",
+        "material.bake",
+    ],
+    build: pack,
+};

@@ -2,13 +2,13 @@
 //!
 //! Units: RGBA8 bytes row-major, one `u32` draw id per pixel, pixels for
 //! counts. A look pass is LIVE only when its on and off frames differ above
-//! [`PASS_EPSILON`] inside the pixels the pass paints ([`PassRegion`]); the
+//! `PASS_EPSILON` inside the pixels the pass paints ([`PassRegion`]); the
 //! region comes from the frame's own draw-id target, so the sky is exactly the
 //! pixels no draw covers and a lit surface is exactly a covered pixel.
 //! Determinism: same pixels give the same rows and the same report bytes
 //! twice; no clock, no float, no IO outside the writer. A pass with no pair,
 //! with ragged pixels, or whose region holds no pixel reads PROBE, never LIVE.
-//! Caller: [`super::harness`] (device leg) renders the pairs this file gates.
+//! Caller: `super::harness` (device leg) renders the pairs this file gates.
 
 #![forbid(unsafe_code)]
 

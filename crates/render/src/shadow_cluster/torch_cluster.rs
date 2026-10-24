@@ -3,7 +3,7 @@
 //! Owner: render lane; consumer is the parent shadow plus cluster submit.
 //! Units: pixels for centers and radii, meters for depth and range.
 //! Determinism: sorted cell-major order, stable per inputs.
-//! Errors: typed parent [`LightError`]; over-budget degrades, bad input fails.
+//! Errors: typed parent `LightError`; over-budget degrades, bad input fails.
 
 use super::*;
 use std::time::Instant;

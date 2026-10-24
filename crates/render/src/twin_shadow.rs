@@ -12,7 +12,7 @@
 //! state; callable from any thread. Determinism: fixed evaluation order
 //! with f32 arithmetic; same complete inputs give bit-identical outputs
 //! twice (pixels stay presentation, never the sim hash). Errors are typed
-//! [`TwinShadowError`]; pass code plus [`crate::shadow_cluster`] and
+//! `TwinShadowError`; pass code plus [`crate::shadow_cluster`] and
 //! [`crate::arena_day`] stay frozen, this file only binds them.
 //!
 //! Cost (base tier bars): sky 0.4 ms, sun shadow within its pass budget;
@@ -125,7 +125,7 @@ pub fn twin_sun_config() -> SunShadowConfig {
 /// texel budget `3 * 128 * 128`. Fails loudly only if the frozen sun-shadow
 /// constructor refuses the shape.
 /// Ownership: render lane; threading: pure constructor; determinism:
-/// same call gives equal passes twice; errors: [`TwinShadowError`] when
+/// same call gives equal passes twice; errors: `TwinShadowError` when
 /// the sun-shadow build rejects the config.
 pub fn twin_sun_pass() -> Result<SunShadowPass, TwinShadowError> {
     SunShadowPass::build(twin_sun_config())
@@ -139,7 +139,7 @@ pub fn twin_sun_pass() -> Result<SunShadowPass, TwinShadowError> {
 /// not a mirror of the production pixels.
 /// Ownership: render lane; threading: pure read of the pass splits;
 /// determinism: same pass plus depth gives the identical factor twice;
-/// errors: [`TwinShadowError`] when `view_depth` is not finite.
+/// errors: `TwinShadowError` when `view_depth` is not finite.
 pub fn cascade_shade(pass: &SunShadowPass, view_depth: f32) -> Result<f32, TwinShadowError> {
     if !view_depth.is_finite() {
         return Err(invalid("twin shadow view_depth is not finite"));
@@ -158,10 +158,10 @@ pub fn cascade_shade(pass: &SunShadowPass, view_depth: f32) -> Result<f32, TwinS
 /// forward submit encodes, so the merger binds one call instead of two.
 /// Units: meters in, 0..=2 band out. Ownership: render lane; threading:
 /// pure read of the pass splits; determinism: same pass plus depth gives
-/// the identical band twice; errors: [`TwinShadowError`] when `view_depth`
+/// the identical band twice; errors: `TwinShadowError` when `view_depth`
 /// is not finite. Production hookup (`present.rs` `bind_twin_shadow`):
 /// `queue.write_buffer(&shadow_buf, 0, &twin_shadow_uniform(&pass,
-/// twin_active_cascade(&pass, depth)?))` under [`twin_forward_wgsl`].
+/// twin_active_cascade(&pass, depth)?))` under `twin_forward_wgsl`.
 pub fn twin_active_cascade(
     pass: &SunShadowPass,
     view_depth: f32,
@@ -176,7 +176,7 @@ pub fn twin_active_cascade(
 /// so backfaces read 0.0 direct instead of negative light.
 /// Units: unit-free directions in, 0..=1 factor out. Ownership: render
 /// lane; threading: pure arithmetic; determinism: same vectors give the
-/// identical factor twice; errors: [`TwinShadowError`] for non-finite or
+/// identical factor twice; errors: `TwinShadowError` for non-finite or
 /// ~zero directions.
 pub fn sun_ndotl(sun_dir: [f32; 3], normal: [f32; 3]) -> Result<f32, TwinShadowError> {
     let sun = check_dir("sun_dir", sun_dir)?;
@@ -196,7 +196,7 @@ pub fn sun_ndotl(sun_dir: [f32; 3], normal: [f32; 3]) -> Result<f32, TwinShadowE
 /// radiance triples in and out. Ownership: render lane; threading: pure
 /// arithmetic, zero heap allocation on the success path; determinism:
 /// same inputs give bit-identical triples twice; errors:
-/// [`TwinShadowError`] for bad directions, non-finite depth, shadow
+/// `TwinShadowError` for bad directions, non-finite depth, shadow
 /// outside 0..=1, albedo outside 0..=1, or non-finite/negative colors.
 ///
 /// ```rust

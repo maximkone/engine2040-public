@@ -1157,20 +1157,24 @@ struct SessionTerrain {
 }
 
 /// The per-session terrain table: the set count (the revision) plus its mesh.
-static TERRAINS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<u64, (u64, SessionTerrain)>>> =
-    std::sync::OnceLock::new();
+static TERRAINS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<u64, (u64, SessionTerrain)>>,
+> = std::sync::OnceLock::new();
 
 /// The table, or the poisoned-lock refusal naming the restart.
 fn terrains() -> Result<
     std::sync::MutexGuard<'static, std::collections::BTreeMap<u64, (u64, SessionTerrain)>>,
     McpToolError,
 > {
-    TERRAINS.get_or_init(std::sync::Mutex::default).lock().map_err(|_| {
-        McpToolError::new(
-            "lock_poisoned",
-            "terrain table is poisoned; restart the door",
-        )
-    })
+    TERRAINS
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .map_err(|_| {
+            McpToolError::new(
+                "lock_poisoned",
+                "terrain table is poisoned; restart the door",
+            )
+        })
 }
 
 /// The bounding sphere of a cooked grid, in meters: center of the integer
@@ -1200,9 +1204,8 @@ fn cooked_bounds(positions_mm: &[[i32; 3]]) -> [f32; 4] {
             i64::from(point[1]) - center_mm[1],
             i64::from(point[2]) - center_mm[2],
         ];
-        let distance_sq = offsets[0] * offsets[0]
-            + offsets[1] * offsets[1]
-            + offsets[2] * offsets[2];
+        let distance_sq =
+            offsets[0] * offsets[0] + offsets[1] * offsets[1] + offsets[2] * offsets[2];
         radius_sq = radius_sq.max(distance_sq);
     }
     let radius_mm = u64::try_from(radius_sq)
@@ -1875,3 +1878,25 @@ mod tests {
         assert_eq!(still.code, "no_terrain");
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 21,
+    name: PACK,
+    default_loaded: false,
+    tools: &[
+        "world.terrain.bake",
+        "world.terrain.sample",
+        "world.terrain.paint",
+        "world.terrain.set",
+        "world.terrain.stats",
+        "world.scatter",
+        "world.wfc",
+    ],
+    build: pack,
+};

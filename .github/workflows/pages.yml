@@ -107,10 +107,10 @@ jobs:
           kill "$server"
           echo "$wasm is served as: $type"
           test "$type" = "application/wasm"
-      # TG10 (2026-10-24): seven of the crates this job documents are clean, each measured with
+      # TG10 (2026-10-24): eight of the crates this job documents are clean, each measured with
       # `cargo doc -p <crate> --no-deps --locked` (physfx with `--features rapier`): engine-core 2 -> 0,
       # engine-input 2 -> 0, engine-physfx 4 -> 0, engine-arena 21 -> 0, engine-net 108 -> 0,
-      # engine-combat 48 -> 0, engine-physics 82 -> 0. This gate runs early and on its own so a regressed
+      # engine-combat 48 -> 0, engine-physics 82 -> 0, engine-render 154 -> 0. This gate runs early and on its own so a regressed
       # crate fails by itself, whatever the handbook or the rest of the list does. Add a crate here only
       # after its measured count reaches 0.
       - name: rustdoc gate - the crates that are clean
@@ -119,7 +119,7 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: |
           set -euo pipefail
-          cargo doc --no-deps --lib --locked -p engine-core -p engine-input -p engine-arena -p engine-net -p engine-combat -p engine-physics -p engine-physfx --features engine-physfx/rapier
+          cargo doc --no-deps --lib --locked -p engine-core -p engine-input -p engine-arena -p engine-net -p engine-combat -p engine-physics -p engine-physfx -p engine-render --features engine-physfx/rapier
       # DOC1: mdBook, pinned to one release and checked against the digest GitHub lists for the asset.
       - name: mdBook (pinned release binary)
         shell: bash
@@ -159,10 +159,10 @@ jobs:
       # engine-combat 48, engine-assets 43, engine-arena 21, engine-physfx 4, engine-core 2, engine-input 2.
       # Re-measure the total with this exact step and the `rustdoc warnings:` line it prints; turn the flag on the
       # day that line reads 0.
-      # TG10 (2026-10-24): seven of those crates are clean and gated above (engine-core 2 -> 0,
+      # TG10 (2026-10-24): eight of those crates are clean and gated above (engine-core 2 -> 0,
       # engine-input 2 -> 0, engine-physfx 4 -> 0, engine-arena 21 -> 0, engine-net 108 -> 0,
-      # engine-combat 48 -> 0, engine-physics 82 -> 0). The remaining five measured 785 on run 40056976625
-      # over eight, which drops to 533 by that run's own per-crate numbers: engine-render 154, engine-anim 132,
+      # engine-combat 48 -> 0, engine-physics 82 -> 0, engine-render 154 -> 0). The remaining four measured 785 on run 40056976625
+      # over eight, which drops to 379 by that run's own per-crate numbers: engine-anim 132,
       # engine-game 119, engine-endpoint 82, engine-assets 46.
       - name: rustdoc for the crates a game author touches
         shell: bash

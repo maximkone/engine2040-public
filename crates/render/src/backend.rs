@@ -7,7 +7,7 @@
 //! offscreen/windowed entries plus the pilot-report path. Units: ms for CPU
 //! timings, MB for VRAM, frames/draws as counts. Determinism: selection is
 //! pure over (cli, env, pilot); the orbit plus report body are bit-identical
-//! x2; wall clock feeds CPU samples only. Errors: [`BackendError`] names the
+//! x2; wall clock feeds CPU samples only. Errors: `BackendError` names the
 //! bad backend label loudly. Budget: selection is O(1) with no allocation on
 //! the frame path (the report allocates its JSON once, cold only).
 

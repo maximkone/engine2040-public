@@ -23,14 +23,20 @@
 //! same package bytes; `project.run` rebuilds and refuses a package whose bytes
 //! moved. Errors: typed [`McpToolError`], every refusal names the key or the
 //! artifact and writes nothing.
+//!
+//! `modules` lists the packs a project wants. Every name must be one the door
+//! publishes: the door resolves the list when it reads the project and reports
+//! it in the build and run receipts. A pack the registry marks non-default
+//! loads only when the file names it; without the key the door's default set
+//! stands, exactly as before.
 
 use std::path::{Component, Path, PathBuf};
 
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
-use super::{PackDef, PackError, VerbSpec};
-use crate::build_game::{PACKAGE_MAGIC, build_fixture, fixture_briefs};
+use super::{KnownModule, PackDef, PackError, VerbSpec};
+use crate::build_game::{build_fixture, fixture_briefs, PACKAGE_MAGIC};
 use crate::mcp::{McpServer, McpToolError};
 use crate::tool_capabilities::CapabilityCard;
 
@@ -56,7 +62,7 @@ pub const DEFAULT_DIR: &str = "projects";
 /// Longest project name accepted.
 pub const MAX_NAME: usize = 64;
 
-/// Typed project manifest: the three keys this door owns.
+/// Typed project manifest: the keys this door owns.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ProjectManifest {
     /// Project name; plain ASCII letters, digits, `-` and `_`.
@@ -65,6 +71,21 @@ pub struct ProjectManifest {
     pub game: String,
     /// Packaged brief the project builds.
     pub fixture: usize,
+    /// Packs the file lists under `modules`, in declaration order, no repeats;
+    /// empty when the file names none, which is the door's default set.
+    pub modules: Vec<String>,
+}
+
+/// One module as the door resolved it: the pack name a project listed and
+/// whether a fresh session already advertises that pack.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ProjectModule {
+    /// Pack name, e.g. `geo`.
+    pub name: String,
+    /// True when the pack loads without `api.load`.
+    pub default_loaded: bool,
 }
 
 /// `project.new` args: the name, and where to put it.
@@ -121,6 +142,9 @@ pub struct ProjectBuildOutput {
     pub play_digest: String,
     /// Checkpoints the play folded.
     pub checkpoints: u32,
+    /// Packs the manifest listed, resolved against the registry; empty when it
+    /// lists none, which is the door's default set.
+    pub modules: Vec<ProjectModule>,
 }
 
 /// What `project.run` answers: the run, and the package it ran.
@@ -142,6 +166,9 @@ pub struct ProjectRunOutput {
     pub checkpoints: u32,
     /// True when the rebuild replayed the play exactly; a mismatch refuses.
     pub replay_matched: bool,
+    /// Packs the manifest listed, resolved against the registry; empty when it
+    /// lists none, which is the door's default set.
+    pub modules: Vec<ProjectModule>,
 }
 
 /// Parse the three keys this door owns; anything else refuses by key name.
@@ -166,7 +193,13 @@ fn parse_manifest(text: &str) -> Result<ProjectManifest, McpToolError> {
             )
         })?;
         let key = key.trim();
-        let value = value.trim().trim_matches('"');
+        let raw = value.trim();
+        // A module list is the one list key here, so it keeps its brackets.
+        if key == "modules" {
+            manifest.modules = parse_modules(raw)?;
+            continue;
+        }
+        let value = raw.trim_matches('"');
         match key {
             "name" => manifest.name = value.to_owned(),
             "game" => manifest.game = value.to_owned(),
@@ -186,14 +219,20 @@ fn parse_manifest(text: &str) -> Result<ProjectManifest, McpToolError> {
                     "bad_manifest",
                     format!(
                         "{MANIFEST_FILE} line {} sets `{other}`, which this door does not read; \
-                         recovery: keep name, game and fixture",
+                         recovery: keep name, game, fixture and modules",
                         index + 1
                     ),
                 ));
             }
         }
     }
-    if manifest.name.is_empty() || !manifest.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') || manifest.name.len() > MAX_NAME {
+    if manifest.name.is_empty()
+        || !manifest
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || manifest.name.len() > MAX_NAME
+    {
         return Err(McpToolError::new(
             "bad_name",
             format!(
@@ -214,6 +253,43 @@ fn parse_manifest(text: &str) -> Result<ProjectManifest, McpToolError> {
         ));
     }
     Ok(manifest)
+}
+
+/// The `modules` value: `["geo", "scene"]` on one line, names in declaration
+/// order, repeats dropped, a trailing comma fine. Resolution against the pack
+/// registry happens in [`read_project`].
+fn parse_modules(value: &str) -> Result<Vec<String>, McpToolError> {
+    let inner = value
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| {
+            McpToolError::new(
+                "bad_manifest",
+                format!(
+                    "modules `{value}` is not a list; recovery: write \
+                     modules = [\"scene\", \"geo\"]"
+                ),
+            )
+        })?;
+    let mut modules: Vec<String> = Vec::new();
+    for item in inner.split(',') {
+        let name = item.trim();
+        if name.is_empty() {
+            continue; // a trailing comma is fine
+        }
+        let name = name.trim_matches('"');
+        if name.is_empty() {
+            return Err(McpToolError::new(
+                "bad_manifest",
+                "a module name is not empty; recovery: name packs the door lists",
+            ));
+        }
+        let name = name.to_owned();
+        if !modules.contains(&name) {
+            modules.push(name);
+        }
+    }
+    Ok(modules)
 }
 
 /// The manifest text `project.new` writes.
@@ -244,19 +320,36 @@ fn checked_rel(rel: &str) -> Result<PathBuf, McpToolError> {
     Ok(path.to_path_buf())
 }
 
-/// Read and parse `<root>/<dir>/game.toml`.
-fn read_project(root: &Path, dir: &str) -> Result<ProjectManifest, McpToolError> {
+/// A project read from disk: its keys, and the registry rows its `modules` list names.
+struct LoadedProject {
+    manifest: ProjectManifest,
+    modules: Vec<KnownModule>,
+}
+
+/// Read and parse `<root>/<dir>/game.toml`, then resolve its modules.
+fn read_project(root: &Path, dir: &str) -> Result<LoadedProject, McpToolError> {
     let base = checked_rel(dir)?;
     let path = root.join(&base).join(MANIFEST_FILE);
     let text = std::fs::read_to_string(&path).map_err(|error| {
         McpToolError::new(
             "no_project",
-            format!(
-                "`{dir}` holds no {MANIFEST_FILE} ({error}); recovery: call project.new first"
-            ),
+            format!("`{dir}` holds no {MANIFEST_FILE} ({error}); recovery: call project.new first"),
         )
     })?;
-    parse_manifest(&text)
+    let manifest = parse_manifest(&text)?;
+    let modules = super::resolve_modules(&manifest.modules)?;
+    Ok(LoadedProject { manifest, modules })
+}
+
+/// The resolved rows as a receipt reports them.
+fn project_modules(modules: &[KnownModule]) -> Vec<ProjectModule> {
+    modules
+        .iter()
+        .map(|module| ProjectModule {
+            name: module.name.to_owned(),
+            default_loaded: module.default_loaded,
+        })
+        .collect()
 }
 
 /// Package path of one project, relative to the project root.
@@ -265,7 +358,9 @@ fn package_rel(dir: &str, name: &str) -> String {
 }
 
 /// Build the manifest's packaged brief: the five-minute play and its exact replay.
-fn build_project(manifest: &ProjectManifest) -> Result<crate::build_game::PlayableSlice, McpToolError> {
+fn build_project(
+    manifest: &ProjectManifest,
+) -> Result<crate::build_game::PlayableSlice, McpToolError> {
     if manifest.game != HEADLESS_GAME {
         return Err(McpToolError::new(
             "unsupported_game",
@@ -299,7 +394,12 @@ fn project_new(root: &Path, args: &ProjectNewArgs) -> Result<ProjectNewOutput, M
     };
     let base = checked_rel(&dir)?;
     let name = args.name.as_str();
-    if name.is_empty() || name.len() > MAX_NAME || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if name.is_empty()
+        || name.len() > MAX_NAME
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(McpToolError::new(
             "bad_name",
             format!(
@@ -339,8 +439,9 @@ fn project_new(root: &Path, args: &ProjectNewArgs) -> Result<ProjectNewOutput, M
 
 /// `project.build`: build the manifest and write its package.
 fn project_build(root: &Path, args: &ProjectDirArgs) -> Result<ProjectBuildOutput, McpToolError> {
-    let manifest = read_project(root, &args.dir)?;
-    let slice = build_project(&manifest)?;
+    let loaded = read_project(root, &args.dir)?;
+    let manifest = &loaded.manifest;
+    let slice = build_project(manifest)?;
     let bytes = slice.package_bytes();
     if bytes.len() > crate::build_game::PACKAGE_MAX_BYTES {
         return Err(McpToolError::new(
@@ -375,12 +476,14 @@ fn project_build(root: &Path, args: &ProjectDirArgs) -> Result<ProjectBuildOutpu
         digest: format!("{:016x}", engine_core::hash_bytes(&bytes)),
         play_digest: format!("{:016x}", slice.play_digest),
         checkpoints: slice.eval.checkpoints,
+        modules: project_modules(&loaded.modules),
     })
 }
 
 /// `project.run`: read the package, rebuild the project and play it headless.
 fn project_run(root: &Path, args: &ProjectDirArgs) -> Result<ProjectRunOutput, McpToolError> {
-    let manifest = read_project(root, &args.dir)?;
+    let loaded = read_project(root, &args.dir)?;
+    let manifest = &loaded.manifest;
     let package = package_rel(&args.dir, &manifest.name);
     let bytes = std::fs::read(root.join(&package)).map_err(|error| {
         McpToolError::new(
@@ -415,6 +518,7 @@ fn project_run(root: &Path, args: &ProjectDirArgs) -> Result<ProjectRunOutput, M
         // `build_project` refuses a play whose replay diverges, so a slice here
         // replayed exactly.
         replay_matched: true,
+        modules: project_modules(&loaded.modules),
     })
 }
 
@@ -544,6 +648,7 @@ mod tests {
         .expect("the project builds");
         assert_eq!(built.package, "projects/fracas/build/fracas.e2package");
         assert!(built.bytes > 0);
+        assert!(built.modules.is_empty(), "a plain manifest names no module");
         assert_eq!(built.digest.len(), 16);
         assert_eq!(built.play_digest.len(), 16);
         let bytes = std::fs::read(root.join(&built.package)).expect("package lands");
@@ -560,7 +665,10 @@ mod tests {
             },
         )
         .expect("the project runs");
-        assert_eq!(ran.digest, built.digest, "the run reads the package it built");
+        assert_eq!(
+            ran.digest, built.digest,
+            "the run reads the package it built"
+        );
         assert_eq!(ran.play_digest, built.play_digest);
         assert_eq!(ran.bytes, built.bytes);
         assert!(ran.replay_matched);
@@ -657,6 +765,95 @@ mod tests {
         assert_eq!(outside.code, "bad_path");
     }
 
+    /// F2P on the door side: `modules` was an unknown key before WG2.
+    #[test]
+    fn modules_resolve_against_the_registry_and_name_the_unknown_one() {
+        let text = "name = \"mods\"\ngame = \"engine-game:arena\"\nfixture = 0\n\
+                    modules = [\"geo\", \"scene\", \"geo\"]\n";
+        let manifest = parse_manifest(text).expect("modules parse");
+        assert_eq!(
+            manifest.modules,
+            ["geo", "scene"],
+            "declaration order, no repeats"
+        );
+        let resolved = crate::packs::resolve_modules(&manifest.modules).expect("both are packs");
+        assert_eq!(
+            project_modules(&resolved),
+            vec![
+                ProjectModule {
+                    name: "geo".to_owned(),
+                    default_loaded: false,
+                },
+                ProjectModule {
+                    name: "scene".to_owned(),
+                    default_loaded: true,
+                },
+            ]
+        );
+        // An unknown name refuses by code and lists every known pack, sorted,
+        // with whether a fresh session already advertises it.
+        let unknown =
+            crate::packs::resolve_modules(&["shell".to_owned()]).expect_err("shell is no pack");
+        assert_eq!(unknown.code, "unknown_module");
+        assert!(unknown.message.contains("`shell`"), "{}", unknown.message);
+        assert!(
+            unknown.message.contains("scene (default)"),
+            "{}",
+            unknown.message
+        );
+        assert!(
+            unknown.message.contains("geo (on demand)"),
+            "{}",
+            unknown.message
+        );
+        let names: Vec<&str> = crate::packs::known_modules()
+            .iter()
+            .map(|module| module.name)
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "the refusal lists the known names sorted");
+        // The receipts report the resolved list.
+        let root = scratch("modules");
+        let created = project_new(
+            &root,
+            &ProjectNewArgs {
+                name: "mods".to_owned(),
+                dir: None,
+                fixture: None,
+            },
+        )
+        .expect("writes");
+        let path = root.join(&created.manifest);
+        std::fs::write(&path, text).expect("manifest with modules");
+        let built = project_build(
+            &root,
+            &ProjectDirArgs {
+                dir: created.dir.clone(),
+            },
+        )
+        .expect("builds");
+        assert_eq!(built.modules, project_modules(&resolved));
+        // A value that is not a list refuses by its own key, before any build.
+        std::fs::write(
+            &path,
+            "name = \"mods\"\ngame = \"engine-game:arena\"\nfixture = 0\nmodules = \"geo\"\n",
+        )
+        .expect("manifest rewritten");
+        let bad = project_build(
+            &root,
+            &ProjectDirArgs {
+                dir: created.dir.clone(),
+            },
+        )
+        .expect_err("not a list");
+        assert_eq!(bad.code, "bad_manifest");
+        assert!(bad.message.contains("modules"), "{}", bad.message);
+        // No key is today's answer: no module named, the default set stands.
+        let plain = parse_manifest("name = \"mods\"\nfixture = 0\n").expect("parses");
+        assert!(plain.modules.is_empty());
+    }
+
     #[test]
     fn pack_registers_three_verbs_with_their_cards() {
         let pack = pack().expect("registers");
@@ -678,3 +875,17 @@ mod tests {
         let _ = &server;
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 14,
+    name: PACK,
+    default_loaded: false,
+    tools: &["project.new", "project.build", "project.run"],
+    build: pack,
+};

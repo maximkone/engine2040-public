@@ -2,10 +2,10 @@
 //!
 //! Owner: render lane; consumers WIN1/ED1 lit frame through the forward pass
 //! (`ao_full` below), ED1 viewport, Q1 captures; RL4/RL6/RP2 reuse
-//! [`LookFrame`] and [`LookError`]. Units: pixels for sizes and radii, meters
+//! `LookFrame` and `LookError`. Units: pixels for sizes and radii, meters
 //! for depth and falloff, ms in receipts. Determinism: row-major integer
 //! orders, fixed tap tables, f64 accumulation on the CPU oracle; same inputs
-//! give bit-identical bytes. Errors are typed [`LookError`]; the headless
+//! give bit-identical bytes. Errors are typed `LookError`; the headless
 //! twin names the missing device bind while the window build binds for real.
 //!
 //! Window GPU edge (documented, same crate): the submitter reuses

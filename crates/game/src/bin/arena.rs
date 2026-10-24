@@ -213,7 +213,7 @@ const LEGIONARY_EYE_NEAR_M: f32 = 0.30;
 /// `engine_endpoint`'s view host.
 const VIEW_LINE_PREFIX: &str = "arena view-line: ";
 /// Keys the window answers, shown in the window title and printed at boot.
-const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | ` console | [ ] slow-mo speed | R rematch | T title | C free cam | V first/third person (--legionary)";
+const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear at the foe, Q+E throw at the wall (--spear) | Shift block | Space dodge | Esc pause | ` console | [ ] slow-mo speed | R rematch | T title | C free cam | V first/third person (--legionary)";
 /// Surface frames between look-probe rounds under `--look-probes`.
 const LOOK_PROBE_EVERY: u32 = 120;
 /// Surface frames between fog plus contact refreshes under `--look-probes`.
@@ -1450,13 +1450,22 @@ impl ArenaApp {
         }
     }
 
-    /// The input with the throw bit set while Q is held and the spear is on. The sim masks the
-    /// bit when the match was built without a spear, so this never changes an old match.
+    /// The input with the throw bits set while the spear keys are held and the grapple is on. Q
+    /// throws at the fighters; Q with E throws at the world, so the spear passes them and sticks
+    /// in arena geometry (the wall swing). The sim masks both bits when the match was built
+    /// without a spear, so this never changes an old match.
     fn with_spear_key(&self, mut input: FighterInput) -> FighterInput {
         let q = PhysicalButton::Key(engine_input::map::Key::Q.0);
         if self.spear.on && self.pressed.contains(&q) {
-            input.buttons =
-                engine_input::Buttons(input.buttons.0 | engine_input::fighter::THROW_SPEAR);
+            let e = PhysicalButton::Key(engine_input::map::Key::E.0);
+            let world = if self.pressed.contains(&e) {
+                engine_input::fighter::THROW_SPEAR_WORLD
+            } else {
+                0
+            };
+            input.buttons = engine_input::Buttons(
+                input.buttons.0 | engine_input::fighter::THROW_SPEAR | world,
+            );
         }
         input
     }
@@ -4276,6 +4285,42 @@ mod tests {
         assert_ne!(old.stuck.first(), Some(&Some(1)), "and it misses the rival");
         assert_eq!(old.tethered, None, "so no tether forms with them");
     }
+    #[test]
+    fn q_throws_at_the_rival_and_q_with_e_aims_the_world() {
+        // The aim: a duel can reach a wall behind the enemy. Q keeps the lock-on throw, Q+E sets
+        // the world bit (the sim flies past fighters), and without the grapple neither bit leaves
+        // the window.
+        use engine_input::fighter::{THROW_SPEAR, THROW_SPEAR_WORLD};
+        use engine_input::map::Key;
+        let mut app = walking_session();
+        app.enable_spear(true, false, false).expect("the grapple turns on");
+        let human = app.human().expect("human slot");
+        app.set_pressed(key(Key::Q), true);
+        let plain = app.human_input(0, human);
+        assert_eq!(plain.buttons.0 & THROW_SPEAR, THROW_SPEAR, "Q throws");
+        assert_eq!(
+            plain.buttons.0 & THROW_SPEAR_WORLD,
+            0,
+            "Q alone aims the foe"
+        );
+        app.set_pressed(key(Key::E), true);
+        let aimed = app.human_input(1, human);
+        assert_eq!(
+            aimed.buttons.0 & (THROW_SPEAR | THROW_SPEAR_WORLD),
+            THROW_SPEAR | THROW_SPEAR_WORLD,
+            "Q+E carries both bits"
+        );
+        let mut off = walking_session();
+        off.set_pressed(key(Key::Q), true);
+        off.set_pressed(key(Key::E), true);
+        let none = off.human_input(0, human);
+        assert_eq!(
+            none.buttons.0 & (THROW_SPEAR | THROW_SPEAR_WORLD),
+            0,
+            "no grapple, no spear bits"
+        );
+    }
+
     #[test]
     fn the_lock_on_sets_only_the_facing_and_the_free_camera_leaves_it_alone() {
         let mut app = walking_session();

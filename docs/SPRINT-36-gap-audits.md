@@ -13,13 +13,28 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
 - [x] WG1 project: `game.toml` selects the game crate and bin - `game = "pkg:bin"`,
   workspace-validated, `build` compiles it, `run` runs it, and the four keys the
   engine does not read are refused by name. Landed `fdc848697`.
-- [ ] WG2 endpoint: a plugin registry, static and safe - today `git grep -i plugin -- crates`
+- [x] WG2 endpoint: a plugin registry, static and safe - today `git grep -i plugin -- crates`
   is 10 lines of comments; O3DE Gems and Fyrox dylib reload have the feature.
   Tier B. Size M. Owns `crates/endpoint/src/packs/`, `src/manifest.rs`.
   F2P: a new `modules = [...]` key resolves against a `linkme` slice and refuses an
   unknown name with the list; the test fails on HEAD (no key).
   P2P: `cargo test -p engine2040 --bins` stays green. Accept: unknown module refused,
   known module listed by `project.inspect`.
+  Part 2026-10-24 (`b39d5810b`): the registry is real - each pack publishes a `PackModule`
+  row through a `linkme` slice with an `order` slot, so `packs/mod.rs` keeps no hand list
+  (three rows stay hand-written with a reason: their files are held by other seats);
+  `linkme 0.3.37` (MIT OR Apache-2.0) is in `docs/DEPENDENCIES.md`. Runs 40075475576,
+  40076858070, 40075932855, 40076403374.
+  Decision: the `modules` key stays in the manifest as data (option 2). The root crate
+  must not gain an `engine-endpoint` edge - `packs` is `mcp`-gated and the headless resolve
+  would pull rmcp and tokio. So `src/manifest.rs` parses and stores `modules`, and the door
+  resolves the names on project load, refusing an unknown one with the list.
+  Done (`7406fbb60`): the key is known (9 keys), duplicates drop in declaration order, a
+  non-list refuses by its own key, and a keyless `summary()` is byte-identical (pinned
+  against the old string). `packs/mod.rs` exposes `known_modules()`/`resolve_modules()`,
+  `unknown_module` lists every known pack as `(default)` or `(on demand)`, and
+  `project.build`/`project.run` refuse before any work. Runs 40077683716, 40077805643,
+  40078231346, 40078688923.
 - [x] WG3 projects: a package lock - a package is only a Cargo crate in this one
   workspace; no store, no fetch check. Tier C. Size L. Owns `src/project.rs`.
   F2P: `build` refuses an unlocked dependency (new test). P2P: existing project
@@ -36,7 +51,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   `commands::document_digest`. The listing grew past its pin, so `6742abd90` trimmed
   5,232 chars of DTO docs (66,725 -> 61,493 against the 62,400 pin) with no name, type
   or refusal changed.
-- [ ] WG5 world/render: 3D terrain and foliage - `crates/assets/src/collider_cook.rs:17`
+- [x] WG5 world/render: 3D terrain and foliage - `crates/assets/src/collider_cook.rs:17`
   says heightfields are not cooked; no terrain hits in render, nav, assets, spatial.
   Tier B. Size L. Owns `crates/world/src/`, `crates/assets/src/`, `crates/render/src/`.
   F2P: a height grid cooks to a mesh plus collider and one `terrain.set` verb (new test).
@@ -53,6 +68,11 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   mesh id the render lane carries (runs 40064552893, 40063878939). Still open: physics
   does not consume `HeightfieldRecord` yet (only `crates/assets` names it), so the
   "blocks at the cooked height" accept is unproven.
+  Closed (`a8bbe9eb6`): `crates/physfx/src/terrain.rs` builds a Rapier heightfield (and a
+  mesh shape from the same integer grid) from the record's plain fields - no edge to
+  `engine-assets`; a ball dropped over a 3x3 grid rests at the cooked height at fixed dt,
+  malformed records are refused by name, and the same record gives bit-equal params.
+  Runs 40074061953, 40074450152.
 - [x] WG6 editor: a rule node that compiles to the existing Rhai text - the node graph
   has no script node (`crates/editor/src/graph.rs:26-31`); `crates/rules` runs text.
   Tier B. Size M. Owns `crates/editor/src/graph.rs`, `crates/rules/src/`.
@@ -204,6 +224,12 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   arena are at 0 and gated by their own `RUSTDOCFLAGS=-D warnings` step in `pages.yml`
   (green: pages run 40056976625). 785 left over 8 crates: render 154, anim 132, game 119,
   net 108, physics 96, endpoint 82, combat 48, assets 46.
+  Progress 2 (`ffa5acd4d`, `f29c293e3`, `ae6c72499`): net and combat are at 0, so six
+  crates are gated (pages run 40065341289, step 12 green).
+  Progress 3 (`c04c81122`): physics is at 0 in the default build and with `--features
+  rapier`, so seven crates are gated (pages run 40075622434, step 12 green). Left, 533:
+  render 154, anim 132, game 119, endpoint 82, assets 46. The pages job is still red at
+  step 14, `door-reference.md is stale`, which clears when the anim pack work lands.
 - [x] TG11 ci: the wasm matrix leg survives the thread tests - `islands::tests::par_*`
   spawn threads, which traps `unreachable` on wasm32-wasip1 (run 40056555531, exit 134
   after 160 tests), so the compare job prints `PHYSICS RESULT FAIL` even though all 20
@@ -309,7 +335,7 @@ TG5 TG6 TG7 TG8 TG9 TG11, LG1 LG2 LG3 LG4 LG5 LG6 LG7 LG8 LG9 LG10. Four rows st
   (another seat); it lands with them.
 - TG4: the endpoint coverage leg needs a green endpoint suite; `api.load` currently
   refuses at 78,957 chars against the 75,000 hard budget (the pack seat's in-flight work).
-- TG10: six crates gated; render 154, anim 132, game 119, physics 96, endpoint 82,
-  assets 46 remain (only physics and endpoint are free of another seat's edits).
+- TG10: seven crates gated; render 154, anim 132, game 119, endpoint 82,
+  assets 46 remain (only endpoint is free of another seat's edits).
 
 Do not reopen parked rows; the full tables are in the three research files.

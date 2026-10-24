@@ -8,9 +8,9 @@
 //! because the default render graph is std-only.
 //! Determinism: integer input, one division per vertex, no accumulation; the
 //! bound sphere comes from [`crate::draw::bound_sphere`].
-//! Budget: one terrain per frame, [`MAX_TERRAIN_TRIANGLES`]; buffer upload stays
+//! Budget: one terrain per frame, `MAX_TERRAIN_TRIANGLES`; buffer upload stays
 //! in the existing v1 path, this module only names the mesh and counts its
-//! triangles. Errors: typed [`TerrainError`], never a panic.
+//! triangles. Errors: typed `TerrainError`, never a panic.
 
 use crate::draw::{bound_sphere, SceneNode, SceneSnapshot};
 use engine_core::checked::{f32_from_f64, f64_from_u64};
@@ -39,7 +39,7 @@ pub enum TerrainError {
     NoMesh,
     /// The mesh's own shape is wrong; the reason is short and fixed.
     BadMesh(&'static str),
-    /// More triangles than [`MAX_TERRAIN_TRIANGLES`]; split the grid.
+    /// More triangles than `MAX_TERRAIN_TRIANGLES`; split the grid.
     TooLarge {
         /// Triangle count the mesh asked for.
         triangles: usize,
@@ -94,7 +94,7 @@ impl TerrainDraw {
     /// Take a cooked height-grid mesh: integer millimetres and q15 normals.
     ///
     /// Refuses a mesh whose parts disagree, an index past the last vertex, and a
-    /// count over [`MAX_TERRAIN_TRIANGLES`].
+    /// count over `MAX_TERRAIN_TRIANGLES`.
     pub fn from_cooked(
         positions_mm: &[[i32; 3]],
         normals_q15: &[[i16; 3]],

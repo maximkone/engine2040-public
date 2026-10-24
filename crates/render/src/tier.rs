@@ -2,8 +2,8 @@
 //!
 //! Owner: render lane (RT0). Consumer: RT9 tier-aware graph wiring.
 //! Units: bytes for the Ultra memory gate; tiers are labels only.
-//! Determinism: pure function of [`AdapterCaps`]; no clock, no ordering.
-//! Errors: typed [`TierError`]; forced tiers lacking features refuse loudly.
+//! Determinism: pure function of `AdapterCaps`; no clock, no ordering.
+//! Errors: typed `TierError`; forced tiers lacking features refuse loudly.
 //! Budget: probe is O(1) flag checks under the 0.1 ms startup budget; it
 //! never runs per frame and allocates nothing on the probe path.
 

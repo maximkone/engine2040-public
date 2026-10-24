@@ -70,14 +70,14 @@ pub mod material;
 pub mod memory;
 pub mod net;
 pub mod perf;
-/// Projects: project.new, project.build and project.run write the smallest
-/// real project, build its package and play it headless.
-pub mod project;
 /// Balance answers for one blow: the read-only `physics.read` verb.
 pub mod physics;
 /// Physics and render knobs an AI can set, with ranges, a replay tape and undo.
 pub mod physics_settings;
 pub mod play;
+/// Projects: project.new, project.build and project.run write the smallest
+/// real project, build its package and play it headless.
+pub mod project;
 pub mod replay;
 pub mod rules;
 pub mod scene;
@@ -116,7 +116,6 @@ pub const PACK_NAMES: [&str; 26] = [
     fx::PACK,
     anim::PACK,
     material::PACK,
-    memory::PACK,
     asset::PACK,
     rules::PACK,
     geo::PACK,
@@ -125,6 +124,7 @@ pub const PACK_NAMES: [&str; 26] = [
     net::PACK,
     perf::PACK,
     play::PACK,
+    memory::PACK,
     project::PACK,
     verify::PACK,
     physics::PACK,
@@ -147,7 +147,6 @@ pub const PACK_NAMES: [&str; 26] = [
     fx::PACK,
     anim::PACK,
     material::PACK,
-    memory::PACK,
     asset::PACK,
     rules::PACK,
     geo::PACK,
@@ -156,6 +155,7 @@ pub const PACK_NAMES: [&str; 26] = [
     net::PACK,
     perf::PACK,
     play::PACK,
+    memory::PACK,
     project::PACK,
     replay::PACK,
     physics::PACK,
@@ -505,6 +505,100 @@ where
     })
 }
 
+/// WG2: one row per pack, published by the pack's own module through a
+/// `linkme` distributed slice, so this file keeps no hand list of packs.
+///
+/// `order` is the contract slot: the registry sorts rows by it and never by
+/// link order, so the door advertises the same tools in the same order on
+/// every machine. `tools` names the pack's own tool constants; a build can
+/// register fewer of them (a feature-gated verb), never one the row omits.
+#[derive(Debug, Clone, Copy)]
+pub struct PackModule {
+    /// Contract slot, low first.
+    pub order: u16,
+    /// Pack name, the module's own `PACK`.
+    pub name: &'static str,
+    /// True when a fresh session advertises the pack without `api.load`.
+    pub default_loaded: bool,
+    /// The pack's tool names, in its registration order.
+    pub tools: &'static [&'static str],
+    /// The pack builder the registry calls.
+    pub build: fn() -> Result<PackDef, PackError>,
+}
+
+/// Every pack row in the binary, filled by the `#[distributed_slice]` static
+/// in each pack module.
+#[linkme::distributed_slice]
+pub static PACK_MODULES: [PackModule];
+
+// WG2 exception: these three packs are held by other seats (their files are
+// being edited), so their rows stay here until their owners publish them. Each
+// row is otherwise identical to a self-published one.
+/// Held row: `crates/endpoint/src/packs/anim.rs` is owned by the anim seat.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(PACK_MODULES)]
+static ANIM_ROW: PackModule = PackModule {
+    order: 3,
+    name: anim::PACK,
+    default_loaded: false,
+    tools: &[
+        "anim.graph.set",
+        "anim.graph.undo",
+        "anim.graph.get",
+        "anim.preview",
+        "anim.clip.trim",
+        "anim.clip.retime",
+        "anim.clip.mirror",
+        "anim.clip.undo",
+        "anim.rot.preview",
+        "anim.timeline.set",
+        "anim.retarget",
+        "anim.retarget.preview",
+    ],
+    build: anim::pack,
+};
+
+/// Held row: `crates/endpoint/src/packs/asset.rs` is held by the asset seat.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(PACK_MODULES)]
+static ASSET_ROW: PackModule = PackModule {
+    order: 5,
+    name: asset::PACK,
+    default_loaded: false,
+    tools: &[
+        "code.callers",
+        "asset.refs",
+        "asset.generate",
+        "asset.intake",
+        "asset.search",
+        "asset.impostor",
+        "asset.cook",
+        "asset.lint",
+        "asset.budget",
+    ],
+    build: asset::pack,
+};
+
+/// Held row: `crates/endpoint/src/packs/level_paint.rs` is held by its seat.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(PACK_MODULES)]
+static LEVEL_PAINT_ROW: PackModule = PackModule {
+    order: 22,
+    name: level_paint::PACK,
+    default_loaded: false,
+    tools: &["level.paint"],
+    build: level_paint::pack,
+};
+
 /// One verb pack: a name, a one-line summary, whether a fresh session
 /// advertises it, and its verbs in registration order.
 #[derive(Debug)]
@@ -558,6 +652,67 @@ impl PackDef {
     }
 }
 
+/// One module a project may name: the pack name as `game.toml` writes it and
+/// whether a fresh session already advertises the pack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnownModule {
+    /// Pack name, e.g. `geo`.
+    pub name: &'static str,
+    /// True when the pack loads without `api.load`; a non-default pack loads
+    /// only when a project lists it.
+    pub default_loaded: bool,
+}
+
+impl KnownModule {
+    /// `name (default)` or `name (on demand)`, one word of a refusal's list.
+    pub fn word(self) -> String {
+        let kind = if self.default_loaded {
+            "default"
+        } else {
+            "on demand"
+        };
+        format!("{} ({kind})", self.name)
+    }
+}
+
+/// Every pack the registry publishes, sorted by name, with its default flag.
+pub fn known_modules() -> Vec<KnownModule> {
+    let mut known: Vec<KnownModule> = PACK_MODULES
+        .iter()
+        .map(|row| KnownModule {
+            name: row.name,
+            default_loaded: row.default_loaded,
+        })
+        .collect();
+    known.sort_by_key(|module| module.name);
+    known
+}
+
+/// Resolve a project's `modules` list against the published rows. Every name
+/// must be a pack the registry knows; the answer keeps the manifest order and
+/// repeats nothing. An unknown name refuses `unknown_module` and lists every
+/// known pack with its default flag, so the fix is one word away.
+pub fn resolve_modules(names: &[String]) -> Result<Vec<KnownModule>, McpToolError> {
+    let known = known_modules();
+    let mut resolved: Vec<KnownModule> = Vec::with_capacity(names.len());
+    for name in names {
+        let Some(module) = known.iter().find(|module| module.name == name.as_str()) else {
+            let list: Vec<String> = known.iter().map(|module| module.word()).collect();
+            return Err(McpToolError::new(
+                "unknown_module",
+                format!(
+                    "`{name}` is not a module this door knows; recovery: name one of {}",
+                    list.join(", ")
+                ),
+            ));
+        };
+        if !resolved.contains(module) {
+            resolved.push(*module);
+        }
+    }
+    Ok(resolved)
+}
+
 /// Every pack with every verb, plus any registration errors. Built once
 /// per process ([`PackRegistry::shipped`]); never mutated afterwards.
 #[derive(Debug, Default)]
@@ -595,45 +750,16 @@ impl PackRegistry {
         self.packs.push(pack);
     }
 
-    /// The shipped registry: the packs of [`PACK_NAMES`], built once.
-    /// Registration errors never panic here; the guard test asserts the
+    /// The shipped registry: every published [`PackModule`] row, in contract
+    /// order. Registration errors never panic here; the guard test asserts the
     /// shipped list is clean.
     pub fn shipped() -> &'static Self {
         static SHIPPED: OnceLock<PackRegistry> = OnceLock::new();
         SHIPPED.get_or_init(|| {
-            let mut packs = vec![
-                scene::pack(),
-                break_::pack(),
-                fx::pack(),
-                anim::pack(),
-                material::pack(),
-                asset::pack(),
-                rules::pack(),
-                geo::pack(),
-                gym::pack(),
-                view::pack(),
-                net::pack(),
-                perf::pack(),
-                play::pack(),
-                memory::pack(),
-                project::pack(),
-            ];
-            // AD8: one contract slot, one owner. The verify pack serves the
-            // replay pair itself when the feature is on.
-            #[cfg(feature = "verify")]
-            packs.push(verify::pack());
-            #[cfg(not(feature = "verify"))]
-            packs.push(replay::pack());
-            packs.push(physics::pack());
-            packs.push(physics_settings::pack());
-            packs.push(web::pack());
-            packs.push(session::pack());
-            packs.push(codex::pack());
-            packs.push(world::pack());
-            packs.push(level_paint::pack());
-            packs.push(stage::pack());
-            packs.push(ui::pack());
-            packs.push(audio::pack());
+            // WG2: packs publish themselves; this only orders their rows.
+            let mut modules: Vec<&PackModule> = PACK_MODULES.iter().collect();
+            modules.sort_by_key(|module| module.order);
+            let packs = modules.iter().map(|module| (module.build)()).collect();
             Self::build(packs)
         })
     }
@@ -1583,5 +1709,77 @@ mod tests {
         .expect_err("unknown pack refuses");
         assert_eq!(refused.code, "unknown_pack");
         assert!(refused.message.contains("geo"));
+    }
+
+    /// WG2: every pack publishes its own row, so no hand list can drift. The
+    /// rows in `order` are the contract order, each row names its own pack and
+    /// default flag, and every verb the pack registers is named by its row in
+    /// the same order (a feature-gated verb is simply not registered here).
+    #[test]
+    fn published_rows_keep_the_contract_order_and_name_their_own_verbs() {
+        let mut modules: Vec<&PackModule> = PACK_MODULES.iter().collect();
+        modules.sort_by_key(|module| module.order);
+        let orders: Vec<u16> = modules.iter().map(|module| module.order).collect();
+        let mut unique = orders.clone();
+        unique.dedup();
+        assert_eq!(orders, unique, "no two packs share a contract slot");
+        let names: Vec<&str> = modules.iter().map(|module| module.name).collect();
+        assert_eq!(
+            names,
+            PACK_NAMES.to_vec(),
+            "the rows in slot order are the contract order"
+        );
+        let mut built: Vec<(&PackModule, PackDef)> = Vec::with_capacity(modules.len());
+        let mut faults: Vec<String> = Vec::new();
+        for module in &modules {
+            let pack = (module.build)().expect("a shipped pack builds");
+            if pack.name() != module.name {
+                faults.push(format!("{}: row names itself {}", module.name, pack.name()));
+            }
+            if pack.default_loaded() != module.default_loaded {
+                faults.push(format!(
+                    "{}: row says default_loaded {}, pack says {}",
+                    module.name,
+                    module.default_loaded,
+                    pack.default_loaded()
+                ));
+            }
+            let mut last: Option<usize> = None;
+            for tool in pack.verb_names() {
+                let Some(at) = module.tools.iter().position(|row| *row == tool) else {
+                    faults.push(format!("{}: row omits `{tool}`", module.name));
+                    continue;
+                };
+                if let Some(previous) = last {
+                    if at <= previous {
+                        faults.push(format!("{}: row puts `{tool}` out of order", module.name));
+                    }
+                }
+                last = Some(at);
+            }
+            built.push((module, pack));
+        }
+        // A row names its own verbs only: a borrowed name would advertise a
+        // tool the pack cannot serve.
+        for (module, _) in &built {
+            for (other, pack) in &built {
+                if other.name == module.name {
+                    continue;
+                }
+                for tool in module.tools {
+                    if pack.verb_names().contains(tool) {
+                        faults.push(format!(
+                            "{}: row borrows `{tool}` from {}",
+                            module.name, other.name
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            faults.is_empty(),
+            "pack rows drifted:\n{}",
+            faults.join("\n")
+        );
     }
 }

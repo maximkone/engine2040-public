@@ -5,7 +5,7 @@
 //! pixels for capture sizes, ms for bake time, EV100 stops for exposure.
 //! Determinism: row-major texel order, fixed tap-free closed form; same
 //! complete inputs give bit-identical bytes twice on one machine (pixels are
-//! presentation, never the sim hash). Errors are typed [`SkyError`]; the
+//! presentation, never the sim hash). Errors are typed `SkyError`; the
 //! headless twin names the missing window device while the window build
 //! binds the capture for real with 0 validation errors.
 //!

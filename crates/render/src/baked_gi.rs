@@ -1,13 +1,13 @@
 //! baked_gi: arena lightmaps with a validity mask + fighter SH probes (RL5).
 //!
-//! Owner: render lane; consumers WIN1/ED1 arena frame ([`sample_arena_frame`]
+//! Owner: render lane; consumers WIN1/ED1 arena frame (`sample_arena_frame`
 //! per static texel and per fighter) and Q1 captures (fixture + digest).
 //! Units: texels for the lightmap, meters for probe and sample positions, ms
 //! in receipts. Determinism: fixed row-major bake order over the `gi` math;
 //! same complete inputs give bit-identical bytes x2. Presentation only:
-//! pixels never enter the sim hash. Errors are typed [`BakedGiError`].
+//! pixels never enter the sim hash. Errors are typed `BakedGiError`.
 //!
-//! CODELAW law 1: SH lives in `ibl.rs` ([`IrradianceSh`], [`eval_sh`]) over
+//! CODELAW law 1: SH lives in `ibl.rs` (`IrradianceSh`, `eval_sh`) over
 //! the `gi.rs` basis; this module owns the mask, the tunnel seal and the
 //! frame bind, never a second SH path.
 
@@ -342,7 +342,7 @@ pub fn bind_gi(
 /// light and mask together and the forward pass never reads a poisoned texel.
 pub const LIGHTMAP_UPLOAD_BYTES_PER_TEXEL: usize = 4;
 /// Probe uniform stride in bytes: 9 RGB coefficients as vec4f32 (RGB in xyz,
-/// w pads) in grid order, so the GPU dot matches [`eval_sh`] term for term.
+/// w pads) in grid order, so the GPU dot matches `eval_sh` term for term.
 pub const PROBE_UNIFORM_BYTES_PER_PROBE: usize = 144;
 /// Graph resources the forward pass reads from the baked GI: lightmap
 /// texture, probe SH storage and seal flags. Owned here so the graph names
@@ -459,7 +459,7 @@ pub fn probe_seal_bytes_into(bake: &ArenaBake, out: &mut [u8]) -> Result<(), Bak
 /// alpha plus probe SH irradiance from device storage. Engine-owned code
 /// (no port markers); the forward pipeline inlines this chunk when the GI
 /// bind group lands. The SH basis matches [`crate::gi::sh_basis`] term for
-/// term (same literals as the IBL chunk); the CPU side stays on [`eval_sh`],
+/// term (same literals as the IBL chunk); the CPU side stays on `eval_sh`,
 /// so probes and the forward pass can never drift apart. Invalid texels
 /// (alpha 0) fall back to probe ambient, the same rule as
 /// [`sample_lightmap`]; the seal picks the probe index on the CPU

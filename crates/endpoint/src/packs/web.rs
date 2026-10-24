@@ -1813,3 +1813,17 @@ mod tests {
         assert!(missing.0.contains("spawn failed"), "{missing:?}");
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 18,
+    name: PACK,
+    default_loaded: false,
+    tools: &["build.web", "serve.web", "browser.capture", "browser.input"],
+    build: pack,
+};

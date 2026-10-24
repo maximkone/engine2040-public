@@ -1,6 +1,6 @@
 //! Debug line sink contract (RL58): line groups with a depth bias, a per-frame
 //! recorder a caller fills after the tick, the pure build of line vertices, and
-//! the one-buffer [`LineBatch`] the live pass draws. Std-only; no GPU pass and
+//! the one-buffer `LineBatch` the live pass draws. Std-only; no GPU pass and
 //! no Rapier backend here. The Rapier backend lives in `engine_physics::rapier`;
 //! the live sink is one call, `Presenter::push_debug_lines(&batch)`.
 
@@ -249,7 +249,7 @@ pub fn line_verts(
     Ok(out.len() - start)
 }
 
-/// One group's slice of a [`LineBatch`]: its name, depth bias and vertex range.
+/// One group's slice of a `LineBatch`: its name, depth bias and vertex range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatchGroup {
     /// Group name, stable for the run.

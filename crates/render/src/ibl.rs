@@ -5,16 +5,16 @@
 //! the BRDF LUT, roughness steps for the prefilter levels, steradians behind
 //! the SH projection weights. Determinism: fixed index orders, f64
 //! accumulation for the SH projection, bit-identical bytes for the same HDRI
-//! bytes on every run. Errors are typed [`IblError`]: a missing HDRI refuses
+//! bytes on every run. Errors are typed `IblError`: a missing HDRI refuses
 //! loudly, and device failures name the call or the validation scope.
 //!
-//! Cook-time bake (behind `v1`, needs the R2 [`crate::v1_ibl_shadow`] HDRI
-//! path): [`bake`] turns decoded HDRI bytes into an [`IblBake`] holding a
+//! Cook-time bake (behind `v1`, needs the R2 `crate::v1_ibl_shadow` HDRI
+//! path): `bake` turns decoded HDRI bytes into an `IblBake` holding a
 //! roughness-stepped prefiltered cubemap, 9-coefficient irradiance SH and a
 //! GGX split-sum BRDF LUT. The forward pass samples the bake on the CPU with
-//! [`sample_cube`], [`eval_sh`] and [`brdf_sample`], combined by
-//! [`shade_ibl`]; the WGSL sampling chunk for the RA1 forward pipeline is
-//! [`gpu::FORWARD_IBL_WGSL`], and [`IblBake::submit_gpu`] (behind `window`)
+//! `sample_cube`, `eval_sh` and `brdf_sample`, combined by
+//! `shade_ibl`; the WGSL sampling chunk for the RA1 forward pipeline is
+//! `gpu::FORWARD_IBL_WGSL`, and `IblBake::submit_gpu` (behind `window`)
 //! records the live material-chart pass binding the shared
 //! [`crate::gtao::LookFrame`] plus the full bake.
 
@@ -105,7 +105,7 @@ pub fn check_chart_target_size(w: u32, h: u32) -> Result<(), IblError> {
 
 /// Markers a compiled forward WGSL must contain to sample the IBL bake: the
 /// prefiltered cubemap, the BRDF LUT, the sampler, the SH uniform and the
-/// sampling entry. The window-only [`gpu::FORWARD_IBL_WGSL`] chunk carries
+/// sampling entry. The window-only `gpu::FORWARD_IBL_WGSL` chunk carries
 /// all five; the forward pipeline inlines that chunk when the material bind
 /// group lands.
 pub const FORWARD_IBL_MARKERS: [&str; 5] = [
@@ -275,7 +275,7 @@ pub struct IblReceipt {
 // ---------------------------------------------------------------------------
 
 /// Roughness-stepped cubemap: level `l` blurs with roughness
-/// `l / (LEVELS - 1)` per the R2 [`crate::v1_ibl_shadow::prefilter`] kernel.
+/// `l / (LEVELS - 1)` per the R2 `crate::v1_ibl_shadow::prefilter` kernel.
 /// Layout is level-major, face-major (`+X,-X,+Y,-Y,+Z,-Z`), row-major texels.
 #[derive(Clone, PartialEq, Debug)]
 pub struct PrefilterCube {
@@ -476,7 +476,7 @@ fn sample_level(cube: &PrefilterCube, level: usize, d: [f32; 3]) -> Result<[f32;
 
 /// Irradiance spherical harmonics: 9 RGB coefficients convolved with the
 /// clamped-cosine lobe (`A0 = PI`, `A1 = 2PI/3`, `A2 = PI/4` per Ram-Ng), so
-/// [`eval_sh`] returns irradiance directly. The basis is
+/// `eval_sh` returns irradiance directly. The basis is
 /// [`crate::gi::sh_basis`]; bake and eval share it by construction.
 #[derive(Clone, PartialEq, Debug)]
 pub struct IrradianceSh {
@@ -514,7 +514,7 @@ pub fn eval_sh(sh: &IrradianceSh, normal: [f32; 3]) -> Result<[f32; 3], IblError
 
 /// Baked ambient scaled by occlusion: `eval_sh` times `occlusion`.
 ///
-/// Owner: render lane; consumer: [`shade_ibl`] (open 1.0 here) plus the
+/// Owner: render lane; consumer: `shade_ibl` (open 1.0 here) plus the
 /// forward shader's baked term, which the live full-res value scales the
 /// same way. Units: linear irradiance with `occlusion` unitless `0..=1`
 /// (`1` open, `0` fully shadowed). Determinism: same inputs give the same
@@ -764,7 +764,7 @@ pub fn bake(hdri_bytes: &[u8]) -> Result<(IblBake, f64), IblError> {
     Ok((bake, ms))
 }
 
-/// Bake the full IBL set from an already built environment: [`bake`] after
+/// Bake the full IBL set from an already built environment: `bake` after
 /// its decode, and the arena day sky (`ibl_arena_env`) which has no file. The
 /// same map gives a bit-identical bake on every run. Returns the bake plus the
 /// wall ms (evidence only).
@@ -858,7 +858,7 @@ fn project_sh(env: &crate::v1_ibl_shadow::EnvMap) -> IrradianceSh {
 /// Forward-pass IBL shade with ambient-only occlusion: diffuse from the
 /// irradiance SH scaled by `occlusion`, specular left open (pipeline rule 4:
 /// AO scales ambient, never the final color; mirrors `eg12_ambient` in
-/// `shaders/forward_maps.wgsl`). Owner: render lane; consumer: [`shade_ibl`]
+/// `shaders/forward_maps.wgsl`). Owner: render lane; consumer: `shade_ibl`
 /// (open 1.0) plus the live forward frame through the same rule. Units:
 /// linear radiance, `occlusion` unitless `0..=1` (`1` open, `0` shut).
 /// Determinism: same inputs give the same triple on every run; no
@@ -959,7 +959,7 @@ pub const IBL_OFF_FLOOR: [f32; 3] = [0.20, 0.18, 0.16];
 /// frame that samples the same bake. Units: linear RGB radiance. Threading:
 /// pure with no IO, locks or clock; safe on any thread. Determinism: the
 /// same bake and inputs give the same triple on every run; no allocation,
-/// no clock. Errors: [`IblError::Invalid`] from [`shade_ibl`] for a bad
+/// no clock. Errors: [`IblError::Invalid`] from `shade_ibl` for a bad
 /// direction, color, metallic or roughness; no new validation here.
 #[cfg(feature = "v1")]
 pub fn ibl_on_off_diff(
@@ -997,7 +997,7 @@ pub fn live_ibl_should_sample(forward_binds_ibl: bool, bake_has_light: bool) -> 
 
 /// Bake carries light: the missing accessor the live decision needs.
 ///
-/// Owner: render lane; consumer: [`shade_ibl`] (exact-zero early-out below)
+/// Owner: render lane; consumer: `shade_ibl` (exact-zero early-out below)
 /// plus the live forward frame through [`live_ibl_should_sample`].
 /// Units: linear radiance in `source_average`, SH and cube texels; out is a
 /// verdict. Threading: pure with no IO, locks, clock, allocation or device;
@@ -1042,7 +1042,7 @@ pub fn bake_has_light(bake: &IblBake) -> bool {
 /// safe on any thread. Determinism: the same bake and inputs give the same
 /// gap on every run. Errors: [`IblError::Invalid`] when the bake carries
 /// no light (same rule as [`bake_has_light`]), when `normal` is not a
-/// finite nonzero direction via [`eval_sh`], or when `albedo` is not finite
+/// finite nonzero direction via `eval_sh`, or when `albedo` is not finite
 /// `0..=1`. Mirrors `ibl_diffuse` in `shaders/forward.wgsl` with metallic
 /// 0 (dielectric); init-time oracle only, never per frame, never hashed.
 #[cfg(feature = "v1")]
@@ -1118,7 +1118,7 @@ pub fn live_ibl_receipt(ibl_ms: f64, width: u32, height: u32) -> (u32, u32, u64)
 /// (no port markers); the forward pipeline inlines this chunk when
 /// the material bind group lands. The SH basis matches
 /// [`crate::gi::sh_basis`] term for term; coefficients pack as 9 vec4s
-/// (RGB in xyz, w pads) so the GPU dot matches [`eval_sh`].
+/// (RGB in xyz, w pads) so the GPU dot matches `eval_sh`.
 pub const FORWARD_IBL_WGSL: &str = r#"
 @group(1) @binding(0) var ibl_prefilter: texture_cube<f32>;
 @group(1) @binding(1) var ibl_brdf: texture_2d<f32>;
@@ -1198,7 +1198,7 @@ fn forward_ibl_chunk_probe() -> u64 {
 
 /// Pack the SH uniform image into caller-owned storage (exactly 144 bytes):
 /// 9 RGB coefficients as vec4s (RGB in xyz, w pads), same order as
-/// [`IrradianceSh::coeffs`], so the GPU dot matches [`eval_sh`] term for
+/// [`IrradianceSh::coeffs`], so the GPU dot matches `eval_sh` term for
 /// term. Slices in, slices out: steady-state submits pack into a reused
 /// scratch uniform and grow nothing.
 pub fn sh_uniform_bytes_into(sh: &IrradianceSh, out: &mut [u8; 144]) {
@@ -2217,7 +2217,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 /// Window submit over the cook (RL2 live): one wgpu chart pass sampling the
 /// prefilter array, the BRDF LUT and the SH uniform under the shared
 /// [`crate::gtao::LookFrame`] bind, with a float-target readback compared
-/// against the CPU [`shade_ibl`] reference. Owner: render lane; consumers
+/// against the CPU `shade_ibl` reference. Owner: render lane; consumers
 /// WIN1 (match material chart) and the ED1 viewport: both own one
 /// [`gpu::IblSubmitter`] and call this per bake with a validated frame.
 /// Units: texels, pixels, ms. Budget: [`gpu::IBL_SUBMIT_BUDGET_MS`] at test
@@ -2226,7 +2226,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 /// [`IBL_CHART_MAX_EDGE`], so a 1600x900 window submits 256x144).
 /// Determinism: fixed pixel
 /// order, exact cook texels in, same bytes out on every run; pixels are
-/// evidence only, never hashed. Errors: [`IblError`] names the bad input,
+/// evidence only, never hashed. Errors: `IblError` names the bad input,
 /// the device call or the validation scope; this path has no silent variant
 /// because the caller hands over a live device.
 /// Validate the frame plus the bake shape before the submitter sizes
@@ -2394,7 +2394,7 @@ fn map_chart_readback(device: &wgpu::Device, readback: &wgpu::Buffer) -> Result<
     Ok(())
 }
 
-/// Score the mapped chart readback against the CPU [`shade_ibl`]
+/// Score the mapped chart readback against the CPU `shade_ibl`
 /// reference: covered pixels plus the worst absolute and relative channel
 /// gaps. Pure pixel loop, no allocation; unmaps before returning.
 #[cfg(all(feature = "v1", feature = "gpu"))]

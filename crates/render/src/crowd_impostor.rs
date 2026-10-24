@@ -3,7 +3,7 @@
 //! Owner: render lane. Units: meters for distance, cells as counts.
 //! Determinism: integer order plus one `sqrt` only in the caller; this
 //! select uses `+ - * /` and comparisons, so the same bytes select the
-//! same path twice. Errors are typed [`CrowdImpostorError`]. Budget:
+//! same path twice. Errors are typed `CrowdImpostorError`. Budget:
 //! O(1) per seat over caller-owned slices, no allocation. Caller:
 //! `crowd_inst::CrowdBuilder::build` routes L2 seats here; the next
 //! slice binds the quad through `queue.write_buffer`.

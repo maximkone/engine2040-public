@@ -149,7 +149,7 @@ impl TrailRing {
     /// Modeled build cost in ms for `frames` ribbon builds, one per frame.
     ///
     /// Pure model, no wall clock: a build is charged four verts per resident
-    /// sample at [`TRAIL_NS_PER_VERT`], so every host reads the same number.
+    /// sample at `TRAIL_NS_PER_VERT`, so every host reads the same number.
     #[must_use]
     pub fn trail_ms(&self, frames: u32) -> f64 {
         let verts = u32::try_from(4 * self.len).unwrap_or(u32::MAX);

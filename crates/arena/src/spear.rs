@@ -5,6 +5,9 @@
 //! and either tethers the thrower to an enemy (both are then carried toward
 //! the spear's end point with momentum, damage on arrival or on a wall slam)
 //! or anchors on world geometry (the thrower zips to it, Spiderman style).
+//! Pressing `THROW_SPEAR_WORLD` with it aims past fighters at the geometry, so
+//! a wall behind the enemy can be the anchor; a body in the air may throw
+//! again at once, so anchors chain.
 //!
 //! Consumer: `Sim::step_with`, only for a match built from a
 //! [`MatchSpec`](crate::MatchSpec) with `spear` on; the window reads
@@ -21,7 +24,7 @@
 use engine_combat::fight::{FightState, Tables};
 use engine_core::fixed::Fixed;
 use engine_core::hash::Fnv64;
-use engine_input::fighter::THROW_SPEAR;
+use engine_input::fighter::{THROW_SPEAR, THROW_SPEAR_WORLD};
 use engine_input::FighterInput;
 use engine_physics::query::{swept_cast, CastCapsule, SweptHit};
 
@@ -100,6 +103,27 @@ const SLAM_DAMAGE: i64 = 60;
 const MAX_TETHER_DAMAGE: i64 = 200;
 /// Slowest body that counts as slammed when its move comes up short.
 const MIN_SLAM_SPEED: i64 = 60;
+/// Yank snap speed, mm per tick (24 m/s), row SG9: a thrower who holds back
+/// as the spear sticks reels the enemy in. The victim moves at this speed
+/// from the first pulled tick; there is no ramp, which is the snap.
+const YANK_SPEED: i64 = 400;
+/// Gap a yank closes to, mm: inside blade reach (`BLADE_REACH_MM` 1500), so
+/// the victim lands in front of the thrower's sword.
+const YANK_STOP: i64 = 1200;
+/// Yank ease: the victim covers at most a quarter of the gap left per tick,
+/// so the snap slows into the stop instead of overshooting it.
+const YANK_EASE_DIV: i64 = 4;
+/// Slowest closing speed of a yank, mm per tick, so the ease finishes.
+const YANK_MIN_SPEED: i64 = 30;
+/// Hit-stop when a yank hook sticks, ticks: the freeze sells the catch.
+const YANK_HITSTOP: u32 = 5;
+/// Stun a yanked victim holds through the pull and after the stop, ticks:
+/// no guard cuts the rope, and the thrower gets one free swing.
+const YANK_STUN: u32 = 20;
+/// Damage when a yank lands the victim, permille.
+const YANK_ARRIVE_DAMAGE: i64 = 20;
+/// Fold byte of a yank tether (a carry folds nothing extra).
+const YANK_TAG: u8 = 0xA7;
 /// Event vec capacity reserved once.
 const EVENT_CAP: usize = 4 * MAX_SLOTS;
 /// Fold tag byte.
@@ -205,6 +229,9 @@ pub struct Flight {
     pub origin_mm: [i32; 2],
     /// Flight direction `[x, z]` as a Q16 unit vector.
     pub dir: [i32; 2],
+    /// The throw was aimed at the world (`THROW_SPEAR_WORLD`): fighters are
+    /// not targets, so the spear flies past them and sticks in geometry.
+    pub world: bool,
 }
 
 /// A tether between a thrower and an enemy or a world anchor.
@@ -228,7 +255,11 @@ pub struct Tether {
     pub age: u16,
     /// True once the two bodies share one momentum.
     pub latched: bool,
-    /// Thrower speed after the last tick, mm per tick.
+    /// True when the hook reels the victim to a planted thrower (row SG9: the
+    /// thrower held back as the spear stuck); false is the carry.
+    pub yank: bool,
+    /// Thrower speed after the last tick, mm per tick (the victim's on a
+    /// yank, where the thrower stands).
     pub speed: u16,
 }
 
@@ -329,6 +360,7 @@ impl SpearState {
                         digest.write_i32(lane);
                     }
                     digest.write_u16(f.age);
+                    digest.write_bool(f.world);
                 }
                 Phase::Tether(t) => {
                     digest.write_u8(2);
@@ -338,6 +370,9 @@ impl SpearState {
                     }
                     digest.write_u16(t.age);
                     digest.write_bool(t.latched);
+                    if t.yank {
+                        digest.write_u8(YANK_TAG);
+                    }
                 }
             }
         }
@@ -383,7 +418,12 @@ impl SpearState {
         self.slots[slot].cooldown = cooldown;
         match self.slots[slot].phase {
             Phase::Idle => {
-                if edge && cooldown == 0 && env.fight.fighters[slot].can_act() {
+                // The floor cooldown paces a duel on the ground. A body in the
+                // air (the height channel carries it) may throw again at once,
+                // so a swing chains into the next anchor without dead time.
+                let airborne = env.rise.get(slot).is_some_and(|&rise| rise != 0)
+                    || pos_mm(env.states[slot].pos)[1] > 0;
+                if edge && (cooldown == 0 || airborne) && env.fight.fighters[slot].can_act() {
                     self.throw(slot, input, env);
                     self.fly(slot, env);
                 }
@@ -407,6 +447,7 @@ impl SpearState {
             age: 0,
             origin_mm: [body[0], body[2]],
             dir,
+            world: input.buttons.0 & THROW_SPEAR_WORLD != 0,
         });
         self.events.push(SpearEvent::Thrown {
             thrower: slot_id(slot),
@@ -429,7 +470,14 @@ impl SpearState {
             from[2] + f.vel_mm[2],
         ];
         let (to, geometry) = march_segment(env.world, env.rules, env.half_extent_m, from, full);
-        if let Some((victim, at)) = self.cast(slot, env, from, to) {
+        // A world-aimed throw has no fighter targets: it flies past them and
+        // anchors the geometry behind, which is how a duel reaches a wall.
+        let struck = if f.world {
+            None
+        } else {
+            self.cast(slot, env, from, to)
+        };
+        if let Some((victim, at)) = struck {
             self.strike(slot, victim, at, f, env);
         } else if geometry {
             self.anchor(slot, to, f);
@@ -512,6 +560,13 @@ impl SpearState {
             return;
         }
         hurt(env, victim, i64::from(HIT_DAMAGE));
+        let yank = holds_back(env.inputs[slot], f.dir);
+        if yank {
+            env.fight.hitstop = env.fight.hitstop.max(YANK_HITSTOP);
+            stun(env, victim, YANK_STUN);
+            self.slots[slot].drift_mm = [0, 0];
+            self.slots[victim].drift_mm = [0, 0];
+        }
         let travelled = isqrt(sq(at[0] - f.origin_mm[0]) + sq(at[2] - f.origin_mm[1]));
         let reach = i64::from(SPEAR_RANGE).max(travelled + i64::from(MIN_CARRY));
         let goal_mm = [0, 1].map(|lane| {
@@ -526,6 +581,7 @@ impl SpearState {
             dir: f.dir,
             age: 0,
             latched: false,
+            yank: false,
             speed: 0,
         });
         self.events.push(SpearEvent::Hit {
@@ -550,6 +606,7 @@ impl SpearState {
             dir: f.dir,
             age: 0,
             latched: false,
+            yank,
             speed: 0,
         });
         self.events.push(SpearEvent::Hit {
@@ -572,6 +629,9 @@ impl SpearState {
             Some(EndWhy::Down)
         } else if t.age >= TETHER_MAX {
             Some(EndWhy::Timeout)
+        } else if t.yank {
+            // A yanked victim is stunned: no guard is up to cut the rope.
+            None
         } else if combat.is_some_and(|c| c.parry_open_with(env.tables)) {
             stagger(env, slot);
             Some(EndWhy::Parry)
@@ -586,6 +646,34 @@ impl SpearState {
         }
         let me = xz(env.states[slot].pos);
         let mut mine = self.slots[slot].drift_mm;
+        if let (true, Some(v)) = (t.yank, victim) {
+            // Row SG9: the thrower plants, the victim snaps in at full speed
+            // and eases into the stop in front of the blade.
+            let you = xz(env.states[v].pos);
+            let left = isqrt(sq(me[0] - you[0]) + sq(me[1] - you[1])) - YANK_STOP;
+            let speed = (left / YANK_EASE_DIV)
+                .clamp(YANK_MIN_SPEED, YANK_SPEED)
+                .min(left.max(0));
+            let toward = unit(you, me);
+            let mut theirs = [0, 0];
+            push(&mut theirs, toward, speed);
+            stun(env, v, YANK_STUN);
+            mine = [0, 0];
+            self.slots[v].drift_mm = theirs;
+            t.latched = false;
+            t.age += 1;
+            t.speed = u16::try_from(speed).unwrap_or(u16::MAX);
+            if t.age % PULL_CUE_PERIOD == 1 {
+                self.events.push(SpearEvent::TetherPull {
+                    thrower: slot_id(slot),
+                    victim: t.victim,
+                    speed: t.speed,
+                });
+            }
+            self.slots[slot].drift_mm = mine;
+            self.slots[slot].phase = Phase::Tether(t);
+            return;
+        }
         if let Some(v) = victim {
             let you = xz(env.states[v].pos);
             let mut theirs = self.slots[v].drift_mm;
@@ -750,6 +838,14 @@ impl SpearState {
         if victim_blocked {
             let damage = (SLAM_DAMAGE + victim_speed / 6).min(MAX_TETHER_DAMAGE);
             self.end(slot, EndWhy::Wall, damage, env);
+        } else if t.yank {
+            // The yank lands when the gap is inside the stop; the thrower
+            // stands, so a thrower short move is not a wall here.
+            let me = xz(env.states[slot].pos);
+            let gap = isqrt(sq(me[0] - you[0]) + sq(me[1] - you[1]));
+            if gap <= YANK_STOP + YANK_MIN_SPEED {
+                self.end(slot, EndWhy::Arrived, YANK_ARRIVE_DAMAGE, env);
+            }
         } else if thrower_blocked {
             self.end(slot, EndWhy::Wall, 0, env);
         } else if t.latched && arrived(you, t) {
@@ -765,6 +861,10 @@ impl SpearState {
         };
         if let Some(v) = t.victim {
             hurt(env, usize::from(v), damage);
+            if t.yank {
+                // A yank stops dead in front of the blade, no slide past it.
+                self.slots[usize::from(v)].drift_mm = [0, 0];
+            }
         }
         self.slots[slot].phase = Phase::Idle;
         self.slots[slot].cooldown = TETHER_COOLDOWN;
@@ -976,6 +1076,18 @@ fn hurt(env: &mut Env<'_>, victim: usize, damage: i64) {
     hurt_fighter(env.fight, victim, amount);
 }
 
+/// True when the thrower's move wish points against the flight `dir` (Q16):
+/// holding back as the spear sticks asks for a yank, not a carry.
+fn holds_back(input: FighterInput, dir: [i32; 2]) -> bool {
+    i64::from(input.mx) * i64::from(dir[0]) + i64::from(input.mz) * i64::from(dir[1]) < 0
+}
+
+/// Hold `slot` in hit react for at least `ticks` (a yanked victim).
+fn stun(env: &mut Env<'_>, slot: usize, ticks: u32) {
+    let react = &mut env.fight.fighters[slot].react;
+    *react = (*react).max(ticks);
+}
+
 /// Parry stagger on a thrower whose spear or tether was parried.
 fn stagger(env: &mut Env<'_>, slot: usize) {
     let react = &mut env.fight.fighters[slot].react;
@@ -1174,6 +1286,98 @@ mod tests {
     }
 
     #[test]
+    fn a_world_aimed_throw_passes_the_enemy_and_anchors_the_wall() {
+        // The aim: an enemy stands in the line, and the throw is still aimed
+        // at the wall behind them, so the duel can reach a rope anchor.
+        let world =
+            MatchWorld::try_new(vec![Obstacle::aligned([0.0, 6.0], [3.0, 0.5])]).expect("world");
+        let aimed = |buttons: u8| {
+            let mut sim = sim_in(world.clone());
+            place(&mut sim, [0.0, -2.0], [0.0, 1.5]);
+            tick(&mut sim, [(buttons, 0), (0, 0)]);
+            let mut seen = events(&sim);
+            seen.extend(idle(&mut sim, 40, [(0, 0), (0, 0)]));
+            (sim, seen)
+        };
+        // Plain throw: the enemy is in the way and takes the spear.
+        let (_, plain) = aimed(THROW);
+        assert!(plain.iter().any(|e| matches!(
+            e,
+            SpearEvent::Hit {
+                thrower: 0,
+                victim: Some(1),
+                ..
+            }
+        )));
+        // World aim: the spear goes past the enemy and sticks the wall.
+        let (sim, over) = aimed(THROW | THROW_SPEAR_WORLD);
+        assert!(over.iter().any(|e| matches!(
+            e,
+            SpearEvent::Hit {
+                thrower: 0,
+                victim: None,
+                ..
+            }
+        )));
+        assert!(
+            !over.iter().any(|e| matches!(
+                e,
+                SpearEvent::Hit {
+                    victim: Some(_),
+                    ..
+                }
+            )),
+            "a world throw never targets a fighter"
+        );
+        assert_eq!(
+            sim.fight.fighters[1].hp_permille, 1000,
+            "the enemy it flew past is unhurt"
+        );
+        assert!(
+            sim.states[0].pos[2] > 2.0,
+            "the thrower was carried past the enemy: {}",
+            sim.states[0].pos[2]
+        );
+    }
+
+    #[test]
+    fn a_body_in_the_air_throws_again_without_waiting_for_the_cooldown() {
+        // The chain: while the height channel carries a body, a second anchor
+        // is one press away. On the floor the cooldown still paces the throw.
+        let chain = |height: bool| {
+            let mut sim = if height {
+                sim_swing(MatchWorld::empty())
+            } else {
+                sim_in(MatchWorld::empty())
+            };
+            place(&mut sim, [0.0, -4.0], [0.0, 2.0]);
+            // Off the floor and rising: what a rope swing leaves the body as.
+            if height {
+                sim.rise[0] = 500;
+                sim.states[0].pos[1] = 1.2;
+            }
+            tick(&mut sim, [(THROW, 0), (0, 0)]);
+            let mut seen = events(&sim);
+            seen.extend(idle(&mut sim, 14, [(0, 0), (0, 0)]));
+            assert!(matches!(slot(&sim, 0).phase, Phase::Tether(_)));
+            // Release, then throw again inside the floor cooldown.
+            tick(&mut sim, [(THROW, 0), (0, 0)]);
+            seen.extend(events(&sim));
+            if height {
+                sim.rise[0] = 500;
+            }
+            tick(&mut sim, [(0, 0), (0, 0)]);
+            tick(&mut sim, [(THROW, 0), (0, 0)]);
+            seen.extend(events(&sim));
+            seen.iter()
+                .filter(|e| matches!(e, SpearEvent::Thrown { thrower: 0, .. }))
+                .count()
+        };
+        assert_eq!(chain(true), 2, "the airborne body chains a second throw");
+        assert_eq!(chain(false), 1, "on the floor the cooldown still holds");
+    }
+
+    #[test]
     fn spear_miss_leaves_no_tether() {
         let mut sim = sim_in(MatchWorld::empty());
         place(&mut sim, [-2.0, 0.0], [-8.0, 8.0]);
@@ -1212,6 +1416,98 @@ mod tests {
             "cooldown {} still runs",
             slot(&sim, 0).cooldown
         );
+    }
+
+    /// Throw at slot 1 holding back until the hook sticks, then let go: the
+    /// events from the throw on and the tick of the hit.
+    fn yank_from(sim: &mut Sim, victim_buttons: u8) -> (Vec<SpearEvent>, Option<u32>) {
+        let back = (0, 0, 0, -100);
+        tick_move(sim, [(THROW, 0, 0, -100), (victim_buttons, 0, 0, 0)]);
+        let mut seen = events(sim);
+        let mut hit_tick = None;
+        for _ in 0..90 {
+            let hooked = seen.iter().any(|e| matches!(e, SpearEvent::Hit { .. }));
+            if hooked && hit_tick.is_none() {
+                hit_tick = Some(sim.tick);
+                assert!(sim.fight.hitstop > 0, "the catch freezes the fight");
+            }
+            let me = if hooked { (0, 0, 0, 0) } else { back };
+            tick_move(sim, [me, (victim_buttons, 0, 0, 0)]);
+            seen.extend(events(sim));
+        }
+        (seen, hit_tick)
+    }
+
+    #[test]
+    fn yank_reels_the_hooked_enemy_to_a_planted_thrower() {
+        let mut sim = sim_in(MatchWorld::empty());
+        place(&mut sim, [0.0, -4.0], [0.0, 4.0]);
+        let mut landed = None;
+        let back = (0, 0, 0, -100);
+        tick_move(&mut sim, [(THROW, 0, 0, -100), (0, 0, 0, 0)]);
+        let mut seen = events(&sim);
+        for _ in 0..90 {
+            let hooked = seen.iter().any(|e| matches!(e, SpearEvent::Hit { .. }));
+            let me = if hooked { (0, 0, 0, 0) } else { back };
+            tick_move(&mut sim, [me, (0, 0, 0, 0)]);
+            let now = events(&sim);
+            if landed.is_none() && now.iter().any(|e| matches!(e, SpearEvent::TetherEnd { .. })) {
+                let z = [sim.states[0].pos[2], sim.states[1].pos[2]];
+                landed = Some((sim.tick, sim.fight.fighters[1].react, z));
+            }
+            seen.extend(now);
+        }
+        let hit = seen
+            .iter()
+            .position(|e| matches!(e, SpearEvent::Hit { victim: Some(1), .. }))
+            .expect("the hook sticks");
+        let end = seen[hit..]
+            .iter()
+            .find_map(|e| match *e {
+                SpearEvent::TetherEnd { why, damage_permille, .. } => Some((why, damage_permille)),
+                _ => None,
+            })
+            .expect("the yank ends");
+        assert_eq!(end, (EndWhy::Arrived, 20), "landed, not cut");
+        let (tick, react, z) = landed.expect("a landing tick");
+        assert!(tick < 55, "a snap, not a float: landed at tick {tick}");
+        assert!(react > 10, "the victim is still stunned on landing: {react}");
+        let gap = z[1] - z[0];
+        assert!(gap > 0.9 && gap < 1.5, "in front of the blade: {gap}");
+        assert!(z[1] < 0.0, "the victim came to the thrower: {z:?}");
+        assert_eq!(slot(&sim, 1).drift_mm, [0, 0], "no slide past the blade");
+    }
+
+    #[test]
+    fn a_held_guard_cannot_cut_a_yank() {
+        // Back turned with the guard up: a carry would be cut (the test
+        // above), a yank stuns the guard down and lands.
+        let mut sim = sim_in(MatchWorld::empty());
+        place(&mut sim, [0.0, -4.0], [0.0, 4.0]);
+        idle(&mut sim, 12, [(0, 0), (BLOCK, 0)]);
+        let (seen, hit) = yank_from(&mut sim, BLOCK);
+        assert!(hit.is_some(), "the hook sticks in a turned back");
+        let ends: Vec<EndWhy> = seen
+            .iter()
+            .filter_map(|e| match *e {
+                SpearEvent::TetherEnd { why, .. } => Some(why),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends.first(), Some(&EndWhy::Arrived), "{ends:?}");
+    }
+
+    #[test]
+    fn no_back_hold_keeps_the_carry() {
+        let mut sim = sim_in(MatchWorld::empty());
+        place(&mut sim, [0.0, -4.0], [0.0, 2.0]);
+        tick(&mut sim, [(THROW, 0), (0, 0)]);
+        idle(&mut sim, 12, [(0, 0), (0, 0)]);
+        let Phase::Tether(t) = slot(&sim, 0).phase else {
+            panic!("tethered");
+        };
+        assert!(!t.yank);
+        assert_eq!(sim.fight.fighters[1].react, 0, "a carry stuns nobody");
     }
 
     #[test]

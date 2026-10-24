@@ -107,7 +107,7 @@ pub const SKIP_PREFIX: &str = "SKIPPED";
 /// counter; the counter makes the routed skips visible, not the total.
 static SKIP_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Routed skips so far in this process (see [`SKIP_COUNT`]).
+/// Routed skips so far in this process (see `SKIP_COUNT`).
 pub fn skip_count() -> u64 {
     SKIP_COUNT.load(Ordering::Relaxed)
 }

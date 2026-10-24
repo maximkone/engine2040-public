@@ -1,6 +1,6 @@
 //! The after-blit debug line pass: one textured-quad draw over the blit view.
 //!
-//! The staged [`LineBatch`] becomes thin screen-space quads and rides the
+//! The staged `LineBatch` becomes thin screen-space quads and rides the
 //! overlay pipeline (see [`super::live::live_overlay_pipeline`]); no new render
 //! target and no depth attachment. A group's `depth_bias_permille` orders
 //! nothing here because the pass draws after the blit with no depth test; the

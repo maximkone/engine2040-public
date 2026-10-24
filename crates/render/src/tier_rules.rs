@@ -1,10 +1,10 @@
 //! tier_rules: a GPU's facts to a quality tier through a first-match rule table (GS11).
 //!
-//! The shape is Chromium's `gpu_control_list`. A [`Rule`] names what it matches in a
-//! [`Cond`] (vendor id, device kind, a VRAM range in MB, a driver version with an operator),
+//! The shape is Chromium's `gpu_control_list`. A `Rule` names what it matches in a
+//! `Cond` (vendor id, device kind, a VRAM range in MB, a driver version with an operator),
 //! may list `except` conditions that void the match, and carries the result: a tier or a
 //! refusal, plus named workarounds. The first rule that matches wins. The table is data an AI
-//! can edit; [`decide`] stays a plain loop.
+//! can edit; `decide` stays a plain loop.
 //!
 //! Defaults, in table order: a CPU adapter is refused, an integrated GPU is Potato, a discrete
 //! GPU under 4 GB is Potato, a discrete GPU with 4 GB or more is Comfort, anything else
@@ -12,9 +12,9 @@
 //! rule: it is the player's choice.
 //!
 //! Units: VRAM in MB, driver versions as four numbers, vendor ids as PCI ids.
-//! Determinism: a pure function of [`GpuFacts`] over a constant table; no clock, no float, no
+//! Determinism: a pure function of `GpuFacts` over a constant table; no clock, no float, no
 //! tick. The tier is presentation and never enters a hash.
-//! Caller: the adapter pick (GS6) reads [`decide`] after it chooses a GPU; its VRAM comes from
+//! Caller: the adapter pick (GS6) reads `decide` after it chooses a GPU; its VRAM comes from
 //! the OS query (GS13).
 
 use crate::adapter::AdapterKind;

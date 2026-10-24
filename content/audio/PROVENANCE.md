@@ -2,7 +2,7 @@
 
 First measured ears in the engine. The 8-octant synthetic filter in
 `crates/audio/src/hrtf.rs` stays the shipped path (flag off, bit for bit);
-a 48-direction measured sphere sits beside it behind
+a 108-direction measured sphere sits beside it behind
 `HrtfProcessor::set_measured_sphere`.
 
 ## Licence read live from the download (2026-10-24)
@@ -34,27 +34,29 @@ a 48-direction measured sphere sits beside it behind
 
 ## The subset taken
 
-- Grid: **16 azimuth columns** (22.5 deg apart, azimuth 0 = straight ahead,
-  clockwise = right) x **3 elevation rows** (-40, 0, +40 deg) = **48
+- Grid: **36 azimuth columns** (10 deg apart, azimuth 0 = straight ahead,
+  clockwise = right) x **3 elevation rows** (-40, 0, +40 deg) = **108
   directions**. Azimuth wraps; elevation clamps at the poles.
-- Each cell is the measured HRIR nearest to the grid node: exact at
-  elevation 0 for every column it shares with the compact set, and within
-  3.5 deg of the node at +-40 deg (the compact set's step is 6.4 deg
-  there). Left half-sphere cells with no measurement of their own are the
-  same measurement with the two ears swapped (KEMAR compact covers
-  0..180 deg only).
+- Each cell is the measured HRIR nearest to the grid node: within 2.5 deg at
+  elevation 0 (the compact set steps 5 deg there) and within 3.2 deg at
+  +-40 deg (the compact set steps 6.4 deg there). Left half-sphere cells with
+  no measurement of their own are the same measurement with the two ears
+  swapped (KEMAR compact covers 0..180 deg only).
 - Per ear: **16 taps**, starting 3 samples before that ear's peak (the
   peak is the stable arrival marker in a 128-sample compact IR; a level
   threshold is not). Both ears of a direction are scaled by one common
   factor, so the ILD is the measured one. The ITD is the measured arrival
   difference in samples, never a delay law.
 - Rate: **44.1 kHz** (the capture rate).
-- Format: `kemar-hrir-sphere.bin`, 3136 bytes, sha256
-  `4368d04b97ac49c5da3c76e681cb80e7897a1af4011216a75d05e6abce4ceaba`:
-  one ASCII header line `HRIRSPH1 44100 16 16 3 -40 0 40`, then 16 `u16`
+- Format: `kemar-hrir-sphere.bin`, **7016 bytes**, sha256
+  `c2df052d4002eb3065d6cf1bb15a0ba8f06d6f73b7a3a6e6e23cb6b18222e522`:
+  one ASCII header line `HRIRSPH1 44100 16 36 3 -40 0 40`, then 36 `u16`
   azimuth columns in tenths of a degree, then the taps as little-endian
-  `i16` in `[elevation][azimuth][ear][tap]` order (48 x 2 x 16 values).
+  `i16` in `[elevation][azimuth][ear][tap]` order (108 x 2 x 16 values).
   Re-readable with `readU16LE`/`readI16LE` and no new dependency.
+- Same licence as the 48-direction subset it replaces (same page, same
+  download): no new bytes from any other source, so no new licence line is
+  needed; the file above is the whole dataset.
 - The same numbers are compiled into `hrtf.rs` as `SPHERE_TAPS` /
   `SPHERE_ONSETS` const tables (no file IO on the audio thread), and the
   test `dataset_bin_matches_compiled_table` parses the committed `.bin`
@@ -62,16 +64,37 @@ a 48-direction measured sphere sits beside it behind
 
 ## Measured, on the tree that ships (44.1 kHz, 16 taps)
 
-- Held-out direction error (every 4th azimuth column dropped, rebuilt as
-  the midpoint of its neighbours, RMS energy error over 16 taps per ear):
-  **6.29 dB RMS, 10.92 dB worst, 24 ears**.
-- ITD error against the measured arrivals, same held-out set: **3.67
-  samples mean, 12.00 worst**.
-- 8 kHz band (one bin of the 16-tap DFT), held-out directions: **10.75 dB
-  worst off**. The row's bar is 6 dB, so that bar is **not met** at this
-  grid density; it needs a denser azimuth grid (or a magnitude/phase
-  split), which is the follow-on.
-- Query cost: **0.35 us/query** (mean of 20 000, measured on this PC).
+Held-out protocol (unchanged from the 48-direction run): drop every 4th
+azimuth column, rebuild it as the midpoint of its neighbours, score against
+the measurement that was dropped. "err/sig" is
+`10 log10(err energy / signal energy)`: negative is good, 0 dB means the
+error is as loud as the signal.
+
+| grid | ears | err/sig signed rms | worst err/sig | 8 kHz worst | ITD mean | ITD worst |
+|---|---|---|---|---|---|---|
+| 16 az x 3 el (48 dirs, 22.5 deg) | 24 | +6.29 dB | +4.16 dB | 10.75 dB | 3.67 | 12.00 |
+| **36 az x 3 el (108 dirs, 10 deg)** | **54** | **+11.67 dB** | **-0.12 dB** | **18.13 dB** | **0.96** | **4.00** |
+| 72 az x 3 el (216 dirs, 5 deg) | 108 | +17.40 dB | +5.93 dB | 12.77 dB | 0.48 | 4.50 |
+
+Read the signed rms as an error *ratio*: at 16 columns it is above the
+signal, at 36 every single rebuild is quieter than the measurement (worst
+-0.12 dB), and at 72 it climbs again only because the dropped columns now
+land 5 deg from a measurement the 6.4-degree compact set repeats.
+
+- **The 6 dB 8 kHz bar is still not met.** 16 columns: 10.75 dB (a loud
+  band rebuilt too quietly); 36 columns: 18.13 dB; 72 columns: 12.77 dB.
+  Density does not fix it, because at 8 kHz the pinna response flips phase
+  across a 10-20 degree neighbour gap, so a linear tap blend cancels a band
+  the measured direction carries. Which columns are dropped changes with
+  density, so the three worst values are not the same cell. The remaining
+  routes are magnitude/phase (log-spectral) interpolation or a finer
+  measured set in elevation; neither is done here.
+- Baseline ITD (16 columns) is the figure the row recorded at landing;
+  the re-run on the same table reads 4.17 mean / 14.50 worst, so the
+  improvement is measured on both readings.
+- Query cost: **0.19 us/query** (mean of 20 000, measured on the CI runner).
+- State: `HrtfProcessor` stays under 4 KB (test asserts it); the table is
+  code, not processor state.
 
 ## What is not SOFA
 
@@ -84,6 +107,6 @@ export is open, not hidden.
 
 | Path | Bytes | What |
 |---|---|---|
-| `content/audio/kemar-hrir-sphere.bin` | 3136 | 48 directions, 16 taps, 44.1 kHz, header + i16 |
+| `content/audio/kemar-hrir-sphere.bin` | 7016 | 108 directions, 16 taps, 44.1 kHz, header + i16 |
 | `content/audio/PROVENANCE.md` | this file | licence read, subset, numbers |
 | `crates/audio/src/hrtf.rs` | | `measured_hrir_at`, `set_measured_sphere`, const table, tests |

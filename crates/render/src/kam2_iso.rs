@@ -1,7 +1,7 @@
 //! Fixed 2.5D projection for the ground field.
 //!
 //! One view direction forever: yaw 45 degrees, pitch atan(0.5). A square
-//! world tile is [`TILE_WORLD`] wide and covers 64 x 32 screen pixels at 100%
+//! world tile is `TILE_WORLD` wide and covers 64 x 32 screen pixels at 100%
 //! zoom. Screen pixels start at the viewport's top-left and y grows down.
 //!
 //! The locked pitch foreshortens a square tile by `sin(pitch)`, not 0.5, so

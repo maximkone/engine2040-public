@@ -5,7 +5,7 @@
 //! pixels for frame sizes and decal footprints, ticks at 60 Hz for fades,
 //! ms in receipts only. Determinism: integer pixel orders, stable slot
 //! order, same inputs give identical bytes; wall clock feeds receipts only.
-//! Errors are typed [`DecalError`]; the headless twin names the missing
+//! Errors are typed `DecalError`; the headless twin names the missing
 //! window device while the window build binds the pool for real with 0
 //! validation errors.
 

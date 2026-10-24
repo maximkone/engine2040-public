@@ -216,3 +216,117 @@ test("a bake op with no map flag is refused recipe.no_maps", () => {
 function sha256Text(text) {
   return createHash("sha256").update(text).digest("hex");
 }
+
+// GEO15: one warm Blender per batch. The three cooking tests run the pinned
+// Blender and skip without it; the two refusal tests never start it.
+function batch(dir, count, crashAt) {
+  const items = [];
+  for (let i = 0; i < count; i += 1) items.push({ recipe: RECIPE, out: join(dir, `warm${i}.glb`) });
+  const manifest = join(dir, "batch.json");
+  writeFileSync(manifest, JSON.stringify({ recipes: items }));
+  const args = ["--batch", manifest];
+  if (crashAt !== undefined) args.push("--crash-at", String(crashAt));
+  const r = spawnSync("node", [script, ...args], { encoding: "utf8" });
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr, items };
+}
+
+test("eight recipes in one warm batch beat eight cold cooks and keep one glb sha", { skip: !existsSync(pin.exe) && "pinned Blender not installed" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-batch-"));
+  try {
+    const cold = join(dir, "cold.glb");
+    const coldStarted = performance.now();
+    const rc = cook("--recipe", RECIPE, "--out", cold);
+    const coldSeconds = (performance.now() - coldStarted) / 1000;
+    assert.equal(rc.code, 0, rc.out);
+    const coldSha = JSON.parse(readFileSync(`${cold}.json`, "utf8")).output;
+
+    const batchStarted = performance.now();
+    const r = batch(dir, 8);
+    const batchSeconds = (performance.now() - batchStarted) / 1000;
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^ok batch 8 restarts=0 seconds=\d+\.\d\d\n$/m, r.stdout);
+    assert.ok(batchSeconds < 8 * coldSeconds, `batch ${batchSeconds.toFixed(2)} s vs 8 cold cooks ${(8 * coldSeconds).toFixed(2)} s`);
+    for (const item of r.items) {
+      const side = JSON.parse(readFileSync(`${item.out}.json`, "utf8"));
+      assert.equal(side.output, coldSha, `${item.out} equals the fresh-process glb`);
+    }
+    console.log(`blender-batch: 8 warm recipes in ${batchSeconds.toFixed(2)} s, one cold cook ${coldSeconds.toFixed(2)} s`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a crash mid-batch restarts once, reports it and keeps every glb sha", { skip: !existsSync(pin.exe) && "pinned Blender not installed" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-batch-"));
+  try {
+    const cold = join(dir, "cold.glb");
+    const rc = cook("--recipe", RECIPE, "--out", cold);
+    assert.equal(rc.code, 0, rc.out);
+    const coldSha = JSON.parse(readFileSync(`${cold}.json`, "utf8")).output;
+    const r = batch(dir, 4, 2);
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^ok batch 4 restarts=1 seconds=\d+\.\d\d\n$/m, r.stdout);
+    assert.ok(r.stderr.includes("blender.batch_restarted before recipe 2"), r.stderr);
+    for (const item of r.items) {
+      assert.equal(JSON.parse(readFileSync(`${item.out}.json`, "utf8")).output, coldSha);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a warm bake equals the cold cook: one glb sha and one ktx2 set", { skip: !existsSync(pin.exe) && "pinned Blender not installed" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-batch-"));
+  try {
+    const recipe = join(dir, "bake.json");
+    writeFileSync(recipe, JSON.stringify({ ops: [{ op: "bake", src: "content/maps/src/training_post.gltf", size: 32, ao: true }] }));
+    const cold = join(dir, "cold", "piece.glb");
+    const rc = cook("--recipe", recipe, "--out", cold);
+    assert.equal(rc.code, 0, rc.out);
+    const a = JSON.parse(readFileSync(`${cold}.json`, "utf8"));
+    // The ORM image is named after the output stem, so every cook keeps the
+    // stem `piece` and only its directory differs.
+    const items = [0, 1].map((i) => ({ recipe, out: join(dir, `warm${i}`, "piece.glb") }));
+    const manifest = join(dir, "batch.json");
+    writeFileSync(manifest, JSON.stringify({ recipes: items }));
+    const r = spawnSync("node", [script, "--batch", manifest], { encoding: "utf8" });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    for (const item of items) {
+      const b = JSON.parse(readFileSync(`${item.out}.json`, "utf8"));
+      assert.equal(b.output, a.output, "one glb digest");
+      assert.equal(b.ktx2_set, a.ktx2_set, "one ktx2 set digest");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a batch with an unknown op refuses before Blender starts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-batch-"));
+  try {
+    const bad = join(dir, "bad.json");
+    writeFileSync(bad, JSON.stringify({ ops: [{ op: "sky" }] }));
+    const manifest = join(dir, "batch.json");
+    writeFileSync(manifest, JSON.stringify({ recipes: [{ recipe: bad, out: join(dir, "x.glb") }] }));
+    // A missing exe proves nothing launches: a start would exit 3 blender.missing.
+    const r = spawnSync("node", [script, "--batch", manifest, "--exe", join(dir, "no", "blender.exe")], { encoding: "utf8" });
+    assert.equal(r.status, 4, `${r.stdout}${r.stderr}`);
+    assert.ok(r.stderr.includes("batch recipe 0: recipe.unknown_op"), r.stderr);
+    assert.ok(!r.stderr.includes("blender."), r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a batch with no recipes refuses batch.empty", () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-batch-"));
+  try {
+    const manifest = join(dir, "batch.json");
+    writeFileSync(manifest, JSON.stringify({ recipes: [] }));
+    const r = spawnSync("node", [script, "--batch", manifest], { encoding: "utf8" });
+    assert.equal(r.status, 4, `${r.stdout}${r.stderr}`);
+    assert.ok(r.stderr.includes("batch.empty"), r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

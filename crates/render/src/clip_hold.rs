@@ -11,7 +11,7 @@
 //! Units: meters for dolly distance, pixels for sizes and drift, luma for
 //! ghost/shimmer. Determinism: fixed 64x36 row-major oracle, integer bar
 //! steps, same clip gives bit-identical bytes twice; wall clock never
-//! enters pixels. Errors are typed [`HoldError`].
+//! enters pixels. Errors are typed `HoldError`.
 //!
 //! Cost: this clip adds no pass. Per-pass GPU budget it rides, enforced on
 //! boosted release clocks: TAA resolve plus temporal upsample inside the

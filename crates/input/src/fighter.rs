@@ -47,9 +47,15 @@ pub const THROW_SPEAR: u8 = 0x10;
 /// Jump bit in [`Buttons`]: world-arming, read by the arena's live height
 /// channel (AIN7). Combat and feel masks ignore it; it is not a strike.
 pub const JUMP: u8 = 0x20;
-/// Every button bit the wire accepts: [`KNOWN_BUTTONS`] plus [`THROW_SPEAR`]
-/// and [`JUMP`]. Consumers that mask with [`KNOWN_BUTTONS`] keep three bits.
-pub const ALL_BUTTONS: u8 = KNOWN_BUTTONS | THROW_SPEAR | JUMP;
+/// Throw-at-the-world bit in [`Buttons`]: with [`THROW_SPEAR`] held too, the
+/// spear flies past fighters and sticks only in arena geometry, so a grapple
+/// can anchor a wall behind the enemy. Opt-in like [`THROW_SPEAR`]: a match
+/// built without a spear masks both bits off.
+pub const THROW_SPEAR_WORLD: u8 = 0x40;
+/// Every button bit the wire accepts: [`KNOWN_BUTTONS`] plus [`THROW_SPEAR`],
+/// [`JUMP`] and [`THROW_SPEAR_WORLD`]. Consumers that mask with
+/// [`KNOWN_BUTTONS`] keep three bits.
+pub const ALL_BUTTONS: u8 = KNOWN_BUTTONS | THROW_SPEAR | JUMP | THROW_SPEAR_WORLD;
 
 /// Stable fighter slot in `0..MAX_PARTICIPANTS`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -322,6 +328,15 @@ mod tests {
             Buttons(JUMP).is_legal(),
             "the live jump bit is a legal button"
         );
+        assert!(
+            Buttons(THROW_SPEAR | THROW_SPEAR_WORLD).is_legal(),
+            "the world-aimed throw is a legal pair"
+        );
+        assert_eq!(
+            KNOWN_BUTTONS & THROW_SPEAR_WORLD,
+            0,
+            "v1 buttons keep 3 bits"
+        );
     }
 
     #[test]
@@ -339,8 +354,12 @@ mod tests {
             .validate()
             .expect("the live jump bit is a legal button");
         assert_eq!(KNOWN_BUTTONS & JUMP, 0, "combat keeps 3 bits");
-        input.buttons = Buttons(0x40);
-        assert_eq!(input.validate(), Err(FighterError::UnknownButtons(0x40)));
+        input.buttons = Buttons(THROW_SPEAR_WORLD);
+        input
+            .validate()
+            .expect("the world-aimed throw bit is a legal button");
+        input.buttons = Buttons(0x80);
+        assert_eq!(input.validate(), Err(FighterError::UnknownButtons(0x80)));
     }
 
     #[test]

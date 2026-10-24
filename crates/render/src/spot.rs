@@ -7,29 +7,29 @@
 //! the timer appears in receipts only. Presentation only: nothing here feeds
 //! the tick or the hash.
 //!
-//! Shape: up to [`MAX_SPOTS`] spot lights share one square depth atlas of
-//! [`ATLAS_GRID`] by [`ATLAS_GRID`] tiles, one tile per slot in slot order.
-//! A spot joins the clustered path through [`SpotLight::screen_light`],
-//! which returns the same [`ScreenLight`] the clustered point lights already
+//! Shape: up to `MAX_SPOTS` spot lights share one square depth atlas of
+//! `ATLAS_GRID` by `ATLAS_GRID` tiles, one tile per slot in slot order.
+//! A spot joins the clustered path through `SpotLight::screen_light`,
+//! which returns the same `ScreenLight` the clustered point lights already
 //! use, so a flashlight rides the grid the torches fill. The CPU reference
-//! [`SpotAtlas::bake`] is the parity oracle for the device bake
+//! `SpotAtlas::bake` is the parity oracle for the device bake
 //! `submit_spot_atlas` (behind `window`): both rasterize the same accepted
-//! triangle list through the same [`spot_clip_matrix`], and the gate's
+//! triangle list through the same `spot_clip_matrix`, and the gate's
 //! readback arm `atlas_parity` holds a software adapter to
-//! [`PARITY_AGREEMENT`] at [`PARITY_TOLERANCE`].
+//! `PARITY_AGREEMENT` at `PARITY_TOLERANCE`.
 //!
 //! Two device entries share that bake: `submit_spot_atlas` encodes, submits
 //! and waits on the device (the budget arm: one submit against
-//! [`SPOT_PASS_BUDGET_MS`]), and `encode_spot_atlas` records the same pass
+//! `SPOT_PASS_BUDGET_MS`), and `encode_spot_atlas` records the same pass
 //! into a caller-supplied command encoder without submitting it (the live
 //! window frame's entry: the frame's own one command buffer carries the
 //! atlas, so the frame never waits on the GPU).
 //!
 //! Bounds: a triangle with any vertex at or behind the spot near plane is
 //! dropped by both paths (the room fixture keeps every occluder in front);
-//! more spots than atlas slots and more triangles than [`MAX_OCCLUDER_TRIS`]
+//! more spots than atlas slots and more triangles than `MAX_OCCLUDER_TRIS`
 //! degrade with a recorded clamp. Bad input fails loudly with the lane's
-//! [`LightError`].
+//! `LightError`.
 
 #![forbid(unsafe_code)]
 
@@ -45,7 +45,7 @@ pub use encode::{encode_spot_atlas, SpotEncode};
 
 /// Most shadowed spots in one frame; the atlas has one tile per spot.
 pub const MAX_SPOTS: usize = 16;
-/// Atlas tiles per side; [`MAX_SPOTS`] tiles fill it exactly.
+/// Atlas tiles per side; `MAX_SPOTS` tiles fill it exactly.
 pub const ATLAS_GRID: usize = 4;
 /// Smallest accepted atlas tile edge in texels.
 pub const ATLAS_TILE_MIN: usize = 32;
@@ -193,7 +193,7 @@ impl SpotLight {
         window * window / (dist_m * dist_m + 1.0)
     }
 
-    /// Screen footprint for the clustered path: the same [`ScreenLight`] the
+    /// Screen footprint for the clustered path: the same `ScreenLight` the
     /// clustered point lights use. `None` when the aperture is behind the
     /// view near plane or past its far plane.
     pub fn screen_light(&self, view: &SpotView) -> Result<Option<ScreenLight>, LightError> {
@@ -1019,7 +1019,7 @@ impl SpotGpuReceipt {
 pub struct ParityReceipt {
     /// Atlas texels compared.
     pub compared: u32,
-    /// Texels past [`PARITY_TOLERANCE`].
+    /// Texels past `PARITY_TOLERANCE`.
     pub mismatched: u32,
     /// Largest absolute depth disagreement seen.
     pub max_diff: f32,
@@ -1036,7 +1036,7 @@ impl ParityReceipt {
         f32_from_u32(good) / f32_from_u32(self.compared)
     }
 
-    /// True when agreement reaches [`PARITY_AGREEMENT`].
+    /// True when agreement reaches `PARITY_AGREEMENT`.
     pub fn passes(&self) -> bool {
         self.agreement() >= PARITY_AGREEMENT
     }

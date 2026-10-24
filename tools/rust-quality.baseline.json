@@ -958,7 +958,7 @@
   "crates/game/src/bin/arena.rs": 5092,
   "crates/game/src/camera.rs": 3459,
   "crates/game/src/fighter_look.rs": 6757,
-  "crates/game/src/lib.rs": 4041,
+  "crates/game/src/lib.rs": 4046,
   "crates/game/src/windowed.rs": 3634,
   "crates/net/src/interest.rs": 3076,
   "crates/physics/src/ragdoll.rs": 3266,
@@ -4734,6 +4734,13 @@
    "from": 3611,
    "to": 3637,
    "reason": "set_look plus the look slot are the E11 seam; the section moves to its own module when the shader fetch lands"
+  },
+  {
+   "date": "2026-10-24",
+   "file": "crates/game/src/lib.rs",
+   "from": 4041,
+   "to": 4046,
+   "reason": "LEG19 declares pub mod wounds in the crate root; the declaration cannot live in another file"
   }
  ]
 }

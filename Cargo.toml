@@ -207,6 +207,9 @@ wgpu = "30.0.1"
 pollster = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 puffin = "0.20"
+# WG2: the pack registry publishes one row per pack through a distributed
+# slice, so ordering comes from an `order` field, not link order.
+linkme = "0.3.37"
 # PF18 candidate allocator (MIT, harness-only): the perf test binary that sets
 # it as its global allocator is the only consumer. Never a dependency of a tick
 # crate or of the default headless graph.

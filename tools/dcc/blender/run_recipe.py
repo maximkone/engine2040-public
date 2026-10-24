@@ -1,11 +1,16 @@
-# run_recipe.py - the DCC recipe runner (GEO1b, GEO14). Licensed GPL-3.0-or-later.
+# run_recipe.py - the DCC recipe runner (GEO1b, GEO14, GEO15). Licensed GPL-3.0-or-later.
 # Reads <recipe.json> <out.glb> after `--` and writes the recipe's ops into a
 # fresh factory scene, then exports one GLB. Own code; the op set is the DCC
 # surface the geometry rows name: cube, bevel, mirror, array, and the bake op
 # (GEO14: ambient occlusion, curvature grime and a bevel normal on a piece).
 # No engine import, no python key ever read (the cook refuses one before this
-# starts), no network and no file outside the named paths. The same recipe on
-# the same pinned Blender gives the same bytes.
+# starts), no file outside the named paths. The same recipe on the same pinned
+# Blender gives the same bytes.
+#
+# `--serve` keeps this process alive for a batch (GEO15): a reader thread takes
+# one JSON request per line from a loopback socket and the main thread cooks
+# each one, reloading the factory startup file between recipes so a warm cook
+# starts from the bytes a fresh process starts from. Loopback only.
 import json
 import math
 import os
@@ -49,10 +54,17 @@ GRIME_CONCAVE = 0.46
 GRIME_LIT = 0.45
 
 
+class Refusal(Exception):
+    """A typed refusal: one line of code plus recovery, and the exit code."""
+
+    def __init__(self, text, code):
+        Exception.__init__(self, text)
+        self.text = text
+        self.code = code
+
+
 def die(text, code):
-    sys.stdout.write(text + "\n")
-    sys.stdout.flush()
-    sys.exit(code)
+    raise Refusal(text, code)
 
 
 def args_after_separator(argv):
@@ -573,8 +585,7 @@ def bake_piece(bpy, op, out_path):
     )
 
 
-def main():
-    recipe_path, out_path = args_after_separator(sys.argv[1:])
+def cook(recipe_path, out_path):
     ops = recipe_ops(recipe_path)
     import bpy
 
@@ -594,4 +605,101 @@ def main():
     sys.stdout.write("recipe.cooked %s\n" % out_path)
 
 
-main()
+# ---------------------------------------------------------------------------
+# Serve mode (GEO15).
+# ---------------------------------------------------------------------------
+
+
+def reply(conn, payload):
+    conn.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8"))
+
+
+def serve():
+    """One warm Blender for a batch: the mcp-for-blender shape.
+
+    A reader thread only parses socket lines and queues them; the main thread
+    runs every recipe, so bpy is never touched off the main thread. Between
+    recipes the factory startup file reloads, which is the state a fresh
+    process starts from, so a warm GLB equals a cold one.
+    """
+    import queue
+    import socket
+    import threading
+    import traceback
+
+    import bpy
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        sys.stdout.write("bridge.listening %d %s\n" % (port, bpy.app.version_string))
+        sys.stdout.flush()
+        conn, _ = server.accept()
+    finally:
+        server.close()
+
+    requests = queue.Queue()
+
+    def read_lines():
+        with conn.makefile("r", encoding="utf-8") as lines:
+            for line in lines:
+                requests.put(line)
+        requests.put(None)
+
+    threading.Thread(target=read_lines, daemon=True).start()
+    first = True
+    while True:
+        line = requests.get()
+        if line is None:
+            break
+        try:
+            request = json.loads(line)
+        except ValueError:
+            reply(conn, {"ok": False, "code": 4, "text": "bridge.bad_request"})
+            continue
+        if not isinstance(request, dict):
+            reply(conn, {"ok": False, "code": 4, "text": "bridge.bad_request"})
+            continue
+        if request.get("cmd") == "quit":
+            reply(conn, {"ok": True})
+            break
+        if not isinstance(request.get("recipe"), str) or not isinstance(request.get("out"), str):
+            reply(conn, {"ok": False, "id": request.get("id"), "code": 4, "text": "bridge.bad_request"})
+            continue
+        started = time.time()
+        try:
+            if not first:
+                bpy.ops.wm.read_factory_settings()
+            first = False
+            cook(request["recipe"], request["out"])
+            reply(conn, {"ok": True, "id": request.get("id"), "seconds": round(time.time() - started, 3)})
+        except Refusal as refusal:
+            reply(conn, {"ok": False, "id": request.get("id"), "code": refusal.code, "text": refusal.text})
+        except Exception:
+            last = traceback.format_exc().strip().splitlines()[-1]
+            reply(conn, {"ok": False, "id": request.get("id"), "code": 1,
+                          "text": "blender.recipe_failed: " + last})
+    conn.close()
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    try:
+        recipe_path, out_path = args_after_separator(argv)
+        cook(recipe_path, out_path)
+    except Refusal as refusal:
+        sys.stdout.write(refusal.text + "\n")
+        return refusal.code
+    return 0
+
+
+if __name__ == "__main__":
+    if "--serve" in sys.argv:
+        serve()
+    else:
+        status = main()
+        if status:
+            sys.stdout.flush()
+            sys.exit(status)

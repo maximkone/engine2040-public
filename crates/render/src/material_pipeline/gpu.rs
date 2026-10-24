@@ -275,7 +275,7 @@ impl MaterialPipelines {
     }
 
     /// The pipeline of `compiled`'s structure: a cache hit for a structure
-    /// built before, otherwise one gate check and one [`pipeline_for`].
+    /// built before, otherwise one gate check and one `pipeline_for`.
     pub fn get_or_build(
         &mut self,
         device: &wgpu::Device,

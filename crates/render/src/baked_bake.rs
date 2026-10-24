@@ -4,7 +4,7 @@
 //! `crate::present::look` (`bake_arena_fixture` per frame).
 //! Units: texels for the lightmap, meters for probes and boxes, ms in
 //! receipts. Determinism: fixed row-major bake order; same complete inputs
-//! give bit-identical bytes x2. Errors are typed [`BakedGiError`].
+//! give bit-identical bytes x2. Errors are typed `BakedGiError`.
 
 #![forbid(unsafe_code)]
 

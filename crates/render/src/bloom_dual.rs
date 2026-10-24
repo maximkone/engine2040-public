@@ -7,7 +7,7 @@
 //!
 //! Owner: render lane. Consumers: the device chain in
 //! `present::gpu_present::bloom_dual` sizes its textures from
-//! [`DualBloomPlan`] and runs the same math in WGSL; the blit samples the
+//! `DualBloomPlan` and runs the same math in WGSL; the blit samples the
 //! half-res halo and adds it at `BloomConfig::intensity`. The oracle beside
 //! the plan (test builds only) is the reference the device test compares.
 //!

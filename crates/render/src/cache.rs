@@ -6,9 +6,9 @@
 //! saves write map order, so identical inputs give identical files; the
 //! toolchain identity makes a compiler bump miss instead of serving stale
 //! bytes.
-//! Errors: typed [`CacheError`]; future or unknown versions refuse loudly.
+//! Errors: typed `CacheError`; future or unknown versions refuse loudly.
 //! Blocking file IO runs at startup/shutdown; the per-frame path only
-//! borrows through [`PipelineCache::get`] and [`PipelineCache::poll_ready`].
+//! borrows through `PipelineCache::get` and `PipelineCache::poll_ready`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -696,7 +696,7 @@ impl PipelineCache {
     /// exactly once. A failed miss records a diagnostic and reports
     /// [`WarmResult::Failed`] without touching other entries, so a second
     /// run over a warm cache compiles 0 pipelines. The error stays typed
-    /// at the seam (`E` is usually [`CacheError`]); only the capped
+    /// at the seam (`E` is usually `CacheError`); only the capped
     /// diagnostic stores its message text.
     pub fn get_or_compile<E: fmt::Display>(
         &mut self,
@@ -825,7 +825,7 @@ impl PipelineCache {
     /// never compiles mid-frame. Units: counts of compiled, hit and failed
     /// keys. Determinism: keys warm in caller order; the map itself stays in
     /// key order, so identical key sets give identical caches. Errors: typed
-    /// [`CacheError`] end to end (no `String` seam); failed keys record a
+    /// `CacheError` end to end (no `String` seam); failed keys record a
     /// capped diagnostic and count as failed without touching other entries.
     /// Once the map holds [`MAX_ENTRIES`] blobs every further new key fails
     /// without running `compile`.
@@ -840,8 +840,8 @@ impl PipelineCache {
 
     /// True when a camera walk over `keys` would create zero pipelines:
     /// every key already serves a blob with no compile in flight. The
-    /// per-frame path calls only [`PipelineCache::get`] and
-    /// [`PipelineCache::poll_ready`]; this predicate proves the walk stays
+    /// per-frame path calls only `PipelineCache::get` and
+    /// `PipelineCache::poll_ready`; this predicate proves the walk stays
     /// on hits, so no frame pays pipeline-creation cost (ratio 1.0,
     /// under the 1.5x median bar by construction).
     pub fn walk_ready(&self, keys: &[PipelineKey]) -> bool {

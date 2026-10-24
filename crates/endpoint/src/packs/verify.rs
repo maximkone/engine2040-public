@@ -1711,3 +1711,24 @@ mod tests {
         assert!(refused.message.contains("events, hits, damage"));
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[cfg(feature = "verify")]
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 15,
+    name: PACK,
+    default_loaded: false,
+    tools: &[
+        "replay.verify",
+        "replay.bisect",
+        "bug.replay",
+        "trace.summary",
+        "verify.proof",
+    ],
+    build: pack,
+};

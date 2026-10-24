@@ -8,9 +8,9 @@ if not exist "target\release\arena.exe" (
   pause
   exit /b 1
 )
-echo engine2040 arena: WASD move, F attack, Q throw spear (tether to an enemy or wall and fly), Shift block, Space dodge, Esc pause, R rematch, C free cam
+echo engine2040 arena: WASD move, F attack, Q throw spear (tether to an enemy), Q+E throw spear at the wall (rope swing), Shift block, Space dodge, Esc pause, R rematch, C free cam
 echo Extra flags go after the bat name, for example: play-arena.bat --fighters 4
-"target\release\arena.exe" --scene arena --fighters 2 --play --spear --ticks 100000 %*
+"target\release\arena.exe" --scene arena --fighters 2 --play --spear --height --ticks 100000 %*
 if errorlevel 1 (
   echo.
   echo arena stopped with an error. The log is in target\logs. Read the last lines above.

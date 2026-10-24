@@ -5,7 +5,7 @@
 //! Units: unit-free sun direction, turbidity units, 0..=1 albedo, EV100
 //! stops, meters for fog. Determinism: fixed 64x32 row-major bake; same
 //! preset gives bit-identical bytes twice (pixels stay presentation,
-//! never the sim hash). Errors are typed [`ArenaDayError`]; pass code is
+//! never the sim hash). Errors are typed `ArenaDayError`; pass code is
 //! frozen, this file only tunes data.
 //!
 //! Cost (base tier bars, enforced on boosted release clocks): sky 0.4 ms,

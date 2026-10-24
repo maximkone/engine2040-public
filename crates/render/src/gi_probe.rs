@@ -5,7 +5,7 @@
 //! for grid bounds, linear RGB triples. Determinism: fixed probe order
 //! with `+ - * /` and `sqrt` only; same sun gives bit-identical probes
 //! twice (pixels stay presentation, never the sim hash). Errors are typed
-//! [`GiProbeError`]; the grid allocates once in `new` and `update` reuses
+//! `GiProbeError`; the grid allocates once in `new` and `update` reuses
 //! it, so per-frame work allocates nothing.
 //! UNLOCKS: window forward submit of this grid (caller feeds `sample`
 //! beside the baked `irradiance`; weight 0 keeps today's pixels exactly).
@@ -82,7 +82,7 @@ fn check_color(name: &str, v: [f32; 3]) -> Result<(), GiProbeError> {
 
 /// One dynamic probe grid: RGB irradiance triples in
 /// `(iz*NY + iy)*NX + ix` order, refreshed per frame by [`update`].
-/// `min`/`step` are fixed by [`new`]; only `probes` mutates per frame.
+/// `min`/`step` are fixed by `new`; only `probes` mutates per frame.
 ///
 /// [`update`]: ProbeGrid::update
 pub struct ProbeGrid {

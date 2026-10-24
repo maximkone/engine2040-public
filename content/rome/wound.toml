@@ -1,0 +1,45 @@
+# The wound table: four body parts at three severities, one heal time each in
+# camp days. A `combat::cut` event sets one wound on the victim's part; a cut
+# at the part's root joint (neck, shoulder, waist or chest, hip) severs the
+# part and it never heals. A cut below the root (elbow, wrist, knee, ankle)
+# leaves the part attached and the wound heals one step per camp day until the
+# row's days are spent.
+#
+# Consumer: `crates/game/src/wounds.rs`; the camp day that heals it is
+# `crates/game/src/camp_day.rs` (LEG18). The content sits beside the roster
+# (`contubernium.toml`) and is read at startup, never in the tick.
+#
+# Donor magnitudes (idea only, no data copied):
+# - CDDA body parts: health per part and a recovery that runs while the wound
+#   is untreated; the head and torso are the parts that kill, the limbs are
+#   the parts that slow.
+# - OpenXcom hospital days: a wounded soldier's days count down one per day,
+#   scaled here to the four-part model.
+# Roman practice (the class split): Celsus, De Medicina book 5, separates
+# wounds that close from wounds that suppurate and from wounds that lose a
+# part; the ten-day ceiling on the critical rows is his longer class.
+# The exact days are ours where the donors give no matching job.
+
+[wound.head]
+light = 2
+serious = 5
+critical = 10
+ref = "OpenXcom hospital days and CDDA part health scaled to four parts; Celsus, De Medicina 5 on head wounds; days ours (LEG19)"
+
+[wound.arm]
+light = 1
+serious = 3
+critical = 7
+ref = "OpenXcom hospital days and CDDA part health scaled to four parts; Celsus, De Medicina 5 on limb wounds; days ours (LEG19)"
+
+[wound.torso]
+light = 2
+serious = 5
+critical = 9
+ref = "OpenXcom hospital days and CDDA part health scaled to four parts; Celsus, De Medicina 5 on chest and flank wounds; days ours (LEG19)"
+
+[wound.leg]
+light = 1
+serious = 4
+critical = 8
+ref = "OpenXcom hospital days and CDDA part health scaled to four parts; Celsus, De Medicina 5 on limb wounds; days ours (LEG19)"

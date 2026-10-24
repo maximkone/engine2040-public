@@ -4,10 +4,10 @@
 //! A pipeline built on first use is the usual first-minute stutter: the browser (or the driver)
 //! compiles the shader while a frame waits. The rule is that everything a frame draws with is
 //! built before the first frame, behind the loader. This module is the proof of it: the presenter
-//! and its submitters build their pipelines through [`CountedPipelines`]
+//! and its submitters build their pipelines through `CountedPipelines`
 //! (`CountedPipelines`, `_counted` twins of the wgpu calls), each build is written to a per-thread ledger, and the
-//! loader calls [`seal`] once the warm-up is done. A build after the seal is a *late compile*:
-//! [`late_line`] turns it into the loud `late_compile` line the web page prints and the headless
+//! loader calls `seal` once the warm-up is done. A build after the seal is a *late compile*:
+//! `late_line` turns it into the loud `late_compile` line the web page prints and the headless
 //! check fails on.
 //!
 //! wgpu 30 has no async pipeline call (`createRenderPipelineAsync` is only a raw binding behind

@@ -8,15 +8,26 @@
 // tools/dcc/blender.pin.json unless --pin names another file.
 //
 //   node tools/dcc/blender-cook.mjs --recipe <file> --out <glb> [--script <py>]
+//   node tools/dcc/blender-cook.mjs --batch <batch.json> [--crash-at <n>]
 //
 // GEO14 adds the `bake` op: a piece with ambient occlusion, curvature grime and a
 // bevel normal. The recipe guards run before the pinned check (so a no-UV piece never
 // starts Blender), the pinned Blender bakes and exports, then each map rides the
 // existing `engine-assets` KTX2 cook through tools/dcc/ktx2-cook, and the sidecar
 // carries the GLB digest, the PNG digests and the KTX2 set digest.
-import { spawnSync } from "node:child_process";
+//
+// GEO15 adds the batch: one warm Blender serves every recipe. `--batch` names a JSON
+// manifest `{"recipes":[{"recipe":<path>,"out":<glb>},...]}`; every recipe is guarded
+// before anything starts, the exe hash is checked once, then `run_recipe.py --serve`
+// cooks each recipe on its main thread and reloads factory settings between them.
+// The gate is digest equality with the fresh-process cook. A crash mid-batch restarts
+// the process once and resumes at the in-flight recipe; a second crash fails the
+// batch. `--crash-at <n>` kills the warm process just before recipe n (index from 0)
+// so a test can prove the restart path without waiting for a real crash.
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -25,6 +36,7 @@ const ROOT = resolve(HERE, "..", "..");
 const RUN_TIMEOUT_MS = 60_000;
 const BAKE_TIMEOUT_MS = 300_000;
 const KTX2_TIMEOUT_MS = 600_000;
+const BRIDGE_TIMEOUT_MS = 60_000;
 const VERSION_EXPR = "import bpy;print('E2040-VERSION', bpy.app.version_string)";
 
 /** sha256 of a file as lowercase hex, streamed (the exe is over 100 MB). */
@@ -44,8 +56,9 @@ export function parseVersion(stdout) {
   return line ? line.slice("E2040-VERSION ".length).trim() : null;
 }
 
-/** The checked result as { code, text }: the caller prints text and exits with code. */
-export async function check({ exe, pinPath }) {
+/** The pin and exe file check without starting Blender: the batch hashes once
+ * and reads the version from the warm process it already starts. */
+export async function verifyPinned({ exe, pinPath }) {
   const pin = JSON.parse(readFileSync(pinPath, "utf8"));
   const path = exe ?? pin.exe;
   if (!existsSync(path)) return { code: 3, text: `blender.missing: ${path}` };
@@ -53,6 +66,14 @@ export async function check({ exe, pinPath }) {
   if (sha !== pin.exe_sha256) {
     return { code: 2, text: `blender.version_mismatch: sha256 ${sha} is not the pinned ${pin.exe_sha256}` };
   }
+  return { code: 0, text: "ok", exe: path, pin };
+}
+
+/** The checked result as { code, text }: the caller prints text and exits with code. */
+export async function check({ exe, pinPath }) {
+  const verified = await verifyPinned({ exe, pinPath });
+  if (verified.code !== 0) return verified;
+  const { pin, exe: path } = verified;
   const started = performance.now();
   const run = spawnSync(
     path,
@@ -265,13 +286,21 @@ export async function cookRecipe({ recipePath, outPath, scriptPath, pinPath, exe
     const why = run.error ? run.error.message : `exit ${run.status}: ${run.stderr ?? ""}`;
     return { code: 1, text: `blender.run_failed: ${why}` };
   }
+  const done = await completeSidecar({ recipeText, scriptPath: script, outPath: out, plan, version: first.version });
+  return { ...done, stdout: run.stdout ?? "" };
+}
+
+/** The sidecar a cook writes: the GLB, recipe and script digests, and for a
+ * bake the map shas plus the KTX2 set. Shared by one cold cook and a batch. */
+async function completeSidecar({ recipeText, scriptPath, outPath, plan, version }) {
+  if (!existsSync(outPath)) return { code: 1, text: `blender.run_failed: no output ${outPath}` };
   const sidecar = {
-    blender_version: createHash("sha256").update(String(first.version ?? "")).digest("hex"),
-    ...await digestsOfThree(recipeText, script, out),
+    blender_version: createHash("sha256").update(String(version ?? "")).digest("hex"),
+    ...await digestsOfThree(recipeText, scriptPath, outPath),
   };
   if (plan) {
-    const dir = dirname(out);
-    const stem = basename(out).replace(/\.glb$/i, "");
+    const dir = dirname(outPath);
+    const stem = basename(outPath).replace(/\.glb$/i, "");
     const maps = {};
     for (const name of bakedMapNames(plan)) {
       const png = join(dir, `${stem}_${name}.png`);
@@ -289,7 +318,7 @@ export async function cookRecipe({ recipePath, outPath, scriptPath, pinPath, exe
       maps[name].ktx2_sha256 = await sha256File(ktx2);
     }
     const cooked = ["orm", "normal"].filter((name) => maps[name]?.ktx2_sha256);
-    sidecar.bytes = statSync(out).size;
+    sidecar.bytes = statSync(outPath).size;
     sidecar.bake = { src: plan.src, size: plan.size, bevel: plan.bevel, maps: plan.maps };
     sidecar.maps = maps;
     if (cooked.length > 0) {
@@ -298,9 +327,9 @@ export async function cookRecipe({ recipePath, outPath, scriptPath, pinPath, exe
       sidecar.ktx2_set = digest.digest("hex");
     }
   }
-  writeFileSync(`${out}.json`, `${JSON.stringify(sidecar, null, 2)}\n`);
-  const line = sidecar.ktx2_set ? `ok ${out} glb=${sidecar.output} ktx2=${sidecar.ktx2_set}` : `ok ${out}`;
-  return { code: 0, text: line, sidecar, stdout: run.stdout ?? "" };
+  writeFileSync(`${outPath}.json`, `${JSON.stringify(sidecar, null, 2)}\n`);
+  const line = sidecar.ktx2_set ? `ok ${outPath} glb=${sidecar.output} ktx2=${sidecar.ktx2_set}` : `ok ${outPath}`;
+  return { code: 0, text: line, sidecar };
 }
 
 /** recipe, script and output digests for the sidecar: three sha256 values. */
@@ -309,6 +338,279 @@ async function digestsOfThree(recipeText, scriptPath, outPath) {
     recipe: createHash("sha256").update(recipeText).digest("hex"),
     script: await sha256File(scriptPath),
     output: await sha256File(outPath),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Warm batch (GEO15).
+// ---------------------------------------------------------------------------
+
+/** Spawn `run_recipe.py --serve` and read its `bridge.listening <port> <version>` line. */
+function launchBridge({ blender, scriptPath }) {
+  const child = spawn(
+    blender,
+    [
+      "-b", "--factory-startup", "-noaudio", "--python-exit-code", "1",
+      "--threads", "1", "--disable-autoexec", "-P", scriptPath,
+      "--", "--serve",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+  );
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr = (stderr + chunk).slice(-65536);
+  });
+  const banner = new Promise((resolvePromise, reject) => {
+    let buffered = "";
+    const timer = setTimeout(() => {
+      stop();
+      reject(new Error("bridge.banner_timeout: the warm Blender printed no port"));
+    }, BRIDGE_TIMEOUT_MS);
+    const stop = () => {
+      clearTimeout(timer);
+      child.stdout.off("data", onData);
+      child.off("exit", onExit);
+    };
+    const onData = (chunk) => {
+      buffered += chunk;
+      const at = buffered.indexOf("\n");
+      if (at < 0) return;
+      const line = buffered.slice(0, at).trim();
+      const match = /^bridge\.listening (\d+) (.+)$/.exec(line);
+      stop();
+      // The bridge keeps printing one recipe line per cook; keep the pipe drained.
+      child.stdout.on("data", () => {});
+      if (!match) {
+        reject(new Error(`bridge.bad_banner: ${line}`));
+        return;
+      }
+      resolvePromise({ port: Number(match[1]), version: match[2].trim() });
+    };
+    const onExit = (code) => {
+      stop();
+      const last = stderr.trim().split("\n").pop();
+      reject(new Error(`bridge.exited: the warm Blender left with ${code}${last ? `: ${last}` : ""}`));
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", onData);
+    child.once("exit", onExit);
+  });
+  return { child, banner };
+}
+
+/** One request in flight at a time; a death or timeout rejects it. */
+class WarmBridge {
+  constructor(child, socket, version) {
+    this.child = child;
+    this.socket = socket;
+    this.version = version;
+    this.nextId = 1;
+    this.pending = null;
+    this.closed = null;
+    let buffered = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffered += chunk;
+      let at;
+      while ((at = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, at).trim();
+        buffered = buffered.slice(at + 1);
+        if (!line) continue;
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const pending = this.pending;
+        if (!pending) continue;
+        this.pending = null;
+        clearTimeout(pending.timer);
+        pending.resolve(message);
+      }
+    });
+    socket.on("error", () => this.shut());
+    socket.on("close", () => this.shut());
+    child.once("exit", () => this.shut());
+  }
+
+  shut() {
+    if (this.closed) return;
+    this.closed = new Error("bridge.closed: the warm Blender exited");
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = null;
+    clearTimeout(pending.timer);
+    pending.reject(this.closed);
+  }
+
+  request(recipePath, outPath, timeoutMs) {
+    if (this.closed) return Promise.reject(this.closed);
+    const id = this.nextId++;
+    return new Promise((resolvePromise, reject) => {
+      const timer = setTimeout(() => {
+        if (!this.pending) return;
+        this.pending = null;
+        reject(new Error("bridge.timeout: a warm recipe ran past its limit"));
+        this.socket.destroy();
+      }, timeoutMs);
+      this.pending = { resolve: resolvePromise, reject, timer };
+      this.socket.write(`${JSON.stringify({ id, recipe: recipePath, out: outPath })}\n`);
+    });
+  }
+
+  async close() {
+    if (!this.closed) {
+      this.socket.write(`${JSON.stringify({ cmd: "quit" })}\n`);
+      await new Promise((resolvePromise) => {
+        const timer = setTimeout(resolvePromise, 5000);
+        this.socket.once("close", () => {
+          clearTimeout(timer);
+          resolvePromise();
+        });
+      });
+    }
+    this.socket.destroy();
+    if (this.child.exitCode === null) {
+      const exited = new Promise((resolvePromise) => this.child.once("exit", resolvePromise));
+      this.child.kill();
+      await Promise.race([exited, new Promise((resolvePromise) => setTimeout(resolvePromise, 5000))]);
+    }
+  }
+}
+
+async function connectWarm({ exe, scriptPath, pin }) {
+  const launched = launchBridge({ blender: exe, scriptPath });
+  let banner;
+  try {
+    banner = await launched.banner;
+  } catch (error) {
+    launched.child.kill();
+    throw error;
+  }
+  if (!banner.version.startsWith(pin.version_prefix)) {
+    launched.child.kill();
+    throw Object.assign(new Error("version"), {
+      code: 2,
+      text: `blender.version_mismatch: ${banner.version} does not start with ${pin.version_prefix}`,
+    });
+  }
+  const socket = net.createConnection({ host: "127.0.0.1", port: banner.port });
+  await new Promise((resolvePromise, reject) => {
+    socket.once("connect", resolvePromise);
+    socket.once("error", reject);
+  });
+  return new WarmBridge(launched.child, socket, banner.version);
+}
+
+function killChild(child) {
+  if (child.exitCode !== null) return Promise.resolve();
+  return new Promise((resolvePromise) => {
+    child.once("exit", resolvePromise);
+    child.kill();
+  });
+}
+
+/**
+ * Cook a manifest of recipes on one warm Blender. Every recipe is guarded and
+ * the exe hashed before the process starts; the version comes from the warm
+ * process itself, so a batch pays one startup instead of one per recipe. A
+ * crash restarts once at the in-flight recipe and reports the restart; a
+ * second crash fails the batch. Returns { code, text, restarts, seconds }.
+ */
+export async function cookBatch({ batchPath, pinPath, scriptPath, exe, crashAt = -1 }) {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(batchPath, "utf8"));
+  } catch (error) {
+    return { code: 4, text: `batch.unreadable: ${error.message}` };
+  }
+  const entries = Array.isArray(manifest?.recipes) ? manifest.recipes : [];
+  if (entries.length === 0) {
+    return { code: 4, text: 'batch.empty: name recipes as [{"recipe":<path>,"out":<glb>}]' };
+  }
+  const recipes = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!entry || typeof entry.recipe !== "string" || typeof entry.out !== "string") {
+      return { code: 4, text: `batch.bad_item: recipe ${index} wants recipe and out paths` };
+    }
+    const recipePath = resolve(entry.recipe);
+    const outPath = resolve(entry.out);
+    let recipeText;
+    try {
+      recipeText = readFileSync(recipePath, "utf8");
+    } catch (error) {
+      return { code: 4, text: `batch recipe ${index}: recipe.unreadable: ${error.message}` };
+    }
+    let recipe;
+    try {
+      recipe = JSON.parse(recipeText);
+    } catch (error) {
+      return { code: 4, text: `batch recipe ${index}: recipe.unknown_op: unreadable json: ${error.message}` };
+    }
+    const guard = guardRecipe(recipe);
+    if (guard.code !== 0) return { ...guard, text: `batch recipe ${index}: ${guard.text}` };
+    recipes.push({ index, recipePath, outPath, recipeText, plan: bakePlan(recipe) });
+  }
+  const verified = await verifyPinned({ exe, pinPath });
+  if (verified.code !== 0) return verified;
+  const script = scriptPath ?? join(HERE, "blender", "run_recipe.py");
+  const started = performance.now();
+  const sidecars = [];
+  let restarts = 0;
+  let bridge = null;
+  let pendingCrash = crashAt;
+  try {
+    bridge = await connectWarm({ exe: verified.exe, scriptPath: script, pin: verified.pin });
+    for (const item of recipes) {
+      mkdirSync(dirname(item.outPath), { recursive: true });
+      let reply;
+      for (;;) {
+        if (item.index === pendingCrash) {
+          pendingCrash = -1;
+          await killChild(bridge.child);
+        }
+        try {
+          reply = await bridge.request(item.recipePath, item.outPath, item.plan ? BAKE_TIMEOUT_MS : RUN_TIMEOUT_MS);
+          break;
+        } catch (error) {
+          if (restarts >= 1) return { code: 1, text: `blender.batch_crashed: ${error.message}` };
+          restarts += 1;
+          process.stderr.write(`blender.batch_restarted before recipe ${item.index}: ${error.message}\n`);
+          try {
+            bridge = await connectWarm({ exe: verified.exe, scriptPath: script, pin: verified.pin });
+          } catch (again) {
+            return { code: again.code ?? 1, text: again.text ?? `blender.batch_crashed: ${again.message}` };
+          }
+        }
+      }
+      if (!reply.ok) {
+        return { code: reply.code ?? 1, text: `batch recipe ${item.index}: ${reply.text ?? "blender.recipe_failed"}` };
+      }
+      const done = await completeSidecar({
+        recipeText: item.recipeText,
+        scriptPath: script,
+        outPath: item.outPath,
+        plan: item.plan,
+        version: bridge.version,
+      });
+      if (done.code !== 0) return { ...done, text: `batch recipe ${item.index}: ${done.text}` };
+      sidecars.push(done.sidecar);
+    }
+  } catch (error) {
+    return { code: error.code ?? 1, text: error.text ?? `blender.run_failed: ${error.message}` };
+  } finally {
+    if (bridge) await bridge.close();
+  }
+  const seconds = ((performance.now() - started) / 1000).toFixed(2);
+  return {
+    code: 0,
+    text: `ok batch ${recipes.length} restarts=${restarts} seconds=${seconds}`,
+    restarts,
+    seconds: Number(seconds),
+    sidecars,
   };
 }
 
@@ -321,6 +623,23 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     });
     (code === 0 ? console.log : console.error)(text);
     process.exit(code);
+  }
+  if (argv.includes("--batch")) {
+    const crash = flag(argv, "--crash-at");
+    const crashAt = crash === undefined ? -1 : Number(crash);
+    if (crash !== undefined && (!Number.isInteger(crashAt) || crashAt < 0)) {
+      console.error("bad --crash-at: wants a recipe index 0 or more");
+      process.exit(1);
+    }
+    const result = await cookBatch({
+      batchPath: flag(argv, "--batch"),
+      pinPath: flag(argv, "--pin") ?? join(HERE, "blender.pin.json"),
+      scriptPath: flag(argv, "--script"),
+      exe: flag(argv, "--exe"),
+      crashAt,
+    });
+    (result.code === 0 ? console.log : console.error)(result.text);
+    process.exit(result.code);
   }
   if (argv.includes("--recipe")) {
     const { code, text } = await cookRecipe({
@@ -335,7 +654,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
   console.error(
     "usage: node tools/dcc/blender-cook.mjs --check [--exe <path>] [--pin <file>]\n" +
-    "   or: node tools/dcc/blender-cook.mjs --recipe <file> --out <glb> [--script <py>] [--exe <path>]",
+    "   or: node tools/dcc/blender-cook.mjs --recipe <file> --out <glb> [--script <py>] [--exe <path>]\n" +
+    "   or: node tools/dcc/blender-cook.mjs --batch <batch.json> [--crash-at <n>] [--exe <path>]",
   );
   process.exit(1);
 }

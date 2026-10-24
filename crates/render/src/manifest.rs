@@ -7,9 +7,9 @@
 //! Owner: render lane (RA8). Consumer: PF2 frame captures / Q1.
 //! Units: pixels for resolution, bytes for capture blobs held elsewhere
 //! (never here), ms for pass timings held in `executor.rs`.
-//! Determinism: field order in [`CaptureManifest::summary`] is fixed
+//! Determinism: field order in `CaptureManifest::summary` is fixed
 //! (adapter, driver, resolution, quality, digest); no timestamps.
-//! Errors: [`ManifestError`] names the missing or invalid field loudly.
+//! Errors: `ManifestError` names the missing or invalid field loudly.
 //!
 //! Receipt-shape note (RA8 reconciles by documenting, never renaming):
 //! - `graph::FrameReceipt` is the compiled-graph receipt (draws +

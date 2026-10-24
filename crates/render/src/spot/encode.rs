@@ -8,8 +8,8 @@
 //!
 //! Bounds: the same ones the submit arm holds - a triangle with any vertex
 //! at or behind the spot near plane is dropped, more spots than atlas slots
-//! and more triangles than [`MAX_OCCLUDER_TRIS`] degrade with a recorded
-//! clamp, and bad input fails loudly with the lane's [`LightError`].
+//! and more triangles than `MAX_OCCLUDER_TRIS` degrade with a recorded
+//! clamp, and bad input fails loudly with the lane's `LightError`.
 
 #![forbid(unsafe_code)]
 

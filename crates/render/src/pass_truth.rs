@@ -2,16 +2,16 @@
 //!
 //! Owner: render lane (EG8). Units: RGBA bytes row-major, pixels for frames.
 //! Determinism: same bytes give the same flags twice; no clock, no float, no IO.
-//! Errors: [`PassTruthError`] names every ragged input. Budget: ten small
+//! Errors: `PassTruthError` names every ragged input. Budget: ten small
 //! frames on a cold path, never per tick; caller-owned buffers, no heap use.
 //!
 //! Shape: the verdict on the window's own frame comes from the live-frame arm
-//! ([`live_gate`], rendered by [`harness`] under `window`): the live frame is
+//! (`live_gate`, rendered by `harness` under `window`): the live frame is
 //! drawn with each look pass on and off and a pass is LIVE only when pixels in
-//! the region it paints moved above [`PASS_EPSILON`]. [`gate_table`] and
-//! [`capture_pair`] are the diff machinery's self-test fixture: synth frames
-//! built from [`PassSpec::live_today`], never a verdict on any real frame.
-//! Window-read pairs a caller captured itself gate through [`verdict_for_frames`]
+//! the region it paints moved above `PASS_EPSILON`. `gate_table` and
+//! `capture_pair` are the diff machinery's self-test fixture: synth frames
+//! built from `PassSpec::live_today`, never a verdict on any real frame.
+//! Window-read pairs a caller captured itself gate through `verdict_for_frames`
 //! ([`crate::window::WindowShell::look_pass_live`]).
 
 #![forbid(unsafe_code)]
@@ -26,7 +26,7 @@ pub mod reads;
 /// Live-frame arm of the gate: on/off frames of the window's own frame path,
 /// each pass judged on the pixels it paints (a draw-id region mask), and the
 /// dated report built from those rows. Std-only pure core; the device leg
-/// that renders the pairs is [`harness`].
+/// that renders the pairs is `harness`.
 pub mod live_gate;
 
 /// The golden rule as two numbers (mean channel error, share of far-off
@@ -36,7 +36,7 @@ pub mod frame_tolerance;
 
 /// Device leg of the live-frame arm: renders a draw list through the window
 /// frame path with every look pass on and then with each pass off, reads the
-/// pixels back and gates them through [`live_gate`].
+/// pixels back and gates them through `live_gate`.
 #[cfg(feature = "gpu")]
 pub mod harness;
 
@@ -85,9 +85,9 @@ pub struct PassSpec {
     pub pass: &'static str,
     /// The pixels this pass paints; the live-frame gate counts only these.
     pub region: PassRegion,
-    /// Self-test fixture only ([`capture_pair`] builds its synth frames from
+    /// Self-test fixture only (`capture_pair` builds its synth frames from
     /// it): never a verdict on the frame the window draws. The live-frame
-    /// arm in [`live_gate`] ignores it and reads pixels.
+    /// arm in `live_gate` ignores it and reads pixels.
     pub live_today: bool,
 }
 
@@ -369,7 +369,7 @@ pub fn live_flags_from_table(table: &[PassVerdict]) -> Vec<bool> {
 
 /// Gate caller-supplied on/off frame bytes through the masked epsilon diff.
 /// Window reads enter here through [`crate::window::WindowShell::look_pass_live`];
-/// synth [`capture_pair`] bytes take the same arm [`gate_table`] uses. Ragged or empty inputs resolve to PROBE
+/// synth `capture_pair` bytes take the same arm `gate_table` uses. Ragged or empty inputs resolve to PROBE
 /// with zero diff, never panic. The flag comes from [`verdict_from_diff`],
 /// the diff only, never the row name. Caller-owned slices in, verdict out.
 #[must_use]
@@ -627,7 +627,7 @@ pub fn pass_truth_report(date: &str, table: &[PassVerdict]) -> String {
 }
 
 /// Dated LIVE/PROBE report over one harness run; pure composer for the gate.
-/// Runs [`gate_table`] once and frames it with [`pass_truth_report`].
+/// Runs `gate_table` once and frames it with [`pass_truth_report`].
 /// Same date gives the same bytes twice; date is a plain tag, never parsed.
 /// No clock, no float, no IO; heap only the ten verdicts plus the string.
 /// Caller: `crate::window::WindowShell::look_dated_report` (production wire).
@@ -702,7 +702,7 @@ pub fn rl11_snapshot_update() -> bool {
 /// Classic-vs-reference diff on top of [`frame_diff_count`].
 /// Units: RGBA bytes row-major in, pixels for the count.
 /// Same bytes give the same count twice; integer only, no heap, no IO.
-/// Caller: [`verdict_for_frames`] (same file, unmasked arm) plus the look report.
+/// Caller: `verdict_for_frames` (same file, unmasked arm) plus the look report.
 pub fn compare_classic_reference(
     classic: &[u8],
     reference: &[u8],

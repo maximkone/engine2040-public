@@ -1,10 +1,10 @@
 //! uploads (RA6): generational staging-belt model of the GPU upload discipline.
 //! Owner: render staging belt; consumers: RA1 presenter submit path (via the
 //! orchestrator's `lib.rs` registration) and the AH2 heal path, which calls
-//! [`StagingBelt::invalidate_all`] on resize/surface-loss/device-loss.
+//! `StagingBelt::invalidate_all` on resize/surface-loss/device-loss.
 //! Units: bytes (`usize`) for sizes, frame counts (`u64`) for generations.
 //! Determinism: pure counters with stable Vec order; no clock, no threads.
-//! Errors: [`UploadError`] — use-after-retire names id+generation,
+//! Errors: `UploadError` — use-after-retire names id+generation,
 //! over-capacity names bytes; nothing is silently dropped.
 //! Budget: one Vec entry (~24 B CPU bookkeeping) per live upload; `upload`
 //! and `read` scan live entries linearly; `advance_frame` retires in place.
@@ -33,7 +33,7 @@ pub struct StagingId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UploadError {
     /// Read of an upload that already retired (aged out by `advance_frame`)
-    /// or was dropped by [`StagingBelt::invalidate_all`]. Names the stale
+    /// or was dropped by `StagingBelt::invalidate_all`. Names the stale
     /// handle so the caller can prove which frame bound it.
     Retired {
         /// Stale upload serial from [`StagingId::serial`].

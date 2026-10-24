@@ -4,7 +4,7 @@
 //! texel is too coarse and the depth bias eats the contact line. This march
 //! reads the frame's depth field instead (the live depth prepass) and darkens
 //! only the pixels whose surface meets another surface within
-//! [`THICKNESS_M`] over a [`LENGTH_M`] ray toward the sun, in [`STEPS`] even
+//! `THICKNESS_M` over a `LENGTH_M` ray toward the sun, in `STEPS` even
 //! steps. It multiplies ambient only: the sun keeps its own shadow map.
 //!
 //! Owner: render lane. Consumer: the live GTAO upsample (the field is

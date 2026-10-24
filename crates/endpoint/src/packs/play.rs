@@ -1559,3 +1559,27 @@ mod tests {
         assert!(verb.readonly());
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 12,
+    name: PACK,
+    default_loaded: false,
+    tools: &[
+        "play.step_until",
+        "seat.open",
+        "seat.step",
+        "seat.close",
+        "input.inject",
+        "state.digest",
+        "play.sweep",
+        "tune.sweep",
+        "ai.decisions",
+    ],
+    build: pack,
+};

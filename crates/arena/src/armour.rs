@@ -139,6 +139,7 @@ impl Sim {
         self.last_deflects.clear();
         authority::resolve_cuts(
             &self.states,
+            &self.fight,
             self.tick,
             &mut self.limbs,
             events,

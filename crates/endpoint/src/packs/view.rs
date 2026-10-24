@@ -2581,3 +2581,29 @@ mod tests {
         assert_eq!(first[1].rect, [0.0, 0.0, 0.5, 0.5]);
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 9,
+    name: PACK,
+    default_loaded: false,
+    tools: &[
+        "view.observe",
+        "view.laws",
+        "door.status",
+        "log.digest",
+        "log.query",
+        "rpc.discover",
+        "look.judge",
+        "view.compare",
+        "view.sheet",
+        "look.propose",
+        "view.frame",
+    ],
+    build: pack,
+};

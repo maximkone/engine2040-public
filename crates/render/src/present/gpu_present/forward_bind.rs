@@ -140,7 +140,7 @@ impl TorchSlot {
     }
 }
 
-/// One frame of torch point lights: up to [`TORCH_MAX`] slots, live count
+/// One frame of torch point lights: up to `TORCH_MAX` slots, live count
 /// first, rest zeroed. Mirrors `Eg12TorchBlock` in the chunk.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct TorchFrame {
@@ -176,7 +176,7 @@ impl TorchFrame {
     /// placement actors become lights, in the order the scene gave them.
     /// An empty list with draws falls back to the arena's built-in pair,
     /// so a scene that feeds none still lights the arena. Refuses more
-    /// than [`TORCH_MAX`] lights and any light that breaks the rules.
+    /// than `TORCH_MAX` lights and any light that breaks the rules.
     ///
     /// The refusal is the crate's own [`TorchError`]: the staged
     /// `ForwardMapsError` is a test-only mirror of the shader terms and is
@@ -212,7 +212,7 @@ impl TorchFrame {
     }
 
     /// Build a frame from an explicit slot list: the first `slots.len()`
-    /// entries burn, the rest stay dark. Refuses more than [`TORCH_MAX`]
+    /// entries burn, the rest stay dark. Refuses more than `TORCH_MAX`
     /// entries and any non-finite slot. Sizes nothing.
     #[cfg(test)]
     pub(crate) fn from_list(slots: &[TorchSlot]) -> Result<Self, ForwardMapsError> {

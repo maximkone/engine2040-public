@@ -2,7 +2,7 @@
 //!
 //! A frame's passes are declared as data before they run: each names the
 //! resources it reads and writes and whether it ran, was culled or failed.
-//! [`Plan::validate`] walks the list in order with a set of available
+//! `Plan::validate` walks the list in order with a set of available
 //! resources seeded from the plan's external inputs; a pass whose read has no
 //! earlier writer fails with the pass and the resource named, so a silently
 //! dropped pass can never leave the frame "merely wrong".

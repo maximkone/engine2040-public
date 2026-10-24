@@ -247,3 +247,34 @@ and the floor-plane path (`height` off) are untouched, byte for byte. Numbers: 6
 take-in, damping `v -= v/64`, rope floor 400 mm, gravity `FIGHTER_GRAVITY` = 11 mm/tick^2.
 The window does not arm the channel yet (row SG7), so `play-arena.bat` still zips.
 
+## Yank (row SG9)
+
+Owner 2026-10-24: "grapple ppl and pull them and good af felt". The carry drags
+both fighters away along the throw. A yank pulls the enemy to the thrower,
+"get over here" style. The research in `docs/research/grapple-2026-10-24/` agrees
+on what makes a hook pull feel good: a freeze on the catch, a pull that ends in
+front of the hooker (not on top of them), and a stun long enough for the free hit
+(Thresh tugs only while the target is stunned; Halo's grappleshot melees on arrival).
+
+- Choose at the hit: the thrower's move wish against the flight direction
+  (`mx*dir.x + mz*dir.z < 0`, S held while facing the throw) means yank, anything
+  else is the old carry. No new button bit.
+- On the catch: `HIT_DAMAGE` as before, fight hit-stop `max(hitstop, 5)`, victim
+  `react = max(react, 20)` (a stunned fighter drops its guard, so neither `Guard`
+  nor `Parry` can cut a yank). Both drifts are zeroed.
+- Each pulled tick: the thrower plants (drift 0). The victim's speed is
+  `clamp((gap - 1200) / 4, 30, 400)`, no more than the gap left, set straight
+  toward the thrower (no ramp: the first tick is the snap, the quarter-gap
+  ease is the soft landing). The stun is refreshed to 20 each tick.
+- Ends: `Arrived` when the gap is inside `1200 + 30` mm, 20 permille, victim drift
+  zeroed (they stop in front of the blade with about 20 ticks of stun left);
+  a slam on the way (`victim_blocked`) keeps the carry's slam damage; `Timeout`
+  and `Down` as before.
+- Counters stay before the catch: a facing guard deflects the spear, a parry
+  staggers the thrower, dodge i-frames make the spear pass through, and the
+  throw cooldown. SG13 (a blade cuts the rope) is the counter once caught.
+- Hash: a yank tether folds one extra byte `0xA7`; a carry folds as before.
+
+Next: SG10 (the look), SG11 laquearius noose, SG12 retiarius net, SG13 rope cut
+(rows in `docs/SPRINT-08-hard-stuff.md`).
+

@@ -5,7 +5,7 @@
 //! Units: meters for rays and boxes, texels for frames, 0..=1 factors and
 //! linear RGB triples. Determinism: fixed box order with `+ - * /` and
 //! `sqrt` only; same inputs give bit-identical frames twice (pixels stay
-//! presentation, never the sim hash). Errors are typed [`RtShadowError`];
+//! presentation, never the sim hash). Errors are typed `RtShadowError`;
 //! frame buffers are caller-owned, so the hot path allocates nothing.
 
 #![forbid(unsafe_code)]

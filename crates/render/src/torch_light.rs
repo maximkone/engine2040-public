@@ -7,15 +7,15 @@
 //! and the light's own phase, so the same tick gives the same light.
 //! Presentation only: nothing here feeds the tick or the hash.
 //!
-//! Shape: the forward shader reads up to [`TORCH_MAX`] torches in one
+//! Shape: the forward shader reads up to `TORCH_MAX` torches in one
 //! uniform block, so the scene list is capped and the cap is refused
 //! loudly instead of silently dropping lights. A torch that fails
 //! validation is refused by name: a non-finite position, a negative range
 //! or a negative color component never reaches the frame.
 //!
-//! The night preset: [`night_torches`] is the arena's night pair (the
+//! The night preset: `night_torches` is the arena's night pair (the
 //! gate torches) with the warm color and reach the arena ships, and
-//! [`flicker_scale`] is the presentation-only wobble a torch flame gets
+//! `flicker_scale` is the presentation-only wobble a torch flame gets
 //! per tick, bounded so the frame never pulses.
 
 use core::fmt;

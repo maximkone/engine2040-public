@@ -1,8 +1,8 @@
 //! vfx_hanabi: one batched hanabi-style effect dispatch over the seeded pool.
 //! Owner: render lane. Units: counts, ticks at 60 Hz, seconds for life.
 //! Determinism: fixed effect order, splitmix-seeded integer life ticks.
-//! Errors: [`super::ParticleError`]. Budget: one dispatch, caller GPU buffers.
-//! Caller: [`super::ParticlePool::hanabi_dispatch`].
+//! Errors: `super::ParticleError`. Budget: one dispatch, caller GPU buffers.
+//! Caller: `super::ParticlePool::hanabi_dispatch`.
 //! PORT(djeedai/bevy_hanabi@04680ac23641da0f9022f9e548219642438b7eb8:src/asset.rs,src/spawn.rs,src/gradient.rs,src/render/batch.rs,src/render/effect_cache.rs): reimplemented, zero bytes vendored.
 
 /// Hanabi billboard shader: fetch by (effect, particle), age01 gradient.

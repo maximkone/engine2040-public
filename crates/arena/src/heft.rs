@@ -8,6 +8,10 @@
 //! off leaves every tick and every hash untouched, so the golden and the
 //! arena digest never move. Armed, the rows fold into the checkpoint after
 //! the rules, so two bouts with other weapons never hash alike.
+//!
+//! BG15: a row also brings its steel's condition, and the cut resolver scales
+//! a landed blow by it ([`Sim::edge_wear_q16`]), so the kit's dulled edge
+//! reaches the cut instead of dying at `wear_q16: 0`.
 
 use crate::Sim;
 use engine_combat::fight::{FightState, FIGHT_RULES_V2};
@@ -100,11 +104,35 @@ impl Sim {
     pub fn weapon(&self, slot: u8) -> Option<Heft> {
         self.fight.fighter(slot)?.heft
     }
+
+    /// The dulled edge slot `slot`'s kit carries, in Q16 of one (BG15): the
+    /// armed row's own wear, `0` for a bare hand, a v1 match or a slot out of
+    /// the match. `authority::resolve_cuts` scales the
+    /// blow by it, so a dulled kit cuts less.
+    #[must_use]
+    pub fn edge_wear_q16(&self, slot: u8) -> u32 {
+        self.weapon(slot).map_or(0, |heft| heft.edge_wear_q16())
+    }
+
+    /// The mean edge wear the kits of this match carry, in Q16, over the
+    /// active slots (BG15): what a duel receipt prints beside a cut count so
+    /// a reader sees the wear reach the steel, not only the row.
+    #[must_use]
+    pub fn mean_edge_wear_q16(&self) -> u32 {
+        if self.fighters == 0 {
+            return 0;
+        }
+        let total: u64 = (0..self.fighters)
+            .map(|slot| u64::from(self.edge_wear_q16(u8::try_from(slot).unwrap_or(u8::MAX))))
+            .sum();
+        u32::try_from(total / u64::try_from(self.fighters).unwrap_or(1)).unwrap_or(u32::MAX)
+    }
 }
 
 /// Fold the armed weapon rows into a checkpoint hash: the tag byte, then per
-/// active slot its mass, damage, startup, recovery and react. A match with
-/// no weapon armed returns the hash untouched (golden-frozen bytes).
+/// active slot its mass, damage, startup, recovery, react and edge wear. A
+/// match with no weapon armed returns the hash untouched (golden-frozen
+/// bytes).
 pub(crate) fn fold(hash: u64, fight: &FightState, fighters: usize) -> u64 {
     let active = fight.fighters.get(..fighters).unwrap_or(&[]);
     if active.iter().all(|fighter| fighter.heft.is_none()) {
@@ -119,12 +147,14 @@ pub(crate) fn fold(hash: u64, fight: &FightState, fighters: usize) -> u64 {
             startup_ticks: 0,
             recovery_ticks: 0,
             react_ticks: 0,
+            edge_wear_permille: 0,
         });
         digest.write_u32(heft.mass_g);
         digest.write_u32(u32::from(heft.damage));
         digest.write_u32(heft.startup_ticks);
         digest.write_u32(heft.recovery_ticks);
         digest.write_u32(heft.react_ticks);
+        digest.write_u32(u32::from(heft.edge_wear_permille));
     }
     digest.finish()
 }
@@ -335,5 +365,138 @@ mod tests {
     fn unarmed_fold_leaves_the_hash_untouched() {
         let fight = FightState::new(2).expect("two fighters");
         assert_eq!(fold(0x1234, &fight, 2), 0x1234);
+    }
+
+    /// Both slots press attack every `every` ticks for a whole round: enough
+    /// steel in the air for the cut path to run, no wall clock in it.
+    fn assault_tape(config: &ArenaConfig, every: u32) -> FighterTape {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            for fighter in 0..config.fighters {
+                let press = tick % every == 0;
+                inputs.push(FighterInput {
+                    tick,
+                    fighter: FighterId::new(fighter).expect("slots 0..2 are legal"),
+                    mx: 0,
+                    mz: 0,
+                    facing: 0,
+                    buttons: if press {
+                        Buttons(ATTACK)
+                    } else {
+                        Buttons::NONE
+                    },
+                });
+            }
+        }
+        FighterTape(inputs)
+    }
+
+    /// BG15: the kit's steel comes to the duel with it. Five headless rounds
+    /// of the kit gladius print the mean edge wear the slots carry, beside
+    /// what the rounds landed, and the wear must not read zero — nor stop at
+    /// the readout: every cut the rounds land carries the kit's dulled
+    /// energy, never the fresh-edge number.
+    #[test]
+    fn bg15_a_five_round_headless_duel_prints_a_non_zero_mean_edge_wear() {
+        use engine_combat::{effective_q16, BladeSwing, MAX_ENERGY_Q16, MAX_SHARPNESS_Q16};
+        let round = config(TABLES_VERSION_V2);
+        let tape = assault_tape(&round, 20);
+        let gladius = Heft::from_rows(WEAPONS_ROWS, "gladius").expect("the shipped row");
+        // The energy the arena hands the resolver: its full-force blade, the
+        // kit row's wear. Geometry is irrelevant to `effective_q16`.
+        let blade = |wear_q16: u32| BladeSwing {
+            attacker: 0,
+            victim: 1,
+            swing: 0,
+            p0_mm: [0, 0, 0],
+            p1_mm: [0, 0, 0],
+            blade_half_mm: 0,
+            energy_q16: MAX_ENERGY_Q16,
+            sharpness_q16: MAX_SHARPNESS_Q16,
+            wear_q16,
+        };
+        let kit_cut_energy =
+            u32::try_from(effective_q16(&blade(gladius.edge_wear_q16()))).expect("fits a cut row");
+        let fresh_cut_energy = u32::try_from(effective_q16(&blade(0))).expect("fits a cut row");
+        assert!(
+            kit_cut_energy < fresh_cut_energy,
+            "the kit's dulled row must carry less than fresh steel: {kit_cut_energy}"
+        );
+        let mut hits = 0usize;
+        let mut cuts = 0usize;
+        let mut mean_wear_q16 = 0u32;
+        for round_index in 1..=5 {
+            let mut sim = duel(&tape);
+            sim.arm_weapons(&["gladius", "gladius"])
+                .expect("the kit gladius arms");
+            mean_wear_q16 = sim.mean_edge_wear_q16();
+            assert!(
+                mean_wear_q16 > 0,
+                "round {round_index}: the armed kit must carry its edge wear into the match"
+            );
+            while sim.tick < round.ticks {
+                sim.step(&tape).expect("the round steps");
+            }
+            hits += sim
+                .events
+                .iter()
+                .flat_map(|row| row.events.iter())
+                .filter(|event| matches!(event, FightEvent::Hit { .. }))
+                .count();
+            cuts += sim.cuts.iter().map(|row| row.cuts.len()).sum::<usize>();
+            for row in &sim.cuts {
+                for hit in &row.cuts {
+                    assert_eq!(
+                        hit.energy_q16, kit_cut_energy,
+                        "round {round_index}: tick {} cut the kit's own dulled energy, not a fresh edge",
+                        row.tick
+                    );
+                }
+            }
+            println!(
+                "arena kit duel: round={round_index} wear_q16={} slots=[{},{}] hits_total={hits} cuts_total={cuts}",
+                mean_wear_q16,
+                sim.edge_wear_q16(0),
+                sim.edge_wear_q16(1),
+            );
+        }
+        println!(
+            "arena kit duel: rounds=5 kit=gladius mean_edge_wear_q16={mean_wear_q16} hits={hits} cuts={cuts}"
+        );
+        assert!(hits > 0, "the rounds must land blows, got {hits}");
+        assert!(cuts > 0, "the rounds must sever joints, got {cuts}");
+        assert!(
+            mean_wear_q16 > 0,
+            "the duel's mean edge wear reads zero: the kit wear never reached the blow"
+        );
+        // The duel reads the row's own number, not a fresh edge.
+        assert_eq!(mean_wear_q16, gladius.edge_wear_q16());
+    }
+
+    /// BG15: the wear reads through the armed slot and stays `0` for a bare
+    /// hand, so a match that arms nothing cuts exactly as it did.
+    #[test]
+    fn bg15_a_bare_slot_carries_no_edge_wear() {
+        let tape = press_tape(&config(TABLES_VERSION_V2));
+        let mut sim = duel(&tape);
+        assert_eq!(sim.edge_wear_q16(0), 0, "a bare hand has no edge to dull");
+        assert_eq!(sim.mean_edge_wear_q16(), 0);
+        sim.arm_weapons(&["pilum", "gladius"])
+            .expect("the rows arm");
+        let (pilum, gladius) = (
+            Heft::from_rows(WEAPONS_ROWS, "pilum").expect("the shipped row"),
+            Heft::from_rows(WEAPONS_ROWS, "gladius").expect("the shipped row"),
+        );
+        assert_eq!(sim.edge_wear_q16(0), pilum.edge_wear_q16());
+        assert_eq!(
+            sim.mean_edge_wear_q16(),
+            (pilum.edge_wear_q16() + gladius.edge_wear_q16()) / 2,
+            "the mean sits over the active slots"
+        );
+        assert_eq!(
+            sim.edge_wear_q16(9),
+            0,
+            "a slot out of the match carries none"
+        );
     }
 }

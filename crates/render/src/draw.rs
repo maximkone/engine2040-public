@@ -506,7 +506,7 @@ fn pick_lod(dist: f32, prev: u8, levels: u8, bands: &[f32], hyst: f32) -> u8 {
 /// the projected diameter is
 /// `2 * radius_m / (2 * distance_m * tan_half_fov_y) * screen_h`, then the
 /// ascending `thresholds_px` are walked from the finest boundary down, the
-/// mirrored form of [`pick_lod`]'s hysteresis: level `i` holds while the
+/// mirrored form of `pick_lod`'s hysteresis: level `i` holds while the
 /// size stays at or above `thresholds_px[len - 1 - i]`, so a node that
 /// shrinks on screen lands on a coarser level. `prev` is honoured and the
 /// pick caps at `levels`.
@@ -515,7 +515,7 @@ fn pick_lod(dist: f32, prev: u8, levels: u8, bands: &[f32], hyst: f32) -> u8 {
 /// `radius_m`, a `distance_m` that is not above zero, a `screen_h` outside
 /// 1..=65535 pixels, a non-finite `tan_half_fov_y <= 0`, `levels` of zero, a
 /// negative or non-finite `hyst_px`, or an empty `thresholds_px`. No caller
-/// yet: the pick in [`cull_lod`] carries no frame height in its call chain.
+/// yet: the pick in `cull_lod` carries no frame height in its call chain.
 #[expect(clippy::too_many_arguments, reason = "8 inputs mirror the pick")]
 pub fn lod_by_pixel_error(
     radius_m: f32,

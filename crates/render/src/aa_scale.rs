@@ -4,7 +4,7 @@
 //! the same shape). Units: pixels for sizes, ms in receipts only, scale is a
 //! render/present ratio. Determinism: integer size math, fixed tap order,
 //! same inputs give bit-identical pixels; wall clock feeds receipts only.
-//! Errors are typed [`AaScaleError`]; over-bound sizes degrade, no-device
+//! Errors are typed `AaScaleError`; over-bound sizes degrade, no-device
 //! GPU names what to build, never silent success.
 //!
 //! Approach (Depth L2): SMAA 1x edge-detect plus area-approximating blend

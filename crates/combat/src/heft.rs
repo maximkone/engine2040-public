@@ -8,6 +8,12 @@
 //! (startup 15, recovery 8, damage 120, hit react 6): only the other weapons
 //! change a bout. Integer only; parsing is a cold path, the step reads four
 //! plain fields.
+//!
+//! BG15: a row also names the condition its steel arrives with
+//! (`edge_wear_permille`), and [`Heft::edge_wear_q16`](crate::heft::Heft::edge_wear_q16) turns it into the
+//! dulled fraction the cut resolver already scales a swing by. A row that
+//! names no wear is a fresh edge (`0`), so an un-marked mod table cuts as it
+//! did before.
 
 use crate::fight::{Tables, MAX_HP_PERMILLE};
 
@@ -39,6 +45,9 @@ pub struct Heft {
     pub recovery_ticks: u32,
     /// Ticks a clean hit holds the victim in hit react: the stagger it deals.
     pub react_ticks: u32,
+    /// How far the row's edge is dulled when the kit draws it, in permille
+    /// of a fully dulled edge (`0..=1000`, `0` is fresh; BG15).
+    pub edge_wear_permille: u16,
 }
 
 /// Why a weapon row was refused: the row and the field, never a guess.
@@ -89,8 +98,10 @@ impl std::error::Error for HeftError {}
 impl Heft {
     /// The weapon `id` from weapons rows text (`<id> key=int ...` lines, `#`
     /// comments, a `table` header). Reads `mass_g`, `damage_permille`,
-    /// `speed_ticks`, `recovery_ticks` and `stagger_permille`; other keys are
-    /// the design tests' business and are skipped here.
+    /// `speed_ticks`, `recovery_ticks`, `stagger_permille` and, when the row
+    /// names it, `edge_wear_permille`; other keys are the design tests'
+    /// business and are skipped here. A row with no `edge_wear_permille` is a
+    /// fresh edge (`0`), so an older table arms exactly as it did.
     ///
     /// # Errors
     ///
@@ -102,17 +113,18 @@ impl Heft {
             .map(str::trim)
             .find(|line| line.split_whitespace().next() == Some(id))
             .ok_or_else(|| HeftError::NoRow(id.to_string()))?;
-        let field = |key: &'static str, range: (u32, u32)| -> Result<u32, HeftError> {
-            let text = line
-                .split_whitespace()
+        let value = |key: &'static str| {
+            line.split_whitespace()
                 .find_map(|part| part.strip_prefix(key)?.strip_prefix('='))
-                .ok_or_else(|| HeftError::Missing {
-                    id: id.to_string(),
-                    key,
-                })?;
+        };
+        let field = |key: &'static str, range: (u32, u32)| -> Result<u32, HeftError> {
+            let text = value(key).ok_or_else(|| HeftError::Missing {
+                id: id.to_string(),
+                key,
+            })?;
             text.parse::<u32>()
                 .ok()
-                .filter(|value| (range.0..=range.1).contains(value))
+                .filter(|number| (range.0..=range.1).contains(number))
                 .ok_or_else(|| HeftError::Bad {
                     id: id.to_string(),
                     key,
@@ -122,13 +134,29 @@ impl Heft {
         };
         let damage = field("damage_permille", (1, u32::from(MAX_HP_PERMILLE)))?;
         let stagger = field("stagger_permille", (0, 1000))?;
+        // Optional, so a mod table that predates BG15 still arms: absent or
+        // `0` is a fresh edge.
+        let wear = match field("edge_wear_permille", (0, 1000)) {
+            Ok(number) => number,
+            Err(HeftError::Missing { .. }) => 0,
+            Err(bad) => return Err(bad),
+        };
         Ok(Self {
             mass_g: field("mass_g", (1, MAX_MASS_G))?,
             damage: u16::try_from(damage).unwrap_or(MAX_HP_PERMILLE),
             startup_ticks: field("speed_ticks", (1, MAX_STARTUP_TICKS))?,
             recovery_ticks: field("recovery_ticks", (0, MAX_RECOVERY_TICKS))?,
             react_ticks: react_ticks_for(stagger),
+            edge_wear_permille: u16::try_from(wear).unwrap_or(1000),
         })
+    }
+
+    /// The row's dulled edge as the cut resolver wants it: Q16 of one
+    /// (`0..=65536`), so `500` permille reads `32_768`. Pure integer, exact
+    /// at both ends. Determinism scope: no float, identical on every PC.
+    #[must_use]
+    pub fn edge_wear_q16(&self) -> u32 {
+        u32::from(self.edge_wear_permille).saturating_mul(crate::cut::MAX_WEAR_Q16) / 1000
     }
 }
 
@@ -318,6 +346,48 @@ mod tests {
             hit_impulse_q8(Some(huge), u32::MAX),
             BASE_HIT_Q8 + MAX_MOMENTUM_BONUS_Q8
         );
+    }
+
+    /// BG15: a row names the condition its steel arrives in, and the cut
+    /// resolver's dulled fraction is that permille of a fully dulled edge.
+    #[test]
+    fn edge_wear_reads_the_rows_and_scales_the_edge() {
+        use crate::cut::MAX_WEAR_Q16;
+        // Every shipped row parses with the new key inside its range.
+        for (id, permille) in [
+            ("pugio", 80u16),
+            ("gladius", 120),
+            ("spatha", 90),
+            ("clava", 0),
+            ("pilum", 150),
+        ] {
+            let row = Heft::from_rows(ROWS, id).expect("the shipped row parses");
+            assert_eq!(row.edge_wear_permille, permille, "{id} ships its wear");
+            assert!(row.edge_wear_q16() <= MAX_WEAR_Q16, "{id} stays in range");
+        }
+        // The conversion is the permille of the resolver's full dulled edge.
+        let gladius = Heft::from_rows(ROWS, "gladius").expect("the gladius row parses");
+        assert_eq!(gladius.edge_wear_q16(), MAX_WEAR_Q16 * 120 / 1000);
+        // A blunt weapon has no edge to dull, and an unmarked row is fresh
+        // steel, so a mod table written before BG15 arms exactly as it did.
+        assert_eq!(
+            Heft::from_rows(ROWS, "clava")
+                .expect("the clava row parses")
+                .edge_wear_q16(),
+            0
+        );
+        let fresh = Heft::from_rows(
+            "table weapons version 2\nold mass_g=1000 damage_permille=120 speed_ticks=15 recovery_ticks=8 stagger_permille=400",
+            "old",
+        )
+        .expect("a row without the key parses");
+        assert_eq!(fresh.edge_wear_q16(), 0);
+        // Wear outside the permille scale is the rows' own refusal.
+        assert!(Heft::from_rows(
+            "table weapons version 2\nbad mass_g=1000 damage_permille=120 speed_ticks=15 recovery_ticks=8 stagger_permille=400 edge_wear_permille=1001",
+            "bad",
+        )
+        .is_err());
     }
 
     #[test]

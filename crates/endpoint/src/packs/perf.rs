@@ -1649,7 +1649,11 @@ mod tests {
         assert!(out.slices >= 8, "{} slices", out.slices);
         assert!(out.phases.len() >= 8, "{:?}", out.phases);
         let slices = out.trace.matches("\"ph\":\"X\"").count();
-        assert_eq!(slices, usize::try_from(out.slices).expect("slices fit"), "{slices}");
+        assert_eq!(
+            slices,
+            usize::try_from(out.slices).expect("slices fit"),
+            "{slices}"
+        );
         // Timestamps run from zero and every duration is a whole number.
         assert!(out.trace.contains("\"ts\":0,"), "timestamps start at zero");
         for chunk in out.trace.split("\"dur\":").skip(1) {
@@ -1663,3 +1667,17 @@ mod tests {
         assert_eq!(refused.code, "bad_frames");
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 11,
+    name: PACK,
+    default_loaded: false,
+    tools: &["perf.table", "perf.doctor", "perf.trace"],
+    build: pack,
+};

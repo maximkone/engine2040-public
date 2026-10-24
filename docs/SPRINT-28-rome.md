@@ -221,10 +221,22 @@ until the slice (LEG10) lands.
   Accept: `cargo test -p engine-game --lib camp_day` passes - the player starts a work, man-ticks
   tick down, the work completes and its prop appears in the next frame; replay twice equal.
   F2P: no works, no camp loop.
-- [ ] LEG19 game: wounds outlive the fight. Steal: CDDA body parts plus OpenXcom hospital days.
+- [x] LEG19 game: wounds outlive the fight. Steal: CDDA body parts plus OpenXcom hospital days. Landed 0f75bb6f8.
   Four parts at three severities, set from the `combat::cut` events we already raise, healed by a
   camp day. Tier B. Size M. Owns `crates/game/src/wounds.rs`, `content/rome/wound.toml`.
   Accept: `cargo test -p engine-game --lib wounds` passes - a cut persists across the tick loop
   and `scene.save`/`scene.load`, one camp day heals one step, a severed part never heals; the
   golden re-pin is explicit and names the tick it first differs.
   F2P: a wound dies with the fight.
+  Proof: `cargo test -p engine-game --lib wounds` 13 passed, 0 failed (run 40076835126): the
+  shipped table prices four parts at three severities; a cut sets one wound and two cuts in
+  either order give one hash; a cut persists across 10,000 ticks and through the save payload
+  (`Wounds::encode`/`Wounds::decode`, same hash and bytes back); one camp day heals one step; a
+  severed part never heals. Clippy `-D warnings` clean on the owned paths (run 40077167364; the
+  full-crate line is red in a foreign dirty `ladder.rs`); `node tools/rust-quality.mjs --crate
+  game` PASS; `rustfmt --edition 2021 --check` clean. Golden unchanged at
+  `d57b5c8ae3096614` (proof_cli default seed `--verify`, run 40077249936), so no re-pin and no
+  first-differing tick: the arena tick never reads this module. The board's
+  `scene.save`/`scene.load` is the save seam; the game's `save_progress` envelope (arena
+  progression) carries no campaign state, same as `roster`, and this payload waits for the camp
+  save row.

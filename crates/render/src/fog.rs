@@ -3,11 +3,11 @@
 //! Owner: render lane; consumer WIN1/ED1 forward pass (`fog_factor` plus
 //! `contact_ao` below), ED1 viewport, Q1 captures. Units: meters for depth,
 //! heights and falloff, pixels for sizes and radii, ms in receipts. Fog ramps
-//! from the bound RL4 day capture ([`FogParams::from_sky_capture`]); contact
+//! from the bound RL4 day capture (`FogParams::from_sky_capture`); contact
 //! shadows occlude small details only (radius capped). Determinism: row-major
 //! integer orders, fixed tap tables, f64 accumulation on the CPU bakes; same
 //! complete inputs give bit-identical bytes twice. Errors are typed
-//! [`FogError`]; the headless twin names the window device bind while the
+//! `FogError`; the headless twin names the window device bind while the
 //! window build runs both passes for real with 0 validation errors.
 
 use std::fmt;
@@ -151,7 +151,7 @@ pub struct FogParams {
 }
 
 impl FogParams {
-    /// Day default: horizon color filled by [`FogParams::from_sky_capture`].
+    /// Day default: horizon color filled by `FogParams::from_sky_capture`.
     pub fn day() -> Self {
         Self {
             fog_color: [0.5, 0.6, 0.7],

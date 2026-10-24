@@ -5,7 +5,7 @@
 //! `paints_per_frame` paints per frame in stable `(tick, char_id)` order so
 //! the same inputs give the same bytes twice. When resident bytes run over
 //! `cap_bytes`, the whole oldest character map is evicted first and reported
-//! through [`WoundMaps::last_evict`]. Std-only: no GPU, no wall clock, and
+//! through `WoundMaps::last_evict`. Std-only: no GPU, no wall clock, and
 //! wound bytes never enter the simulation hash.
 
 mod wound_queue {
@@ -191,7 +191,7 @@ impl WoundMaps {
     ///
     /// The rect is clamped to 0..1 UV; empty results are dropped and report
     /// `false`. Over `cap_bytes`, the whole oldest character map is evicted
-    /// first (see [`WoundMaps::last_evict`]); when that map is our own, the
+    /// first (see `WoundMaps::last_evict`); when that map is our own, the
     /// just-pushed paint is gone too and the call reports `false`.
     pub fn queue(&mut self, char_id: u32, rect: UvRect, kind: WoundKind, tick: u32) -> bool {
         let Some(rect) = clamp_rect(rect) else {

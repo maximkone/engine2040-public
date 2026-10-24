@@ -5,11 +5,11 @@
 //! Determinism: seat math uses `+ - * /` and one `sqrt` in fixed
 //! sector/row/col order, so the same bytes give the same frame twice;
 //! visuals are client-local and never hashed. Errors are typed
-//! [`CrowdInstError`]. Budget: staging is O(seats) over caller-owned
+//! `CrowdInstError`. Budget: staging is O(seats) over caller-owned
 //! slices with no allocation; the posted frame bar is
-//! [`CROWD_INST_BUDGET_MS`] ms. Caller: `crates/game/src/crowd_gpu.rs`
+//! `CROWD_INST_BUDGET_MS` ms. Caller: `crates/game/src/crowd_gpu.rs`
 //! (the integer sim feeds one frame per window tick); the next slice
-//! binds [`GpuBindRequest`] through `queue.write_buffer` in the presenter.
+//! binds `GpuBindRequest` through `queue.write_buffer` in the presenter.
 
 use engine_core::Fnv64;
 use std::fmt;

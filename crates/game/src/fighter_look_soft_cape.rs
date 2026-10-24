@@ -320,6 +320,49 @@ mod tests {
             "the cape never hangs past its bound: {worst_sag_cm:.2} cm"
         );
     }
+
+    #[test]
+    fn px44c_a_running_cape_stays_on_the_body() {
+        // The arena's fighters run. The pin row is placed from the shoulders every
+        // tick, so the drawn sheet must hang from them at 3 m/s too: finite, inside
+        // 70..101 cm below the pin row, and on the same side of the body. This is
+        // the case a still-body test cannot see.
+        let hp = [1000u16; 2];
+        let mut look = px44c_look(true);
+        let mut worst_low = 0.0f32;
+        let mut worst_high = 0.0f32;
+        let mut bad = 0usize;
+        for tick in 0..120u32 {
+            // 5 cm a tick at 60 Hz is 3 m/s: a running fighter.
+            let z = -0.05 * small_f32(usize::try_from(tick).unwrap_or(0));
+            look.observe_tick(tick, &cape_views(z), &hp, &[]);
+            let Some((positions, cols, rows, _)) = look.cape_draw(0) else {
+                bad += 1;
+                continue;
+            };
+            let top = positions[0][1];
+            let hem = (rows - 1) * cols;
+            let drop_cm = (top - positions[hem][1]) * 100.0;
+            worst_low = worst_low.max(drop_cm.min(0.0));
+            worst_high = worst_high.max(drop_cm.max(0.0));
+            if !positions.iter().flatten().all(|v| v.is_finite()) {
+                bad += 1;
+            }
+        }
+        println!(
+            "px44c running: hem below the pin row {worst_high:.2} cm at most, \
+             {worst_low:.2} cm at least (negative = above), bad frames {bad}"
+        );
+        assert_eq!(bad, 0, "every running frame draws a finite soft cape");
+        assert!(
+            (70.0..=101.0).contains(&worst_high),
+            "the running cape hangs {worst_high:.2} cm below its pin row"
+        );
+        assert!(
+            worst_low >= -1.0,
+            "the running cape never rises above its pin row: {worst_low:.2} cm"
+        );
+    }
 }
 
 /// One unit normal of the cloth at vertex `(c, r)`, turned onto `outward`'s

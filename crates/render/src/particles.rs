@@ -13,7 +13,7 @@ pub fn fluid_mirror_bytes(pool: &crate::particles_gpu::fluids_gpu::PresentFluid)
 }
 /// Largest deterministic CPU-mirror pool: 60k live particles. Fixed emitter
 /// order plus [`FIXED_DT`] stepping gives byte-equal hashes x2; the spawn
-/// throttle shares owner [`throttle_spawn`] with the GPU pool for parity.
+/// throttle shares owner `throttle_spawn` with the GPU pool for parity.
 /// Caller: [`ParticleEffect::new`] clamps every build into this cap.
 /// PORT(AizenKai1001/lunaris@56cc7e30:examples/particle_fx `particle_fx.rs` seeded emitter graph, fixed-order update, hash).
 pub const MAX_PARTICLES_60K: usize = 60_000;
@@ -34,7 +34,7 @@ impl Rng {
         (self.next_u64() >> 32) as u32 as f32 / 4_294_967_300.0
     }
 }
-/// 1D keyframed curve over age01 in [0,1]. Linear interp, clamped ends.
+/// 1D keyframed curve over age01 in `[0,1]`. Linear interp, clamped ends.
 #[derive(Clone, Debug, Default)]
 pub struct Curve {
     pub keys: Vec<(f32, f32)>,

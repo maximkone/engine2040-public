@@ -17,7 +17,7 @@ const MAX_LIST: usize = 16;
 const ECHO_CHARS: usize = 40;
 
 /// Every key `game.toml` knows; any other key is refused.
-const KEYS: [&str; 8] = [
+const KEYS: [&str; 9] = [
     "name",
     "targets",
     "quality",
@@ -26,6 +26,7 @@ const KEYS: [&str; 8] = [
     "content",
     "seed_file",
     "game",
+    "modules",
 ];
 
 /// Keys that parse (so a bad value is still named with its line) but reach no build or run:
@@ -192,6 +193,9 @@ pub struct Manifest {
     pub seed_file: Option<String>,
     /// The game this project builds and runs; the engine's arena when the file names none.
     pub game: Game,
+    /// Packs the project lists under `modules`, in declaration order, without repeats; empty
+    /// when the file names none, which is the door's own default set.
+    pub modules: Vec<String>,
     /// Every key the file set, with its line, in file order; the rest took their defaults.
     keys: Vec<(&'static str, usize)>,
 }
@@ -482,6 +486,22 @@ fn parse_game(row: &Row) -> Result<Game, ManifestError> {
     })
 }
 
+/// The `modules` value: pack names in declaration order, repeats dropped. The root crate keeps
+/// the list; the MCP door resolves it against its pack registry when it loads the project.
+fn parse_modules(row: &Row) -> Result<Vec<String>, ManifestError> {
+    let items = row.list()?;
+    let mut modules: Vec<String> = Vec::with_capacity(items.len());
+    for name in items {
+        if name.is_empty() {
+            return Err(row.err("a module name is not empty; name a pack the door lists"));
+        }
+        if !modules.iter().any(|listed| listed == name) {
+            modules.push(name.clone());
+        }
+    }
+    Ok(modules)
+}
+
 /// A path inside the project: forward slashes, no `..`, no drive, no leading `./` or `/`.
 fn check_relative(path: &str) -> Result<(), &'static str> {
     if path.is_empty() {
@@ -555,6 +575,11 @@ impl Manifest {
             None => Game::default(),
         };
 
+        let modules = match take(&mut rows, "modules") {
+            Some(row) => parse_modules(&row)?,
+            None => Vec::new(),
+        };
+
         Ok(Self {
             name,
             targets,
@@ -564,6 +589,7 @@ impl Manifest {
             content,
             seed_file,
             game,
+            modules,
             keys,
         })
     }
@@ -584,14 +610,21 @@ impl Manifest {
 
     /// One line naming what the project is, for the run receipt.
     pub fn summary(&self) -> String {
-        format!(
+        let summary = format!(
             "{} quality={} gore={} layers={} targets={}",
             self.name,
             self.quality.word(),
             self.gore.word(),
             joined(&self.physics_layers, ","),
             joined(&self.targets, ",")
-        )
+        );
+        // Only a file that lists modules grows the line, so every digest over a manifest
+        // without the key stays byte-identical.
+        if self.modules.is_empty() {
+            summary
+        } else {
+            format!("{summary} modules={}", self.modules.join(","))
+        }
     }
 }
 
@@ -658,6 +691,60 @@ seed_file = \"content/seed.txt\"
             }
         );
         assert!(manifest.sets("game"));
+    }
+
+    /// F2P: `modules` is an unknown key before WG2, so this test fails on that tree.
+    #[test]
+    fn modules_key_lists_packs_in_order_without_repeats() {
+        let text = "name = \"a\"\ntargets = [\"web\"]\nmodules = [\"geo\", \"scene\", \"geo\"]\n";
+        let manifest = Manifest::parse(text).expect("modules parses");
+        assert_eq!(manifest.modules, ["geo", "scene"]);
+        assert!(manifest.sets("modules"));
+        assert_eq!(
+            manifest.summary(),
+            "a quality=medium gore=full layers=authority,physical targets=web modules=geo,scene"
+        );
+        // Without the key the parse and the summary bytes stay exactly as before.
+        let plain = Manifest::parse(FULL).expect("parses");
+        assert!(plain.modules.is_empty());
+        assert!(!plain.sets("modules"));
+        assert_eq!(
+            plain.summary(),
+            "duel-1 quality=high gore=off layers=authority targets=windows,web"
+        );
+        // An empty list is a list: it names no module and keeps the summary bytes.
+        let bare = Manifest::parse("name = \"a\"\ntargets = [\"web\"]\n").expect("parses");
+        let empty = Manifest::parse("name = \"a\"\ntargets = [\"web\"]\nmodules = []\n")
+            .expect("an empty list parses");
+        assert!(empty.modules.is_empty());
+        assert!(empty.sets("modules"));
+        assert_eq!(empty.summary(), bare.summary());
+    }
+
+    #[test]
+    fn bad_modules_values_name_their_own_key() {
+        let cases: [(&str, &str); 3] = [
+            (
+                "modules = \"geo\"\n",
+                "expected a list like [\"one\", \"two\"]",
+            ),
+            ("modules = [\"\"]\n", "a module name is not empty"),
+            ("modules = [geo]\n", "list items are \"quoted strings\""),
+        ];
+        for (row, reason) in cases {
+            let text = format!("name = \"a\"\ntargets = [\"web\"]\n{row}");
+            let error = refused(&text);
+            assert_eq!(
+                (error.line, error.key.as_str()),
+                (3, "modules"),
+                "{row}: {error}"
+            );
+            assert!(error.reason.contains(reason), "{row}: {error}");
+        }
+        let twice =
+            refused("name = \"a\"\ntargets = [\"web\"]\nmodules = [\"a\"]\nmodules = [\"b\"]\n");
+        assert_eq!((twice.line, twice.key.as_str()), (4, "modules"), "{twice}");
+        assert!(twice.reason.contains("first on line 3"), "{twice}");
     }
 
     #[test]

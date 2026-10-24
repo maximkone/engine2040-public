@@ -971,3 +971,27 @@ mod fx_verbs {
         );
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 2,
+    name: PACK,
+    default_loaded: false,
+    tools: &[
+        "fx.ragdoll",
+        "fx.limb",
+        "fx.break",
+        "fx.blast",
+        "fx.undo",
+        "fx.preset.list",
+        "fx.preset.preview",
+        "fx.preset.set",
+        "fx.preset.clear",
+    ],
+    build: pack,
+};

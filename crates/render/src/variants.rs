@@ -6,7 +6,7 @@
 //! Units: counts (variants, defines) and frame indices (`u64`, never time).
 //! Determinism: variants iterate in name order; define pairs sort by
 //! (name, value), so identical inputs give identical keys on any host.
-//! Errors: typed [`VariantError`]; over-cap names the refused variant and
+//! Errors: typed `VariantError`; over-cap names the refused variant and
 //! off-frame swaps name the expected frame. Blocking work (compile, IO)
 //! stays with the caller; this module only validates and stages.
 

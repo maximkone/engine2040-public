@@ -5,8 +5,8 @@
 //! for positions and AABBs, counts for tris/verts/instances, ms in receipts.
 //! Determinism: index-order loops, sorted instance order, FNV-1a64 digests;
 //! same proxy bytes build identical input bytes twice. Errors are typed
-//! [`AccelError`]; Base tier falls back loudly, never silently.
-//! Budget: TLAS plus skinned refit inside [`ACCEL_REFIT_BUDGET_MS`] (1.5 ms)
+//! `AccelError`; Base tier falls back loudly, never silently.
+//! Budget: TLAS plus skinned refit inside `ACCEL_REFIT_BUDGET_MS` (1.5 ms)
 //! on the reference GPU; steady-state refits reuse every allocation.
 //!
 //! Approach (patterns only, engine-owned math): simplified RT proxies beside

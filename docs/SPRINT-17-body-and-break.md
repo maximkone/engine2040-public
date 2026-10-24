@@ -327,9 +327,21 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   shas; content/maps/cooked holds 15 glb, 15 sidecars naming ao grime normal orm plus the orm and normal ktx2, 30 ktx2
   and 60 png, 7.1 MB (the ORM keeps each piece's authored roughness floor and metal); the no-UV fixture exits 4 with recipe.no_uv: object "BoxNoUv" has no TEXCOORD_0 while a missing
   --exe proves Blender never starts; node tools/workspace-check.mjs passes; git diff --check clean.
-- [ ] GEO15 dcc: one warm Blender per batch. Steal: `mcp-for-blender` (MIT) socket plus
+- [x] GEO15 dcc: one warm Blender per batch. Steal: `mcp-for-blender` (MIT) socket plus Landed 024d3d99c.
   main-thread queue - keep one 5.2 process alive across a batch instead of paying 5.48-18.07 s of
   startup per recipe. The gate is digest equality, not speed: every GLB must equal the
   fresh-process cook. Files: `tools/dcc/blender-cook.mjs`, `tools/dcc/blender/` (the bridge).
   Accept: 8 recipes in one batch take under 8 x the cold single-recipe time, every GLB sha equals
   the fresh-process sha for the same recipe, and a crash mid-batch restarts once and reports it.
+  Proof 2026-10-24: `node --test tools/dcc/blender-cook.test.mjs tools/dcc/blender/verify_op.test.mjs`
+  23 passed. Eight crate recipes on one warm 5.2 took 2.90 s against 4.63 s for one cold cook (the
+  accept allows 8 x 4.63 = 37.0 s), and all 8 GLB shas equal the fresh-process sha f41106359ff613d3.
+  A warm bake (training_post, 32 px, AO, twice in one process) kept the cold GLB sha 53e958ea and
+  the cold KTX2 set sha 09cb91d0. `--crash-at 2` killed the warm process before recipe 2; the driver
+  restarted once (stderr `blender.batch_restarted before recipe 2`, stdout `ok batch 4 restarts=1`)
+  and all 4 GLBs equal the cold sha. A batch with an unknown op (exit 4, `batch recipe 0:
+  recipe.unknown_op`) and one with no recipes (`batch.empty`) refuse before Blender starts. The
+  batch hashes the exe and starts Blender once, not 5.48-18.07 s per recipe: `--serve` takes one
+  JSON request per line from a loopback socket, a reader thread queues and the main thread runs
+  every bpy call, and `read_factory_settings()` between recipes keeps a warm GLB byte-equal to a
+  cold one.

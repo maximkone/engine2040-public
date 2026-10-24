@@ -201,7 +201,7 @@ impl From<crate::aa_scale::AaScaleError> for PostError {
 
 /// Render size the controller drives for this present: scaled, rounded,
 /// forced even (the TAAU path stays exact), clamped to the present size.
-/// Same inputs give the same size; errors map into [`PostError`].
+/// Same inputs give the same size; errors map into `PostError`.
 pub fn taa_off_render_size_for_scale(
     controller: &crate::aa_scale::ScaleController,
     present_w: u32,

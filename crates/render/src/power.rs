@@ -1,8 +1,8 @@
 //! power: battery-aware quality cap (GS40).
 //!
 //! Purpose: a laptop on battery should not draw full frames and cook its fan.
-//! [`read_power`] is a thin OS leaf beside `backend::read_vram`
-//! (`GetSystemPowerStatus`); [`power_cap`] is the pure rule that steps one
+//! `read_power` is a thin OS leaf beside `backend::read_vram`
+//! (`GetSystemPowerStatus`); `power_cap` is the pure rule that steps one
 //! tier down when the machine runs on battery and is either low or in
 //! battery saver.
 //! Owner: render lane. Units: battery percent (%). Determinism: pure integer

@@ -1,6 +1,6 @@
 //! quality: render quality tiers as typed data (GS10 slice 1).
 //!
-//! Owner: engine-render. Units live on each knob (see [`unit`]).
+//! Owner: engine-render. Units live on each knob (see [`unit()`]).
 //! Determinism: pure integer data; [`table_hash`] is FNV-1a over the fixed
 //! struct field order, identical on every platform. No tick, clock or float.
 //! Consumer: PLF10 game presets read [`knobs`] next slice; this slice only

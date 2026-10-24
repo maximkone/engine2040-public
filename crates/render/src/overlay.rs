@@ -231,7 +231,7 @@ impl FontAtlas {
 
 /// Ortho from 0..1 quad space to NDC with x divided by aspect.
 /// Column-major (outer index is column) for the shader upload:
-/// ndc x = m[0][0] * x + m[3][0], ndc y = m[1][1] * y + m[3][1].
+/// ndc x = `m[0][0] * x + m[3][0]`, ndc y = `m[1][1] * y + m[3][1]`.
 /// Bad aspect (zero, negative, non-finite) reads as 1.0.
 pub fn overlay_mvp(aspect: f32) -> [[f32; 4]; 4] {
     let a = if aspect.is_finite() && aspect > 0.0 {

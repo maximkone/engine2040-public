@@ -4,7 +4,7 @@
 //! presenter and the post chain. Units: texels for shadow maps, meters
 //! for ranges and radii, pixels for cluster tiles, ms per pass in receipts.
 //! Determinism: fixed index orders and stable sorts only; wall clock appears
-//! in receipts, never in assignments. Errors are typed [`LightError`]:
+//! in receipts, never in assignments. Errors are typed `LightError`:
 //! over-budget inputs degrade (clamp plus a recorded error), bad inputs fail
 //! loudly, device and validation faults name their scope. The window submit
 //! (`submit_shadow_cluster`) records real passes and never reports
@@ -351,7 +351,7 @@ impl SunShadowPass {
     }
 
     /// Headless seam: the real encode lives in the window
-    /// [`submit_shadow_cluster`] (needs a wgpu device), so this reports a
+    /// `submit_shadow_cluster` (needs a wgpu device), so this reports a
     /// typed error naming it instead of pretending. Never silent success.
     pub fn submit_gpu(&self) -> Result<PassReceipt, LightError> {
         Err(LightError::Invalid(

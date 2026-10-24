@@ -53,7 +53,7 @@ pub(super) const AUTO_BIN_WIDTH_EV: f32 = (AUTO_LOG_MAX_EV - AUTO_LOG_MIN_EV) / 
 /// spans 64 bins).
 pub(super) const AUTO_HIST_STEPS: usize = 6;
 /// Widest histogram stride in texels: large frames sample one texel per
-/// 4x4 block, small frames sample every texel (see [`hist_stride`]).
+/// 4x4 block, small frames sample every texel (see `hist_stride`).
 pub(super) const AUTO_HIST_STRIDE_MAX: u32 = 4;
 
 /// Auto-exposure tuning: trim band, key, slew and clamp range. The clamp
@@ -239,7 +239,7 @@ pub(super) fn bin_for_scaled(scaled: f32) -> usize {
     bin.min(AUTO_HIST_BINS - 1)
 }
 
-/// Bin one HDR frame by log2 luma over the [`hist_stride`] pattern.
+/// Bin one HDR frame by log2 luma over the `hist_stride` pattern.
 /// Non-positive luma lands in bin 0; the top edge clamps into the last
 /// bin. Validates dims, length and finiteness exactly like the chain
 /// inputs.

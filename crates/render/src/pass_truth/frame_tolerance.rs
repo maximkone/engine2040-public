@@ -2,23 +2,23 @@
 //!
 //! Owner: render lane. One rule in one place. A frame matches a golden only if
 //! BOTH hold: the mean absolute RGB channel error is at most
-//! [`GOLDEN_MEAN_ABS_MILLI`] (1.5 levels on the 0..255 scale) AND at most
-//! [`GOLDEN_OVER_PPM`] of the pixels (0.5 percent) are off by more than
-//! [`GOLDEN_OVER_LEVEL`] levels on any channel. Each number hides what the
+//! `GOLDEN_MEAN_ABS_MILLI` (1.5 levels on the 0..255 scale) AND at most
+//! `GOLDEN_OVER_PPM` of the pixels (0.5 percent) are off by more than
+//! `GOLDEN_OVER_LEVEL` levels on any channel. Each number hides what the
 //! other shows: a mean alone lets a few pixels be wrong by a lot (a lost
 //! highlight), a share alone lets the whole frame drift a little (a gain nudge).
-//! [`frames_match`] returns a [`FrameVerdict`] with both numbers, so a failure
+//! `frames_match` returns a `FrameVerdict` with both numbers, so a failure
 //! says which rule broke and by how much.
 //! The gate proves itself: the tests below nudge one post coefficient by 0.02
 //! and one patch of pixels by a visible amount, and the rule must FAIL; a
 //! nudge a tenth the size must PASS. A rule that passes both has no teeth.
 //! Units: RGBA bytes row-major, levels on 0..255; alpha is ignored. Integer
 //! math only (milli-levels, parts per million), so the same bytes give the
-//! same verdict on every machine. Errors: [`FrameError`] names ragged input.
+//! same verdict on every machine. Errors: `FrameError` names ragged input.
 //! Budget: one pass over both frames, no allocation.
 //! Consumers: the GPU-skinned mesh parity test in `present/gpu_present/presenter.rs`
 //! (the CPU-skinned frame is its golden); new golden or parity tests call
-//! [`frames_match`] instead of a local threshold.
+//! `frames_match` instead of a local threshold.
 
 use std::error::Error;
 use std::fmt;

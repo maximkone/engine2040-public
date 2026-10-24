@@ -3,7 +3,7 @@
 //! Owner: render lane; consumer `super::spatial_720p_to_1080p` (Caller:
 //! `crates/render/src/post.rs`). Units: pixels for sizes, ms in receipt.
 //! Determinism: integer base math, fixed 12-tap order, same inputs give bit-identical
-//! pixels; wall clock feeds the receipt only. Errors reuse [`super::PostError`].
+//! pixels; wall clock feeds the receipt only. Errors reuse `super::PostError`.
 //!
 //! Edge-directed 12-tap lobe (4x3 Lanczos-2 window in a local gradient frame)
 //! with gradient reject plus a 2x2 clamp; caller runs RCAS finish.

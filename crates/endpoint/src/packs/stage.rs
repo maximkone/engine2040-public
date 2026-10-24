@@ -1552,3 +1552,29 @@ mod tests {
         assert!(unknown.message.contains("legal ids"), "{}", unknown.message);
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 23,
+    name: PACK,
+    default_loaded: false,
+    tools: &[
+        "stage.pin.add",
+        "stage.pin.list",
+        "stage.pin.clear",
+        "stage.camera.add",
+        "stage.camera.set",
+        "stage.camera.list",
+        "stage.camera.remove",
+        "stage.camera.frame",
+        "stage.shot.add",
+        "stage.shot.list",
+        "stage.shot.remove",
+    ],
+    build: pack,
+};

@@ -11,7 +11,7 @@
 //! map sizes. Std only. Consumer: the day-sweep fixture, then RL30.
 //! Units: meters for ranges and splits, texels for map edges.
 //! Determinism: pure functions of the inputs; same range gives the same
-//! splits and sizes, byte-identical x2. Errors: [`CascadeError`] names
+//! splits and sizes, byte-identical x2. Errors: `CascadeError` names
 //! the bad range loudly. Overlap build ports Bevy's log-split builder
 //! plus overlap proportion (see `CASCADE_OVERLAP`); the legacy practical
 //! splits stay pinned beside it.

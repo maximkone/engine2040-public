@@ -12,7 +12,7 @@
 //! this module samples it into the equirectangular [`EnvMap`] the bake takes.
 //! Units: linear HDR radiance, equirectangular texels. Determinism: the same
 //! parameters give the same map and the same bake twice; presentation only,
-//! never the sim hash. Errors: typed [`IblError`], loud. Budget: 8192 sky
+//! never the sim hash. Errors: typed `IblError`, loud. Budget: 8192 sky
 //! samples at init (well under a millisecond), then the usual bake.
 
 use crate::arena_day::arena_day_params;

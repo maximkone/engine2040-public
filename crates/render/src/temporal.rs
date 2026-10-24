@@ -10,15 +10,15 @@
 //!
 //! The flag `history_valid` says whether the pixels in a texture belong to
 //! the scene the reader is drawing now. A first use, a resize, a dyn-res
-//! step (all three change [`HistoryDesc`]) and a camera cut
-//! ([`TemporalRegistry::camera_cut`]) make it false; the next export makes
+//! step (all three change `HistoryDesc`) and a camera cut
+//! (`TemporalRegistry::camera_cut`) make it false; the next export makes
 //! it true. A reader that sees false must not blend the old pixels: the TAA
 //! resolve does this through [`crate::post::TaaParams::with_history`].
 //!
 //! Units: pixels and bytes. Determinism: pure state machine, no clock, no
-//! GPU, never part of a simulation hash. Errors: typed [`TemporalError`].
+//! GPU, never part of a simulation hash. Errors: typed `TemporalError`.
 //! Caller: the TAA chain reads the flag through `TaaParams`; the GPU owner
-//! of a history texture reallocates when [`Take::recreated`] is true.
+//! of a history texture reallocates when `Take::recreated` is true.
 
 use std::collections::BTreeMap;
 use std::fmt;

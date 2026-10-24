@@ -44,7 +44,7 @@ use engine_destruction::bonded::{BondedCollection, BreakEvent};
 use engine_ecs::schedule::{Ctx, Schedule};
 use engine_ecs::spine::{AiState, AnimState, Body, Intent, Spine, Transform, Vitals};
 use engine_ecs::spine_schedule::{SpineSchedule, SpineSystem};
-use engine_input::fighter::{Buttons, JUMP, THROW_SPEAR};
+use engine_input::fighter::{Buttons, JUMP, THROW_SPEAR, THROW_SPEAR_WORLD};
 use engine_physics::balance::{BalanceParams, BalanceState, GaitPhase, Knockback};
 #[cfg(feature = "sim")]
 use engine_physics::controller::Controller;
@@ -779,12 +779,12 @@ fn sys_motion(core: &mut Core, _: &mut Ctx) {
 /// fighter holds its pose. `false` when a rule refused.
 fn move_slot(core: &mut Core, slot: usize, limit: f32, tick: u32) -> bool {
     let input = core.row[slot];
-    // The spear bit only exists in a spear match; elsewhere it is masked out
-    // so a stray press cannot reach the hash.
+    // The spear bits only exist in a spear match; elsewhere they are masked
+    // out so a stray press cannot reach the hash.
     core.buttons[slot] = if core.spear.is_some() {
         input.buttons.0
     } else {
-        input.buttons.0 & !THROW_SPEAR
+        input.buttons.0 & !(THROW_SPEAR | THROW_SPEAR_WORLD)
     };
     if core.fight.fighters[slot].hp_permille == 0 {
         // Held pose: no motion this tick.
@@ -907,18 +907,30 @@ fn after_motion(core: &mut Core, n: usize) {
     }
 }
 
+/// The tick's landed blades as cuts: V2 only, and the kit's own edge wear
+/// reaches the resolver through the fight state (BG15). V1 never cuts.
+fn extract_cuts(core: &mut Core) -> Vec<Cut> {
+    if core.rules.version != FIGHT_RULES_V2 {
+        return Vec::new();
+    }
+    let n = core.fighters;
+    authority::resolve_cuts_bare(
+        &core.states[..n],
+        &core.fight,
+        core.tick,
+        &mut core.limbs,
+        &core.events,
+    )
+}
+
 /// `Extract` (PostUpdate): the landed hits resolve to cuts, the balance and
 /// the limb pool step, sword hits strike the crate prop, the prop steps and
 /// the checkpoint folds over the legacy shapes.
 fn sys_extract(core: &mut Core, _: &mut Ctx) {
     let n = core.fighters;
     // V2 landed hits resolve to cuts before the limb pool steps, so a limb
-    // loses its first tick immediately. V1 never enters this path.
-    core.cuts = if core.rules.version == FIGHT_RULES_V2 {
-        authority::resolve_cuts_bare(&core.states[..n], core.tick, &mut core.limbs, &core.events)
-    } else {
-        Vec::new()
-    };
+    // loses its first tick immediately.
+    core.cuts = extract_cuts(core);
     // Observe each body's post-move centre, then advance balance. The
     // stagger memory steps beside balance, the limb pool behind it.
     if core.rules.balance {

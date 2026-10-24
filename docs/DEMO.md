@@ -10,7 +10,7 @@ If `target\release\arena.exe` is missing, build it once:
 `cargo build --release -p engine-game --features app --bin arena`.
 
 Exact command the bat runs:
-`target\release\arena.exe --scene arena --fighters 2 --play --spear --ticks 100000`
+`target\release\arena.exe --scene arena --fighters 2 --play --spear --height --ticks 100000`
 Extra flags go after the bat name, e.g. `play-arena.bat --fighters 4` (you vs three bots, round decided by your hp against the summed field) or `--seed 7` (another seed).
 
 ## Controls (read from `crates/input/src/bindings.rs`, `crates/game/src/bin/arena.rs`, `crates/game/src/lock_on.rs`)
@@ -20,6 +20,7 @@ Extra flags go after the bat name, e.g. `play-arena.bat --fighters 4` (you vs th
 | W A S D | move relative to the camera: W walks where the camera looks (at the start, toward the rival), S back, A and D strafe; a diagonal is one full step, not faster |
 | F | attack: swings at the nearest living rival (soft lock-on, see below) |
 | Q | throw the spear at the nearest living rival (only with `--spear`, which `play-arena.bat` passes) |
+| Q + E | throw the spear at the world: it flies past fighters and sticks in arena geometry, so you rope-swing off the wall behind the rival (only with `--spear --height`, which the bat passes) |
 | Left Shift | block |
 | Space | dodge (also Enter or Space at the title if you start without `--play`) |
 | Esc | pause / resume |
@@ -32,7 +33,7 @@ The window title shows the same list, and while the nearest rival is more than 1
 
 Camera-relative means the sim's world wish is rebuilt every tick from where the live camera looks on the floor (`crates/game/src/camera_wish.rs`, fed by the window each frame). It is input mapping only: the sim, the match identity and every hash are untouched, and the staged fight, the `--spear-demo` script and capture tapes keep their world axes. The free camera (`C`) does not steer: W still follows the shot you left.
 
-Soft lock-on: every tick the window fills the human input's `facing` with the bearing to the nearest living rival (`crates/game/src/lock_on.rs`; a tie goes to the lower slot, a rival at 0 hp is ignored). `F` swings and `Q` throws along that exact bearing (the live duel runs rules v2, whose blade and spear read `facing` in fixed point), and the body yaw follows it. With no living rival, or while the free camera (`C`) is on, `facing` stays 0 (world +z) as before; the staged fight and capture tapes own the slot and keep their own facing. Input mapping only: no sim crate, match identity or hashed byte changed; the `--spear-demo` script aims with the same bearing function.
+Soft lock-on: every tick the window fills the human input's `facing` with the bearing to the nearest living rival (`crates/game/src/lock_on.rs`; a tie goes to the lower slot, a rival at 0 hp is ignored). `F` swings and `Q` throws along that exact bearing (the live duel runs rules v2, whose blade and spear read `facing` in fixed point), and the body yaw follows it. `Q` with `E` also throws along that bearing but sets the world bit, so the spear targets no fighter and anchors the geometry behind them: the aim for a wall is your own position, not a separate reticle. With no living rival, or while the free camera (`C`) is on, `facing` stays 0 (world +z) as before; the staged fight and capture tapes own the slot and keep their own facing. Input mapping only: no sim crate, match identity or hashed byte changed; the `--spear-demo` script aims with the same bearing function.
 
 Not exposed: a quality tier flag (tiers exist on the web build only; native has the `E2040_MSAA` env var), a ragdoll switch (it is always on). A second human plays over the network: see "Two players" below.
 

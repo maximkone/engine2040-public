@@ -48,6 +48,8 @@ required-features = ["mcp"]
 # Shared hash/stream primitives (Fnv64, hash_bytes, SplitMix): engine-core is
 # the one owner, so endpoint imports instead of re-deriving them.
 engine-core = { workspace = true }
+# WG2: the pack registry; each pack module publishes one row.
+linkme.workspace = true
 engine-editor = { workspace = true, optional = true }
 engine-scene = { workspace = true, optional = true }
 engine-arena = { workspace = true, optional = true, features = ["spine"] }

@@ -1192,3 +1192,17 @@ mod tests {
         assert!(super::super::PackRegistry::shipped().errors().is_empty());
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 20,
+    name: PACK,
+    default_loaded: false,
+    tools: &["codex.search", "codex.cite"],
+    build: pack,
+};

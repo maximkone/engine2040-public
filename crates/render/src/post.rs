@@ -4,7 +4,7 @@
 //! presenter and the Q1 clips. Units: pixels for sizes and motion vectors,
 //! ms per pass in receipts. Determinism: integer size math, fixed tap
 //! orders, same complete inputs give bit-identical outputs; wall clock
-//! appears in receipts, never in pixels. Errors are typed [`PostError`]:
+//! appears in receipts, never in pixels. Errors are typed `PostError`:
 //! bad caller input fails loudly, over-budget sizes degrade with
 //! `BudgetExceeded`, and the no-device submit names the device-bound
 //! `gpu::Rp1Submitter` to build first, never silent success.
@@ -20,12 +20,12 @@
 //! the pre-exposure HDR (64 log bins, trimmed mean onto key) and slews
 //! toward the retarget at 3 stops per second, so day sweeps track while
 //! sparse highlights cannot pump the frame. The chain
-//! reads the RL1/RL2 passes through [`PostLights`]: the caller hands the
+//! reads the RL1/RL2 passes through `PostLights`: the caller hands the
 //! `FrameLightsReceipt` (RL1) and `IblReceipt` (RL2) of the frame being
 //! posted, and the output receipt quotes their pass ms alongside the post
 //! pass ms, so the frame report names every light and post cost.
 //!
-//! Graph shape: [`build_rp1_graph`] declares the six RP1 passes
+//! Graph shape: `build_rp1_graph` declares the six RP1 passes
 //! (`rp1-taa` -> `rp1-taau` -> `rp1-bloom` -> `rp1-exposure` ->
 //! `rp1-aces` -> `rp1-grade`) on the RA2 frame graph, and the `window`
 //! `gpu::Rp1Submitter` records the same six in compiled order on a live

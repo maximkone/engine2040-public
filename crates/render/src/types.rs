@@ -1,6 +1,6 @@
 //! Plain-data values shared by the frame graph and the look passes.
 //!
-//! These cannot belong to any single pass: the graph packs a [`LookFrame`] into
+//! These cannot belong to any single pass: the graph packs a `LookFrame` into
 //! its uniform image, and every pass validates the same one before binding.
 //! Keeping them here is what lets a pass move to its own crate without pulling
 //! the graph along.

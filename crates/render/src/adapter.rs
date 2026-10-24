@@ -3,14 +3,14 @@
 //! Owner: render lane. `presenter.rs` takes `PowerPreference::HighPerformance`
 //! at three call sites, which hands an Optimus laptop the Intel adapter and
 //! can land on the CPU rasterizer unnoticed. This module is the pure half of
-//! the fix: an env-driven [`AdapterChoice`] ranked over enumerated
-//! [`AdapterSummary`] rows. Software adapters never win unless
+//! the fix: an env-driven `AdapterChoice` ranked over enumerated
+//! `AdapterSummary` rows. Software adapters never win unless
 //! `E2040_ALLOW_SOFTWARE=1`.
 //! Units: list indices for picks, u32 PCI ids for vendors. Determinism: pure
 //! over (list, choice, software flag); the env is read once on the cold
 //! startup path, never per frame. Presentation only, never sim state.
 //! Consumer: `presenter_pick` lifts wgpu adapters into summaries and picks.
-//! The pick also yields a [`BackendSelection`] report (see `report`).
+//! The pick also yields a `BackendSelection` report (see `report`).
 
 use std::error::Error;
 use std::fmt;
@@ -52,7 +52,7 @@ pub fn parse_choice(raw: &str) -> AdapterChoice {
     }
 }
 
-/// Read [`AdapterChoice`] from the live process env. Cold startup path only.
+/// Read `AdapterChoice` from the live process env. Cold startup path only.
 #[must_use]
 pub fn choice_from_env() -> AdapterChoice {
     parse_choice(&std::env::var(ADAPTER_ENV).unwrap_or_default())

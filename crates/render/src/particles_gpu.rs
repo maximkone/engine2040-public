@@ -6,11 +6,11 @@
 //! positions, sizes and speeds; seconds for age and life; ticks at 60 Hz.
 //! Determinism: fixed emitter order, SplitMix64 stream, stable compaction,
 //! math uses only `+ - * /` and one `sqrt`; same seed gives identical bytes.
-//! Errors are typed [`ParticleError`]; the headless twin names the missing
+//! Errors are typed `ParticleError`; the headless twin names the missing
 //! window device while the window build stages the flipbook draw into the
 //! frame's HDR pass with 0 validation errors. Per-tier caps
-//! ([`KindCaps`]) bound every kind, so a tier can refuse a spawn over its cap.
-//! Posted budget: [`PARTICLE_BUDGET_MS`] ms.
+//! (`KindCaps`) bound every kind, so a tier can refuse a spawn over its cap.
+//! Posted budget: `PARTICLE_BUDGET_MS` ms.
 
 use std::fmt;
 use std::time::Instant;
@@ -1208,8 +1208,8 @@ impl ParticlePool {
 /// Kenney flipbook draw shader over the fixed dust, flame, sparks and blood
 /// emitters in fixed order; pool bounds and the seeded stream are untouched.
 /// The draw path is the `shaders/particle.wgsl` file; `ParticleSubmitter`
-/// stages the live batch and the frame records it ([`ParticleSubmitter::stage_pool`]
-/// plus [`ParticleSubmitter::encode_draw`]).
+/// stages the live batch and the frame records it (`ParticleSubmitter::stage_pool`
+/// plus `ParticleSubmitter::encode_draw`).
 /// Engine-owned WGSL, fixed math only, no wall clock.
 pub const PARTICLE_DRAW_WGSL: &str = include_str!("shaders/particle.wgsl");
 

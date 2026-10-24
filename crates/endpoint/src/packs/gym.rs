@@ -751,3 +751,17 @@ mod tests {
         assert_eq!(undone.code, "nothing_to_undo");
     }
 }
+
+// WG2: this pack publishes its own row; `packs/mod.rs` keeps no hand list.
+#[expect(
+    unsafe_code,
+    reason = "linkme publishes a pack row through a link section"
+)]
+#[linkme::distributed_slice(super::PACK_MODULES)]
+static PACK_ROW: super::PackModule = super::PackModule {
+    order: 8,
+    name: PACK,
+    default_loaded: false,
+    tools: &["sim.reset", "sim.step", "sim.observe"],
+    build: pack,
+};

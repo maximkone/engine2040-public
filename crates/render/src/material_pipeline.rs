@@ -3,8 +3,8 @@
 //! One draw names one material plus four texture slots. The forward pass
 //! builds one pipeline per distinct compiled structure; draws that share
 //! a structure share a pipeline. The binning is std-only: no GPU, no file,
-//! no clock. The window leg adds [`pipeline_for`], which builds the pipeline
-//! of one compiled material (NS31c2), and [`MaterialLive`], the live slot
+//! no clock. The window leg adds `pipeline_for`, which builds the pipeline
+//! of one compiled material (NS31c2), and `MaterialLive`, the live slot
 //! that swaps one material's pipeline and uniform buffer on an edit (NS31c3).
 
 use engine_core::Fnv64;

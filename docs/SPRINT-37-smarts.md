@@ -121,3 +121,23 @@ here: `OPT59` in `SPRINT-18-gaps.md` is the same row.
   azimuth grid or magnitude/phase interpolation), the SOFA authored form
   (bytes are a plain `.bin`; HDF5 needs a reader this lane has not got), a
   stated ILD error set and the listening A/B.
+  Progress 2026-10-24 (b): denser grid tried, bar still not met, row stays
+  open. 36 az x 3 elev (10 deg) = 108 directions from the same KEMAR compact
+  download and the same licence line; `.bin` 3136 -> 7016 bytes; 16 taps;
+  same held-out protocol (drop every 4th column, midpoint of neighbours):
+
+  | grid | ears | err/sig signed rms | worst err/sig | 8 kHz worst | ITD mean | ITD worst |
+  |---|---|---|---|---|---|---|
+  | 16 az (landed) | 24 | +6.29 dB | +4.16 dB | 10.75 dB | 3.67 | 12.00 |
+  | 36 az (now) | 54 | +11.67 dB | -0.12 dB | 18.13 dB | 0.96 | 4.00 |
+  | 72 az (trial) | 108 | +17.40 dB | +5.93 dB | 12.77 dB | 0.48 | 4.50 |
+
+  `err/sig` is `10 log10(err energy / signal energy)`; negative is good, so
+  the tap rebuild went from louder than the signal to 11.7 dB under it, and
+  every held-out ear is now quieter than its measurement. Density does not
+  reach the 8 kHz bar: at 8 kHz the pinna response flips phase across a
+  10-20 deg neighbour gap, so a linear tap blend cancels a band the measured
+  direction carries (and denser grids drop different columns, so the three
+  worst values are not one cell). Left: magnitude/phase interpolation with
+  the onset kept separate, extra measured elevation rows, SOFA export, an
+  ILD error set, the listening A/B.
