@@ -19,7 +19,7 @@ use rmcp::serde::{Deserialize, Serialize};
 use rmcp::serde_json::{self, Value};
 
 use super::TOOL_ASSET_INTAKE;
-use crate::mcp::{McpServer, McpToolError};
+use crate::mcp::{mcp_input, McpServer, McpToolError};
 
 /// Default output folder, relative to the door's working directory.
 const DEFAULT_OUT_DIR: &str = "target/asset-intake";
@@ -303,7 +303,29 @@ fn io_err(what: &str, path: &Path, e: &std::io::Error) -> McpToolError {
     )
 }
 
-fn run(args: &IntakeArgs) -> Result<IntakeOutputDoc, McpToolError> {
+/// MCP31: resolve the model licence before the cook. An answered licence is
+/// recorded and used as given (the owner's porting policy: an answer never
+/// refuses a port the owner allowed); an unknown licence with no answer asks
+/// once instead of refusing. A decided licence keeps its own refusal in
+/// `intake` (`license_refused`, `model_restricted`).
+fn resolve_licence(
+    provenance: &mut Provenance,
+    answers: &rmcp::model::InputResponses,
+) -> Result<(), McpToolError> {
+    if let Some(licence) = mcp_input::answered_licence(answers) {
+        provenance.model.license = licence;
+        return Ok(());
+    }
+    if mcp_input::licence_is_unknown(&provenance.model.license) {
+        return Err(mcp_input::licence_ask(&provenance.model.id));
+    }
+    Ok(())
+}
+
+fn run(
+    args: &IntakeArgs,
+    answers: &rmcp::model::InputResponses,
+) -> Result<IntakeOutputDoc, McpToolError> {
     let glb_path = PathBuf::from(&args.glb_path);
     let ext = glb_path
         .extension()
@@ -319,7 +341,8 @@ fn run(args: &IntakeArgs) -> Result<IntakeOutputDoc, McpToolError> {
         .unwrap_or_default()
         .to_owned();
     let glb = std::fs::read(&glb_path).map_err(|e| io_err("read", &glb_path, &e))?;
-    let provenance = provenance_of(args, &glb_name)?;
+    let mut provenance = provenance_of(args, &glb_name)?;
+    resolve_licence(&mut provenance, answers)?;
     let settings = settings_of(args)?;
     let out_dir = PathBuf::from(args.out_dir.as_deref().unwrap_or(DEFAULT_OUT_DIR));
     let mut cache = IntakeCache::open(&out_dir.join("cache")).map_err(|e| refuse(&e))?;
@@ -360,7 +383,9 @@ fn run(args: &IntakeArgs) -> Result<IntakeOutputDoc, McpToolError> {
 }
 
 fn intake_verb(server: &McpServer, args: &IntakeArgs) -> Result<IntakeOutputDoc, McpToolError> {
-    server.dispatch(TOOL_ASSET_INTAKE, |_state| run(args))
+    // MCP31: the retry answers of this call, empty on a first call.
+    let answers = server.retry_answers();
+    server.dispatch(TOOL_ASSET_INTAKE, |_state| run(args, &answers))
 }
 
 crate::e2_tool!(

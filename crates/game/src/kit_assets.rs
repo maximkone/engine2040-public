@@ -17,17 +17,18 @@ use engine_assets::{AssetHandle, HandleBudget, LoadEvent, LoadQueue};
 use crate::arena_kit::{bound_diag, KitError};
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// Byte budget of one kit load; the arena kit fits with room to spare.
 pub const KIT_LOAD_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Live-asset cap of one kit load: the 8 kit files and their maps.
+/// Live-asset cap of one kit load: the 11 kit files and their maps.
 pub const KIT_LOAD_ASSETS: u32 = 64;
 
 /// Load priority per kit file: 2 is the ground and the collision pieces (the
 /// arena stands and is walkable before the dressing lands), 1 is the
 /// dressing that only refines the picture.
-const KIT_LOAD_PRIORITIES: [(&str, u8); 8] = [
+const KIT_LOAD_PRIORITIES: [(&str, u8); 11] = [
     ("sand_floor.gltf", 2),
     ("stands.gltf", 2),
     ("walls.gltf", 2),
@@ -36,6 +37,9 @@ const KIT_LOAD_PRIORITIES: [(&str, u8); 8] = [
     ("debris.gltf", 2),
     ("torch.gltf", 1),
     ("banner.gltf", 1),
+    ("machine_ballista.glb", 1),
+    ("machine_crane.glb", 1),
+    ("machine_cart.glb", 1),
 ];
 
 /// The priority one kit file loads at; an unknown file loads last.
@@ -47,10 +51,38 @@ pub fn kit_load_priority(file: &str) -> u8 {
         .map_or(0, |(_, level)| *level)
 }
 
-/// The logical path one kit file has inside a content source.
+/// The logical path one kit file has inside a content source: the arena files
+/// live under `src/`. The three machine props are the props kit's own output
+/// in `content/generated/props/`, a second root the app leg reads with
+/// [`kit_prop_bytes`].
 #[must_use]
 pub fn kit_logical_path(file: &str) -> String {
     format!("src/{file}")
+}
+
+/// The props kit directory inside `content/`: the second kit root, owned by
+/// `tools/blender/machine_gen.py` and `prop_gen.py` (SHOW4).
+pub const KIT_PROPS_DIR: &str = "generated/props";
+
+/// Bytes of one machine prop, read from `props_root` (the `content` dir) by its
+/// own logical path. The machine GLBs sit one level above the arena kit root,
+/// so they cannot use [`kit_logical_path`]; a source that cannot reach them
+/// fails by name, never silently.
+pub fn kit_prop_bytes(props_root: &Path, file: &str) -> Result<Vec<u8>, KitError> {
+    let source = engine_assets::FsSource::new(props_root);
+    source
+        .read(&format!("{KIT_PROPS_DIR}/{file}"))
+        .map(std::borrow::Cow::into_owned)
+        .map_err(|err| KitError::Io(bound_diag(&err.to_string())))
+}
+
+/// The `content` directory holding both kit roots: `content/arena` and
+/// `content/generated/props`. Pure path arithmetic over the same anchor the
+/// arena files use.
+#[must_use]
+pub fn kit_props_root() -> PathBuf {
+    let arena = crate::arena_kit::kit_content_dir();
+    arena.parent().map(Path::to_path_buf).unwrap_or(arena)
 }
 
 /// The kit files staged by one load: the bytes live behind generational

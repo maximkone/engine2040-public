@@ -487,6 +487,9 @@ export function analyzeFile(text, kind, ids = new Set()) {
   m.pub_items = 0;
   const hits = Object.fromEntries(Object.keys(METRICS).map((k) => [k, []]));
   const hit = (metric, line, n = 1) => { m[metric] += n; hits[metric].push(line); };
+  // Reviewed-cast scope: set by a reasoned `#[expect(clippy::cast_...)]`, held over the next item.
+  let castPending = false;
+  let castDepth = 0;
   for (let l = 0; l < lines.length; l++) {
     const c = lines[l];
     const note = comments[l] ?? "";
@@ -504,7 +507,21 @@ export function analyzeFile(text, kind, ids = new Set()) {
     if (u) hit("unwrap", l, u);
     const p = count(c, /\.expect\(|\bpanic!\s*\(|\bunreachable!\s*\(|\btodo!\s*\(|\bunimplemented!\s*\(/g);
     if (p) hit("panic_sites", l, p);
-    const k = count(c, CAST);
+    // A cast inside the item that carries `#[expect(clippy::cast_..., reason = "...")]` is a
+    // reviewed cast (owner 2026-10-24: f32 has no TryFrom, and the reason is the review).
+    if (/^\s*#!?\[(?:allow|expect)\(/.test(c)) {
+      const attr = lines.slice(l, l + 8).join(" ").split(/\)\]/)[0];
+      if (/clippy::cast_/.test(attr) && /\breason\s*=/.test(attr)) castPending = true;
+    }
+    const exempt = castPending || castDepth > 0;
+    if (castPending && !/^\s*#!?\[/.test(c) && !/^\s*(?:clippy::|reason\s*=|\)\])/.test(c)) {
+      const opens = count(c, /\{/g);
+      if (opens) {
+        castDepth = Math.max(0, opens - count(c, /\}/g));
+        castPending = false;
+      } else if (/;\s*$/.test(c)) castPending = false;
+    } else if (castDepth > 0) castDepth = Math.max(0, castDepth + count(c, /\{/g) - count(c, /\}/g));
+    const k = exempt ? 0 : count(c, CAST);
     if (k) hit("casts", l, k);
     if (/#!?\[(?:allow|expect)\(/.test(c)) {
       const attr = lines.slice(l, l + 8).join(" ").split(/\)\]/)[0];
@@ -794,6 +811,10 @@ export function onlyBase(baseline, names) {
   return Object.keys(baseline.crates ?? {}).filter((name) => !names.has(name));
 }
 
+// Lines a pinned file may grow past its pin before it fails: 20, or 1% of the pin if more.
+export const PIN_SLACK = 20;
+export const pinSlack = (pinned) => Math.max(PIN_SLACK, Math.floor(pinned / 100));
+
 // Per-file line cap: a file under crates/*/src that is over FILE_CAP_LINES
 // lines is pinned in the baseline at its line count and may not grow. A file
 // that is under the cap and crosses it fails too. The pin only goes down:
@@ -815,7 +836,9 @@ export function compareFiles(pins, fileLines, inScope = () => true) {
       if (now > FILE_CAP_LINES) regressions.push(`${path}: file lines ${now} (crossed the ${FILE_CAP_LINES}-line cap)${hatch}${tail}`);
       continue;
     }
-    if (now > was) regressions.push(`${path}: file lines ${was} -> ${now} (a file over ${FILE_CAP_LINES} lines cannot grow)${hatch}${tail}`);
+    // Small wiring edits pass (owner 2026-10-24: a 3-line flag in a 5,000-line file should not
+    // need an --accept): a pinned file may grow by PIN_SLACK lines or 1%, whichever is more.
+    if (now > was + pinSlack(was)) regressions.push(`${path}: file lines ${was} -> ${now} (a file over ${FILE_CAP_LINES} lines may grow by ${pinSlack(was)} at most)${hatch}${tail}`);
     else if (now < was) improvements.push({ path, was, now });
   }
   // A pinned file that is gone loses its pin: the file it named is not there.
@@ -883,6 +906,55 @@ export function simClippyFindings(root = ".", crates = new Map()) {
     else if (readFileSync(conf, "utf8") !== canonical) out.push(`${pkg.name}: clippy.toml differs from ${SIM_CLIPPY} fix: copy ${SIM_CLIPPY} over ${rel}`);
   }
   return out;
+}
+
+// `#[should_panic]` is a family of its own: it asserts that a call panics, so
+// the test proves a refusal only by catching a crash rather than a typed error.
+// A new one fails unless its file is on this allowlist with a reason. The two
+// rows below are receipt asserts: the call under test is a harness that reports
+// a lost receipt by panicking, so the panic is the contract and there is no
+// typed error to assert on.
+// Donor: rust-analyzer xtask/src/tidy.rs `check_test_attrs` (the `need_panic`
+// allowlist, MIT OR Apache-2.0).
+export const SHOULD_PANIC_ALLOWED = new Map([
+  [
+    "crates/game/src/bin/staged_fight.rs",
+    "the staged-fight harness reports a lost receipt by panicking, so the test asserts that its own receipt writer fires",
+  ],
+  [
+    "crates/render/src/test_gpu.rs",
+    "the GPU test asserts that create_surface refuses a window with no surface, and the platform path panics there",
+  ],
+]);
+
+export const SHOULD_PANIC_FIX = "return a typed error and assert on it (`Err(MyError::Case)`), or add the file to SHOULD_PANIC_ALLOWED in tools/rust-quality.mjs with the reason the panic is its contract";
+
+// One finding per `#[should_panic]` in a file that is not allowlisted.
+// `files` is [{ rel, text }]; rel is repo-relative and slash-separated.
+export function shouldPanicFindings(files, allowed = SHOULD_PANIC_ALLOWED) {
+  const out = [];
+  for (const { rel, text } of files) {
+    if (allowed.has(rel)) continue;
+    const lines = String(text ?? "").replace(/\r\n/g, "\n").split("\n");
+    for (let l = 0; l < lines.length; l++) {
+      if (!/#\[\s*should_panic\b/.test(lines[l])) continue;
+      out.push(`${rel}:${l + 1}: #[should_panic] is not on the allowlist fix: ${SHOULD_PANIC_FIX}`);
+    }
+  }
+  return out;
+}
+
+// The same family over the tree: every crates/*/src .rs file, tests included
+// (a panic assert in a test is the case a typed error would name).
+export function shouldPanicScan(root = ".") {
+  const files = [];
+  for (const file of walk(join(root, "crates"))) {
+    const rel = relative(root, file).split("\\").join("/");
+    let text;
+    try { text = readFileSync(file, "utf8"); } catch { continue; }
+    if (text.includes("should_panic")) files.push({ rel, text });
+  }
+  return shouldPanicFindings(files);
 }
 
 function snapshot(crates) {
@@ -997,6 +1069,9 @@ function main(argv) {
   const fileResult = compareFiles(baseline.files, fileLines, inScope);
   const orphans = onlyBase(baseline, new Set(packages(".").map((p) => p.name)));
   if (!opts.crates.length) regressions.push(...simClippyFindings(".", crates).map((f) => `sim config ${f}`));
+  // The `#[should_panic]` family is not a metric: its allowlist is the review,
+  // and a finding names its file, so the land scope below can tell whose it is.
+  let panicRegressions = opts.crates.length ? [] : shouldPanicScan(".");
   // Land scope: foreign staged debt warns, owned debt still fails. A file
   // regression names its path, so it is owned by the path it names.
   let foreign = [];
@@ -1008,6 +1083,9 @@ function main(argv) {
     const owned = [];
     for (const r of fileRegressions) (hitIsOwned(r, opts.owned) ? owned : foreign).push(r);
     fileRegressions = owned;
+    const ownedPanics = [];
+    for (const r of panicRegressions) (hitIsOwned(r, opts.owned) ? ownedPanics : foreign).push(r);
+    panicRegressions = ownedPanics;
   }
   if (opts.tighten) {
     let n = 0;
@@ -1044,9 +1122,9 @@ function main(argv) {
     }
     writeFileSync(BASELINE, `${JSON.stringify(baseline, null, 1)}\n`);
     console.log(`RESULT tightened ${n} entr${n === 1 ? "y" : "ies"}`);
-    return regressions.length || fileRegressions.length ? 1 : 0;
+    return regressions.length || fileRegressions.length || panicRegressions.length ? 1 : 0;
   }
-  const allRegressions = [...regressions, ...fileRegressions];
+  const allRegressions = [...regressions, ...fileRegressions, ...panicRegressions];
   if (opts.list === "file_lines") {
     const pins = Object.entries(baseline.files ?? {}).filter(([path]) => inScope(path)).map(([path, n]) => `${path}: ${n} lines (pinned, may not grow)`);
     const lines = opts.owned.length ? pins.filter((h) => hitIsOwned(h, opts.owned)) : pins;
@@ -1066,7 +1144,7 @@ function main(argv) {
   if (opts.json) {
     const out = {};
     for (const [name, c] of shown) out[name] = { ...c.metrics, ...score(c.metrics), grade: grade(score(c.metrics).score) };
-    console.log(JSON.stringify({ crates: out, cloneGroups: groups.length, regressions: allRegressions, foreign, onlyBase: orphans, improvements: improvements.length, fileImprovements: fileResult.improvements.length, filePins: Object.keys(baseline.files ?? {}).length }, null, 1));
+    console.log(JSON.stringify({ crates: out, cloneGroups: groups.length, regressions: allRegressions, foreign, onlyBase: orphans, improvements: improvements.length, fileImprovements: fileResult.improvements.length, filePins: Object.keys(baseline.files ?? {}).length, shouldPanic: panicRegressions.length }, null, 1));
     return allRegressions.length ? 1 : 0;
   }
   const t = table(shown);
