@@ -32,6 +32,7 @@ The table is what the code confirms today. Ticked rows are dropped (git history 
 | Engine cook gaps CT10/CT11/CT12/CT13/CT14/CT16 | Open | `crates/assets/src/` (no conformance test, anim_compress, manifest, proxy, motion_source; no `crates/endpoint/src/sandbox/content.rs`) |
 | Establishing CT22 + window bind CT29 | Open | `content/arena/establishing.json`, `content/fighters/window_bind.json` (missing) |
 | Untracked PBR/HDRI bytes + arena src + staged dir | On disk, uncommitted/untriaged | `content/arena/textures/wood_*_2k.jpg`, `content/incoming/` (HDRIs), `content/arena/src/`, `content/fighters/incoming/staged/` |
+| Seeded machine/prop generator (ported from ldo/blender_spaceship_generator, MIT) | Tool landed, not cooked into the bundle | `tools/blender/machine_gen.py` (presets machine, ballista, crane, cart; splitmix64 seed; <= 3 material slots; props budget 5k tris), `tools/blender/machine_gen.test.mjs` (11 tests), research `docs/research/plugins-2026-10-24/01-blender-generators.md` |
 | Finish bars fed (A4 partial, C3 open, C5 partial, P6 partial) | Rows named in §2 | CT57/CT60 (Q1 night + staged pixels); CT64/CT70 (reacting crowd); CT62 (stream proof); CT61/CT72 (soak baselines) |
 | LADDER lines touching content | Spike-first, no new row | splat CARD REJECTED stays behind CT67; SN11 boarded grows the SN10 bridge CT63 lists; compression TAKE cards stay behind CT11 |
 
