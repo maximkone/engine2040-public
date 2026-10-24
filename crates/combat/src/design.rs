@@ -16,6 +16,7 @@
 //! swing is locked, not a delay, so a wide window stays legal here.
 
 use crate::feel::{FEEL_V1, MAX_BUFFER_TICKS, PQ1_LATENCY_MS};
+use std::fmt;
 
 /// Bounded design failures; invalid rows never panic.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +80,62 @@ pub const SHIPPED: BattlePatterns = BattlePatterns {
     down_ticks: 30,
     parry_window_ticks: 7,
 };
+
+/// The frame advantage a row states: the answer its fields already imply.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AdvantageRow {
+    /// The row's name.
+    pub name: &'static str,
+    /// Ticks the attacker gains when the hit lands; negative means it loses.
+    pub hit: i32,
+    /// Ticks the attacker gives up when the hit is blocked; negative means it loses.
+    pub block: i32,
+}
+
+impl fmt::Display for AdvantageRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}: advantage on hit {} ticks, on block {} ticks",
+            self.name, self.hit, self.block
+        )
+    }
+}
+
+/// The rows that ship, in print order.
+pub const SHIPPED_ROWS: [(&str, BattlePatterns); 1] = [("SHIPPED", SHIPPED)];
+
+/// One printable line per shipped row: the advantage each row states.
+pub fn table() -> impl Iterator<Item = AdvantageRow> {
+    SHIPPED_ROWS.iter().map(|&(name, patterns)| AdvantageRow {
+        name,
+        hit: patterns.advantage_on_hit(),
+        block: patterns.advantage_on_block(),
+    })
+}
+
+impl BattlePatterns {
+    /// Ticks the attacker gains when the hit lands: the victim's hold minus
+    /// the attacker's recovery. Positive means the attacker acts first.
+    #[must_use]
+    pub fn advantage_on_hit(&self) -> i32 {
+        signed_difference(self.victim_hold_ticks, self.recovery_ticks)
+    }
+
+    /// Ticks the attacker gives up when the hit is blocked: the block hold
+    /// (half the parry window, rounded down) minus recovery.
+    #[must_use]
+    pub fn advantage_on_block(&self) -> i32 {
+        signed_difference(self.parry_window_ticks / 2, self.recovery_ticks)
+    }
+}
+
+/// `a - b` as an i32, saturating at both ends: a legal row is small, a
+/// hand-built one must never overflow.
+fn signed_difference(a: u32, b: u32) -> i32 {
+    let wide = i64::from(a) - i64::from(b);
+    i32::try_from(wide).unwrap_or(if wide < 0 { i32::MIN } else { i32::MAX })
+}
 
 /// Range-check one set; first failure wins, deterministically.
 pub const fn validate(p: &BattlePatterns) -> Result<(), DesignError> {
@@ -235,8 +292,8 @@ mod tests {
             );
         }
         assert_eq!(SHIPPED.startup_ticks * 1000 / 60, 500, "30 ticks is 500 ms");
-        assert!(SHIPPED.grace_ticks < SHIPPED.startup_ticks);
-        assert!(SHIPPED.parry_window_ticks < SHIPPED.startup_ticks);
+        const { assert!(SHIPPED.grace_ticks < SHIPPED.startup_ticks) };
+        const { assert!(SHIPPED.parry_window_ticks < SHIPPED.startup_ticks) };
         assert!(!chain_allowed(&SHIPPED, SHIPPED.startup_ticks));
         assert!(chain_allowed(
             &SHIPPED,
@@ -289,5 +346,60 @@ mod tests {
         let mut wide = SHIPPED;
         wide.parry_window_ticks = 15;
         assert_eq!(validate(&wide), Err(DesignError::BadReaction));
+    }
+
+    /// The shipped row states its answer, and `table` prints it as one line.
+    #[test]
+    fn shipped_states_its_advantage_on_hit_and_on_block() {
+        assert_eq!(SHIPPED.advantage_on_hit(), 0, "6 hold minus 6 recovery");
+        assert_eq!(
+            SHIPPED.advantage_on_block(),
+            -3,
+            "3 block hold minus 6 recovery"
+        );
+        let lines: Vec<String> = table().map(|row| row.to_string()).collect();
+        assert_eq!(
+            lines,
+            vec!["SHIPPED: advantage on hit 0 ticks, on block -3 ticks"],
+            "one line per shipped row"
+        );
+    }
+
+    /// A tuning edit that slows recovery flips both numbers negative, and the
+    /// pinned test says so by naming the exact new value.
+    #[test]
+    fn a_slow_row_reads_negative_on_both() {
+        let mut slow = SHIPPED;
+        slow.recovery_ticks = 120;
+        assert_eq!(slow.advantage_on_hit(), -114);
+        assert_eq!(slow.advantage_on_block(), -117);
+    }
+
+    /// A row with no hold at all saturates, never wraps and never panics.
+    #[test]
+    fn a_zero_hold_row_cannot_overflow() {
+        let mut empty = SHIPPED;
+        empty.victim_hold_ticks = 0;
+        empty.parry_window_ticks = 0;
+        empty.recovery_ticks = 0;
+        assert_eq!(empty.advantage_on_hit(), 0);
+        assert_eq!(empty.advantage_on_block(), 0);
+        empty.recovery_ticks = u32::MAX;
+        assert_eq!(empty.advantage_on_hit(), i32::MIN, "saturates low");
+        let mut huge = SHIPPED;
+        huge.victim_hold_ticks = u32::MAX;
+        assert_eq!(huge.advantage_on_hit(), i32::MAX, "saturates high");
+    }
+
+    /// Deriving the answer is a read: no stored field moves, and the row still
+    /// validates afterwards.
+    #[test]
+    fn deriving_the_answer_changes_no_stored_field() {
+        let before = SHIPPED;
+        let answer = (SHIPPED.advantage_on_hit(), SHIPPED.advantage_on_block());
+        let lines = table().count();
+        assert_eq!((answer, lines), ((0, -3), 1));
+        assert_eq!(SHIPPED, before, "the derivation is a pure read");
+        assert_eq!(validate(&SHIPPED), Ok(()));
     }
 }

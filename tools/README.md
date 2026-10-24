@@ -47,6 +47,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/ctrf-report.mjs` (+ `tools/ctrf-report.test.mjs`): turn a nextest JUnit receipt into the CTRF report CI uploads; a pure function of the receipt bytes.
 - `tools/dep-rebuild-count.mjs` (+ `tools/dep-rebuild-count.test.mjs`): count the dependency units five lane builds rebuild (OPT8 bar) from `Compiling` lines in one target dir.
 - `tools/desync-diff.mjs` (+ `tools/desync-diff.test.mjs`): diff a desync to the first bad tick.
+- `tools/doc-pin.mjs` (+ `tools/doc-pin.test.mjs`): pin a doc that copies a source file's contract to that file's hash, so a source edit without the doc edit fails (`--write` re-pins); called from `tools/workspace-check.mjs`.
 - `tools/door-reference.mjs` (+ `tools/door-reference.test.mjs`): print every door tool and verb pack from the endpoint source into `docs/book/door-reference.md` (`--write`, `--check`).
 - `tools/docs-coverage.mjs` (+ `tools/docs-coverage.test.mjs`): ratchet per-crate missing-docs.
 - `tools/docs-links.mjs` (+ `tools/docs-links.test.mjs`): every relative link in tracked markdown outside `docs/archive/` resolves (`--json`); the CI gate.
@@ -67,6 +68,8 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/flaky-quarantine.mjs` (+ `tools/flaky-quarantine.test.mjs`): quarantine flaky tests.
 - `tools/fnv1a64.mjs` (+ `tools/fnv1a64.test.mjs`): node script; see its header.
 - `tools/frame-moved.mjs` (+ `tools/frame-moved.test.mjs`): node script; see its header.
+- `tools/frame-audit-laws.mjs` (+ `tools/frame-audit.test.mjs`): the four picture laws behind `frame-audit.mjs`, pure over an audit row and a decoded PNG.
+- `tools/frame-audit.mjs` (+ `tools/frame-audit.test.mjs`): per frame, per law verdict on a capture dir (shadow, material, scale, attach) from the window's `view-audit.jsonl` and the PNGs.
 - `tools/frame-triage.mjs` (+ `tools/frame-triage.test.mjs`): triage frame captures.
 - `tools/frame-v2v3.mjs` (+ `tools/frame-v2v3.test.mjs`): node script; see its header.
 - `tools/gate-silhouette.mjs`: compare a cooked silhouette against a golden PNG (pixelmatch/blockhash); exit 0 pass, 1 fail, 2 usage.
