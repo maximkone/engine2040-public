@@ -53,7 +53,7 @@ fn springarm_params() -> DirectorParams {
 fn springarm_eye(look: Vec3, yaw: f32, dist: f32, obstacles: &[Aabb]) -> Vec3 {
     let mut spring = FightCamSpring::new(0.25).expect("spring builds");
     spring.reset(yaw, dist, look).expect("reset");
-    spring.eye_m(&springarm_params(), obstacles)
+    spring.eye_m(&springarm_params(), obstacles, 1.0 / 60.0)
 }
 
 #[test]

@@ -842,14 +842,16 @@ mod tests {
     fn a_seeded_float_fails_the_gate() {
         // The same checks the two tests above run, on sources with one float
         // seeded in: each must now report it.
-        let seeded_field = include_str!("spine.rs").replace(
+        // A Windows checkout carries CRLF; the seeds below are LF text.
+        let spine = include_str!("spine.rs").replace("\r\n", "\n");
+        let seeded_field = spine.replace(
             "    /// Capsule height in meters.
     pub height: Fixed,",
             "    /// Capsule height in meters.
     pub height: Fixed,
     pub mass: f32,",
         );
-        assert_ne!(seeded_field, include_str!("spine.rs"), "seed must land");
+        assert_ne!(seeded_field, spine, "seed must land");
         assert!(float_items(&seeded_field).contains(&"pub struct Body {".to_string()));
         let seeded_dt = format!(
             "{}
