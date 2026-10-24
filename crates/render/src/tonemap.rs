@@ -349,3 +349,8 @@ mod tests {
         );
     }
 }
+
+/// SW50: the AgX curve beside the ACES one, the CPU twin of the WGSL
+/// `agx_display` arm (`override DISPLAY_AGX`). Std-only, view only.
+#[path = "agx.rs"]
+pub mod agx;

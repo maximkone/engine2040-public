@@ -503,6 +503,30 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
         look.observe_hitstop(tick, &out.cues, app.hitstop_remaining());
         look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
         look.observe_live_balances(app.live_match(), 4);
+        if frames_per_tick == 1 && ik && tick % 2 == 0 {
+            let slot = &look.slots[0];
+            let feet: Vec<String> = slot
+                .feet
+                .plants
+                .iter()
+                .map(|p| {
+                    format!(
+                        "pl={} st={} a={:?} w={:?}",
+                        u8::from(p.planted),
+                        p.still,
+                        p.ankle.map(|a| [a[0], a[1], a[2]].map(|v| (v * 1000.0).round())),
+                        p.world.map(|w| w.map(|v| (v * 1000.0).round()))
+                    )
+                })
+                .collect();
+            eprintln!(
+                "zzfeet t{tick} {:?}/{:?} rest={:?} {}",
+                slot.act,
+                slot.balance,
+                look.rigs[0].legs.map(|l| l.rest_y),
+                feet.join(" | ")
+            );
+        }
         for frame in 0..frames_per_tick {
             let alpha = (f32::from(frame) + 0.5) / f32::from(frames_per_tick);
             let bodies = look.pose_frame_joints(4, alpha).expect("joints pose");
@@ -521,6 +545,10 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
             }
         }
     }
+    eprintln!(
+        "zzdiag duel_feet {frames_per_tick} ik={ik}: worst pop {:?}",
+        laws.pop_detail()
+    );
     DuelFeet {
         line: laws.line().expect("the duel folded frames"),
         drift_cm,
@@ -564,6 +592,13 @@ fn clip_switches_do_not_pop_in_a_real_duel() {
         let pops: u32 = receipt_field(&line, "pops=")
             .parse()
             .expect("pops is a number");
+        // The joints-only bounds floor at the lowest joint less the sole: the
+        // skin-radius pad once read every idle body 1.1 m under the sand.
+        let sunk = receipt_number(&line, "sunk_cm_max=");
+        assert!(
+            sunk < 3.0,
+            "{frames} frame(s) per tick: bodies sunk {sunk} cm: {line}"
+        );
         assert_eq!(
             pops_in(&line, "attack"),
             0,

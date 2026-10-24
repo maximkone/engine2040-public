@@ -154,6 +154,16 @@ impl FighterLook {
             // enough and keeps one body-import path for every family.
             let body = import_skinned_body(&bytes)
                 .map_err(|err| LookError::Import(format!("{variant}: {err}")))?;
+            // One cooked part per atlas quadrant. `load_rig` appends the hero's
+            // graft and Roman kit after them (`fighter_gear::arm_hero`,
+            // `fighter_kit_body::dress`); those carry their own generated maps.
+            if body.parts.len() != engine_assets::rig_cook::QUADRANTS {
+                return Err(LookError::Import(format!(
+                    "{variant}: {} cooked parts, the cooked lane has {} atlas quadrants",
+                    body.parts.len(),
+                    engine_assets::rig_cook::QUADRANTS
+                )));
+            }
             let hold = hold_sources(&body);
             let binding = FighterBinding {
                 variant: (*variant).to_string(),
@@ -167,14 +177,10 @@ impl FighterLook {
                     .map_err(|_| LookError::Import(format!("{variant}: clip count over u32")))?,
             };
             let mut rig = load_rig(&binding, index, &hold, source)?;
-            if rig.parts.len() != engine_assets::rig_cook::QUADRANTS {
-                return Err(LookError::Import(format!(
-                    "{variant}: {} parts, the cooked lane has {} atlas quadrants",
-                    rig.parts.len(),
-                    engine_assets::rig_cook::QUADRANTS
-                )));
-            }
-            for (part_index, part) in rig.parts.iter_mut().enumerate() {
+            let quadrants = engine_assets::rig_cook::QUADRANTS;
+            // The cooked parts come first; the parts `load_rig` appends keep
+            // the maps it gave them.
+            for (part_index, part) in rig.parts.iter_mut().take(quadrants).enumerate() {
                 let atlas = format!(
                     "{}/{variant}_q{part_index}.ktx2",
                     engine_assets::rig_cook::COOKED_DIR
@@ -287,6 +293,64 @@ impl FighterLook {
     }
 }
 
+/// Farthest a bind vertex sits from its nearest bind joint, in meters.
+/// Pure `f32` in, same `f32` out; a non-finite vertex reads as infinity so
+/// the caller skips it, never a panic.
+fn nearest_joint_d(joints: &[[f32; 3]], vertex: [f32; 3]) -> f32 {
+    let mut nearest = f32::MAX;
+    for joint in joints.iter() {
+        let dx = vertex[0] - joint[0];
+        let dy = vertex[1] - joint[1];
+        let dz = vertex[2] - joint[2];
+        nearest = nearest.min(dx * dx + dy * dy + dz * dz);
+    }
+    nearest.sqrt()
+}
+
+/// Skin radius of one rig in meters: the farthest any bind vertex sits from
+/// its nearest bind joint, plus 10 cm, floored at 0.5 m. The joints-only
+/// pose pads placed joints by this radius so its bounds hold the skinned
+/// vertex bounds. Cold path only (once per rig at load); pure `f32` in,
+/// same `f32` out; a non-finite vertex never moves the radius.
+pub(super) fn skin_radius_m(body: &SkinnedBody) -> f32 {
+    let mut radius = 0.5f32;
+    for part in body.parts.iter() {
+        for vertex in part.mesh.positions.iter() {
+            let d = nearest_joint_d(&body.bind.positions, *vertex);
+            if d.is_finite() {
+                radius = radius.max(d + 0.10);
+            }
+        }
+    }
+    radius
+}
+
+/// Sole depth of one rig in meters: how far the lowest bind vertex sits under
+/// the lowest bind joint, floored at 0. The joints-only pose bounds its floor
+/// side by the lowest placed joint less this depth, not by
+/// [`skin_radius_m`]: the radius pads every side by a whole arm's reach, so an
+/// idle body there read a metre under the sand. Cold path only; a non-finite
+/// point never moves it.
+pub(super) fn skin_sole_m(body: &SkinnedBody) -> f32 {
+    let lowest = |points: &mut dyn Iterator<Item = [f32; 3]>| {
+        points
+            .map(|point| point[1])
+            .filter(|y| y.is_finite())
+            .fold(f32::MAX, f32::min)
+    };
+    let joint = lowest(&mut body.bind.positions.iter().copied());
+    let vertex = lowest(
+        &mut body
+            .parts
+            .iter()
+            .flat_map(|part| part.mesh.positions.iter().copied()),
+    );
+    if joint == f32::MAX || vertex == f32::MAX {
+        return 0.0;
+    }
+    (joint - vertex).max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,8 +408,10 @@ mod tests {
     }
 
     /// The shipped cooked lane opens by the names `rig_cook` writes: one rig
-    /// per variant, four atlas quadrants per rig, six hold clips that sample
-    /// the bind pose. The body pins are checked by the loader.
+    /// per variant, four atlas quadrants per cooked body, six hold clips that
+    /// sample the bind pose. The hero also carries the graft and kit that
+    /// `load_rig` adds after its quadrants. The body pins are checked by the
+    /// loader.
     #[test]
     fn the_shipped_cooked_lane_loads_four_rigs_with_bind_holds() {
         let path =
@@ -359,10 +425,22 @@ mod tests {
             assert_eq!(rig.variant, fighter_bind::VARIANTS[index]);
             assert_eq!(rig.skeleton.joints.len(), 45, "the CT7 rig");
             assert_eq!(rig.clips.len(), 6, "one hold clip per act");
-            assert_eq!(rig.parts.len(), 4, "one part per atlas quadrant");
+            // The hero's graft (`fighter_gear::arm_hero`: four parts, d2b9faea0)
+            // and kit (`fighter_kit::KIT_PARTS`, 5bb4d402d) follow its quadrants.
+            let quadrants = engine_assets::rig_cook::QUADRANTS;
+            let added = if rig.variant == "hero" {
+                4 + fighter_kit::KIT_PARTS
+            } else {
+                0
+            };
+            assert_eq!(
+                rig.parts.len(),
+                quadrants + added,
+                "one part per atlas quadrant, then the hero's added parts"
+            );
             assert!(
                 rig.parts.iter().all(|part| part.texture.is_some()),
-                "every part carries its atlas quadrant"
+                "every part carries a base-colour map"
             );
             let pelvis = rig
                 .skeleton
