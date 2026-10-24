@@ -45,15 +45,21 @@ pub enum FluidError {
 }
 impl fmt::Display for FluidError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid(e) => write!(f, "fluid input: {e}"),
-            Self::BudgetExceeded { requested, allowed } => write!(
-                f,
-                "fluid budget exceeded: {requested} requested, {allowed} allowed"
-            ),
-            Self::NoDevice(e) => write!(f, "fluid bind needs a device: {e}"),
-            Self::Device(e) => write!(f, "fluid device: {e}"),
-            Self::Validation(e) => write!(f, "fluid validation: {e}"),
+        let (prefix, detail) = match self {
+            Self::Invalid(e) => ("fluid input", Some(e)),
+            Self::BudgetExceeded { requested, allowed } => {
+                return write!(
+                    f,
+                    "fluid budget exceeded: {requested} requested, {allowed} allowed"
+                )
+            }
+            Self::NoDevice(e) => ("fluid bind needs a device", Some(e)),
+            Self::Device(e) => ("fluid device", Some(e)),
+            Self::Validation(e) => ("fluid validation", Some(e)),
+        };
+        match detail {
+            Some(e) => write!(f, "{prefix}: {e}"),
+            None => f.write_str(prefix),
         }
     }
 }
