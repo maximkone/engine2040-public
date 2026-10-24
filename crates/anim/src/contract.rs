@@ -328,6 +328,240 @@ pub fn skinning_matrices(
         .collect())
 }
 
+/// A rigid transform as a unit dual quaternion: the real part (rotation) then the dual part
+/// (translation, `0.5 * t * real`), 8 floats. Half a matrix, and a blend of two dual quaternions
+/// keeps a rigid transform where a blend of two matrices shears.
+pub type DualQuat = [f32; 8];
+
+/// Bytes one matrix palette joint takes on the wire (16 floats).
+pub const MATRIX_PALETTE_BYTES: usize = 64;
+/// Bytes one dual-quaternion palette joint takes on the wire (8 floats).
+pub const DUAL_QUAT_PALETTE_BYTES: usize = 32;
+/// Floats in one dual quaternion.
+pub const DUAL_QUAT_FLOATS: usize = 8;
+
+/// Which skinning palette a frame uploads (AM30). Off is the default: every existing frame
+/// uploads matrices, so a frame built with the default is byte-identical to the old path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SkinPalette {
+    /// One 4x4 matrix per joint, 64 bytes.
+    #[default]
+    Matrices,
+    /// One dual quaternion per joint, 32 bytes.
+    DualQuats,
+}
+
+impl SkinPalette {
+    /// The palette a settings label names; anything but `dq`/`dual`/`dual_quat` reads as the
+    /// default, so a typo uploads the path that already worked instead of an empty palette.
+    pub fn from_label(label: &str) -> Self {
+        match label.trim() {
+            "dq" | "dual" | "dual_quat" | "dual-quaternion" => Self::DualQuats,
+            _ => Self::Matrices,
+        }
+    }
+
+    /// Bytes one joint of this palette takes.
+    pub fn joint_bytes(self) -> usize {
+        match self {
+            Self::Matrices => MATRIX_PALETTE_BYTES,
+            Self::DualQuats => DUAL_QUAT_PALETTE_BYTES,
+        }
+    }
+}
+
+/// Compose a local pose into a unit dual-quaternion palette, one per joint in skeleton order:
+/// the same world rotation [`skinning_matrices`] expands, plus its world translation in the dual
+/// part. The matrix path builds both before it expands, so this is the cheaper output, not a
+/// second solve.
+pub fn skinning_dual_quats(
+    skeleton: &Skeleton,
+    pose: &LocalPose,
+) -> Result<Vec<DualQuat>, AnimError> {
+    validate_pose(skeleton, pose)?;
+    let mut out: Vec<DualQuat> = vec![[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]; skeleton.len()];
+    for (index, joint) in skeleton.joints.iter().enumerate() {
+        // Parents first, so a parent's entry already holds its world transform.
+        let (parent_pos, parent_rot) = match joint.parent {
+            Some(parent) => {
+                let dq = out[parent];
+                (dual_quat_translation(&dq), [dq[0], dq[1], dq[2], dq[3]])
+            }
+            None => ([0.0; 3], [0.0, 0.0, 0.0, 1.0]),
+        };
+        let rotated = rotate(&pose.positions[index], &parent_rot);
+        let pos = [
+            parent_pos[0] + rotated[0],
+            parent_pos[1] + rotated[1],
+            parent_pos[2] + rotated[2],
+        ];
+        let real = quat_mul(parent_rot, pose.rotations[index]);
+        out[index] = dual_quat_of(pos, real);
+    }
+    Ok(out)
+}
+
+/// The translation a dual quaternion carries.
+pub fn dual_quat_translation(dq: &DualQuat) -> [f32; 3] {
+    let real = [dq[0], dq[1], dq[2], dq[3]];
+    let dual = [dq[4], dq[5], dq[6], dq[7]];
+    // t = 2 * dual * conj(real), the rotation part of that product.
+    let conj = [-real[0], -real[1], -real[2], real[3]];
+    let t = quat_mul(dual, conj);
+    [2.0 * t[0], 2.0 * t[1], 2.0 * t[2]]
+}
+
+/// `position, rotation` -> unit dual quaternion `(real, 0.5 * t * real)`.
+pub fn dual_quat_of(translation: [f32; 3], rotation: [f32; 4]) -> DualQuat {
+    let t = quat_mul(
+        [translation[0], translation[1], translation[2], 0.0],
+        rotation,
+    );
+    [
+        rotation[0],
+        rotation[1],
+        rotation[2],
+        rotation[3],
+        0.5 * t[0],
+        0.5 * t[1],
+        0.5 * t[2],
+        0.5 * t[3],
+    ]
+}
+
+/// Transform `point` by one dual quaternion: `q * p * conj(q)` with the translation added.
+pub fn transform_point_dual_quat(dq: &DualQuat, point: [f32; 3]) -> [f32; 3] {
+    let real = [dq[0], dq[1], dq[2], dq[3]];
+    let t = dual_quat_translation(dq);
+    let r = rotate(&point, &real);
+    [r[0] + t[0], r[1] + t[1], r[2] + t[2]]
+}
+
+/// Transform `point` by one matrix palette entry (last row is the translation).
+pub fn transform_point_matrix(matrix: &[[f32; 4]; 4], point: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0][0] * point[0] + matrix[1][0] * point[1] + matrix[2][0] * point[2] + matrix[3][0],
+        matrix[0][1] * point[0] + matrix[1][1] * point[1] + matrix[2][1] * point[2] + matrix[3][1],
+        matrix[0][2] * point[0] + matrix[1][2] * point[1] + matrix[2][2] * point[2] + matrix[3][2],
+    ]
+}
+
+/// Blend a vertex over `(joint, weight)` pairs the matrix way: linear blend of the transformed
+/// points. This is the path that collapses a 170 degree shoulder twist.
+pub fn skin_point_linear_blend(
+    palette: &[[[f32; 4]; 4]],
+    point: [f32; 3],
+    joints: &[(usize, f32)],
+) -> [f32; 3] {
+    let mut out = [0.0f32; 3];
+    for (joint, weight) in joints {
+        let Some(matrix) = palette.get(*joint) else {
+            continue;
+        };
+        let at = transform_point_matrix(matrix, point);
+        out[0] += at[0] * weight;
+        out[1] += at[1] * weight;
+        out[2] += at[2] * weight;
+    }
+    out
+}
+
+/// Blend a vertex over `(joint, weight)` pairs the dual-quaternion way: the two closest
+/// quaternions are summed in the same hemisphere and the dual parts with them, then the result
+/// is renormalized. A twist between the joints keeps the point's radius.
+pub fn skin_point_dual_quat(
+    palette: &[DualQuat],
+    point: [f32; 3],
+    joints: &[(usize, f32)],
+) -> [f32; 3] {
+    let mut sum = [0.0f32; 8];
+    let mut first = true;
+    for (joint, weight) in joints {
+        let Some(dq) = palette.get(*joint) else {
+            continue;
+        };
+        // Shortest arc: flip a dual quaternion whose real part faces away from the first.
+        let flip = if first || dot4(&dq[..4], &sum[..4]) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        first = false;
+        for lane in 0..8 {
+            sum[lane] += dq[lane] * weight * flip;
+        }
+    }
+    transform_point_dual_quat(&normalize_dual_quat(sum), point)
+}
+
+fn dot4(a: &[f32], b: &[f32]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+}
+
+/// A rigid palette matrix (`[[f32; 4]; 4]`, basis rows first, translation in the last row) read
+/// back as a unit dual quaternion, so a bind-composed frame folds to 8 floats without the vertex
+/// path seeing a 4x4. Only the rigid part is read: a matrix with scale or shear loses it here.
+pub fn dual_quat_from_matrix(matrix: &[[f32; 4]; 4]) -> DualQuat {
+    // The palette stores basis vectors as rows, so the column-vector matrix is its transpose:
+    // m(i, j) is component i of basis j.
+    let m = |i: usize, j: usize| matrix[j][i];
+    let trace = m(0, 0) + m(1, 1) + m(2, 2);
+    let real = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        [
+            (m(2, 1) - m(1, 2)) / s,
+            (m(0, 2) - m(2, 0)) / s,
+            (m(1, 0) - m(0, 1)) / s,
+            0.25 * s,
+        ]
+    } else if m(0, 0) > m(1, 1) && m(0, 0) > m(2, 2) {
+        let s = (1.0 + m(0, 0) - m(1, 1) - m(2, 2)).sqrt() * 2.0;
+        [
+            0.25 * s,
+            (m(0, 1) + m(1, 0)) / s,
+            (m(0, 2) + m(2, 0)) / s,
+            (m(2, 1) - m(1, 2)) / s,
+        ]
+    } else if m(1, 1) > m(2, 2) {
+        let s = (1.0 + m(1, 1) - m(0, 0) - m(2, 2)).sqrt() * 2.0;
+        [
+            (m(0, 1) + m(1, 0)) / s,
+            0.25 * s,
+            (m(1, 2) + m(2, 1)) / s,
+            (m(0, 2) - m(2, 0)) / s,
+        ]
+    } else {
+        let s = (1.0 + m(2, 2) - m(0, 0) - m(1, 1)).sqrt() * 2.0;
+        [
+            (m(0, 2) + m(2, 0)) / s,
+            (m(1, 2) + m(2, 1)) / s,
+            0.25 * s,
+            (m(1, 0) - m(0, 1)) / s,
+        ]
+    };
+    dual_quat_of(
+        [matrix[3][0], matrix[3][1], matrix[3][2]],
+        [real[0], real[1], real[2], real[3]],
+    )
+}
+
+/// Renormalize a summed dual quaternion: unit real part, dual part orthogonal to it.
+fn normalize_dual_quat(mut dq: DualQuat) -> DualQuat {
+    let len = dot4(&dq[..4], &dq[..4]).sqrt();
+    if !len.is_finite() || len <= f32::EPSILON {
+        return [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+    }
+    for lane in 0..4 {
+        dq[lane] /= len;
+        dq[4 + lane] /= len;
+    }
+    let d = dot4(&dq[..4], &dq[4..]);
+    for lane in 0..4 {
+        dq[4 + lane] -= d * dq[lane];
+    }
+    dq
+}
+
 /// Stable semantic bone role: one closed set shared by Mixamo-style
 /// source names and engine bone names. Import-time only, never in the tick.
 /// Consumer: a future assets importer maps source skeletons into these
