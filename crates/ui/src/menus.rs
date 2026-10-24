@@ -15,6 +15,7 @@
 //! Closing the screen applies the staged batch at the caller's next fixed-step
 //! boundary, so a change goes live on a tick, never mid-frame.
 
+use crate::nav_focus::{resolve_2d, Dir, FocusNode, FocusState};
 use crate::settings::{
     Quality, SettingChange, Settings, SettingsError, SettingsPanel, SettingsReceipt, VolumeBus,
     RENDER_SCALE_MAX, RENDER_SCALE_MIN, VOLUME_MAX,
@@ -24,6 +25,9 @@ use engine_input::MAX_PARTICIPANTS;
 #[path = "locale.rs"]
 /// Locale tables for menu labels (static en/de, integer plurals, test pseudo).
 pub mod locale;
+
+/// Locale table as data: parse, merge and check one file per locale.
+pub mod catalog;
 
 /// Menu screens as data: a `.ui.toml` names the same rows this module names, in the
 /// same order, and draws the same [`MenuItem`] values.
@@ -38,6 +42,9 @@ pub const MAX_MENU_FIGHTERS: u8 = MAX_PARTICIPANTS;
 const _: () = assert!(MAX_MENU_FIGHTERS == MAX_PARTICIPANTS);
 /// Seed used when the menu starts a fight without a staged value.
 pub const DEFAULT_FIGHT_SEED: u64 = 0x1C3A_9E77_51F2_0B41;
+/// Most rows a screen carries (settings is the widest table today): bounds the
+/// fixed focus-node array [`Menu::step`] builds, so navigation never allocates.
+pub const MAX_MENU_ROWS: usize = 8;
 
 /// Menu failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -262,6 +269,18 @@ pub enum Screen {
     Settings { from: ReturnTo },
 }
 
+impl Screen {
+    /// Stable focus-scope id of this screen's menu table.
+    #[must_use]
+    pub const fn menu_id(self) -> u16 {
+        match self {
+            Self::Main => 1,
+            Self::Pause => 2,
+            Self::Settings { .. } => 3,
+        }
+    }
+}
+
 /// Plain input event feeding the state machine. No crate types cross here.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum MenuInput {
@@ -269,6 +288,10 @@ pub enum MenuInput {
     Up,
     /// Move the highlight one row down (wraps).
     Down,
+    /// Move the focus left (a single-column screen has nothing to the left).
+    Left,
+    /// Move the focus right (a single-column screen has nothing to the right).
+    Right,
     /// Fire the highlighted row.
     Confirm,
     /// Back out: close settings, or resume from pause.
@@ -557,6 +580,9 @@ impl DragValue {
 pub struct Menu {
     screen: Screen,
     selected: usize,
+    /// Stable id of the screen's menu table (`1` main, `2` pause, `3` settings);
+    /// it names the focus scope, never saved game state.
+    menu_id: u16,
 }
 
 impl Menu {
@@ -566,6 +592,7 @@ impl Menu {
         Self {
             screen: Screen::Main,
             selected: 0,
+            menu_id: 1,
         }
     }
 
@@ -575,6 +602,7 @@ impl Menu {
         Self {
             screen: Screen::Pause,
             selected: 0,
+            menu_id: 2,
         }
     }
 
@@ -622,21 +650,26 @@ impl Menu {
 
     /// Feed one input event: move the highlight or fire a row. The returned
     /// command runs through [`dispatch`]; failed picks keep the old state.
+    /// Directional presses go through [`crate::nav_focus::resolve_2d`] over the
+    /// screen's rows, so the highlight lands on the row that is actually in
+    /// that direction (one column today, wrapping like the list always has).
     /// Pure, O(1), no allocation.
     pub fn step(&mut self, input: MenuInput) -> Result<MenuCommand, MenuError> {
         match input {
             MenuInput::Up => {
-                let len = self.items().len();
-                if len > 0 {
-                    self.selected = (self.selected + len - 1) % len;
-                }
+                self.move_focus(Dir::Up);
                 Ok(MenuCommand::None)
             }
             MenuInput::Down => {
-                let len = self.items().len();
-                if len > 0 {
-                    self.selected = (self.selected + 1) % len;
-                }
+                self.move_focus(Dir::Down);
+                Ok(MenuCommand::None)
+            }
+            MenuInput::Left => {
+                self.move_focus(Dir::Left);
+                Ok(MenuCommand::None)
+            }
+            MenuInput::Right => {
+                self.move_focus(Dir::Right);
                 Ok(MenuCommand::None)
             }
             MenuInput::Choose(index) => {
@@ -645,6 +678,42 @@ impl Menu {
             }
             MenuInput::Confirm => self.confirm(),
             MenuInput::Back | MenuInput::PauseToggle => Ok(self.back()),
+        }
+    }
+
+    /// Move the focus one step in `dir`. Rows sit one pitch apart on a single
+    /// column (`x = 0`, `y = index`), the focused row is the cursor and the
+    /// other rows are targets; a vertical move wraps like the list always has,
+    /// a horizontal move has nothing to find (zero width across).
+    fn move_focus(&mut self, dir: Dir) {
+        let items = self.items();
+        let len = items.len();
+        let mut nodes = [FocusNode {
+            id: 0,
+            pos: [0.0, 0.0],
+            state: FocusState::Inert,
+        }; MAX_MENU_ROWS];
+        for (index, node) in nodes.iter_mut().enumerate().take(len.min(MAX_MENU_ROWS)) {
+            let id = u16::try_from(index).unwrap_or(u16::MAX);
+            let pitch = f32::from(id);
+            *node = FocusNode {
+                id,
+                // Row 0 sits at the top: `Down` is `-y`, so a list reads the
+                // way the screen does.
+                pos: [0.0, -pitch],
+                state: if index == self.selected {
+                    FocusState::Focused
+                } else if items[index].enabled {
+                    FocusState::Prioritized
+                } else {
+                    FocusState::Blocked
+                },
+            };
+        }
+        let from = [0.0, -f32::from(u16::try_from(self.selected).unwrap_or(0))];
+        let edge = [0.0, f32::from(u16::try_from(len).unwrap_or(0))];
+        if let Some(id) = resolve_2d(from, dir, &nodes[..len.min(MAX_MENU_ROWS)], true, edge) {
+            self.selected = usize::from(id);
         }
     }
 
@@ -670,8 +739,7 @@ impl Menu {
             (Screen::Main, MenuItemId::QuitApp) => MenuCommand::QuitApp,
             (Screen::Pause, MenuItemId::Resume) => MenuCommand::Resume,
             (Screen::Pause, MenuItemId::QuitToMain) => {
-                self.screen = Screen::Main;
-                self.selected = 0;
+                self.enter(Screen::Main);
                 MenuCommand::QuitToMain
             }
             (_, MenuItemId::OpenSettings) => {
@@ -679,8 +747,7 @@ impl Menu {
                     Screen::Pause => ReturnTo::Pause,
                     Screen::Main | Screen::Settings { .. } => ReturnTo::Main,
                 };
-                self.screen = Screen::Settings { from };
-                self.selected = 0;
+                self.enter(Screen::Settings { from });
                 MenuCommand::OpenSettings
             }
             (Screen::Settings { from }, MenuItemId::Back) => self.close_settings(from),
@@ -703,12 +770,24 @@ impl Menu {
     /// Leave settings for the screen that armed them, highlight on its first
     /// row. Pure.
     fn close_settings(&mut self, from: ReturnTo) -> MenuCommand {
-        self.screen = match from {
+        self.enter(match from {
             ReturnTo::Main => Screen::Main,
             ReturnTo::Pause => Screen::Pause,
-        };
-        self.selected = 0;
+        });
         MenuCommand::CloseSettings
+    }
+
+    /// Switch screen, focus its first row and sync [`Menu::menu_id`]. Pure.
+    fn enter(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.selected = 0;
+        self.menu_id = screen.menu_id();
+    }
+
+    /// Stable id of the focused menu table: `1` main, `2` pause, `3` settings.
+    #[must_use]
+    pub const fn menu_id(&self) -> u16 {
+        self.menu_id
     }
 }
 
@@ -831,6 +910,46 @@ mod tests {
         let mut menu = Menu::pause();
         assert_eq!(menu.step(MenuInput::Confirm).unwrap(), MenuCommand::Resume);
         assert_eq!(menu.screen(), Screen::Pause);
+    }
+
+    #[test]
+    fn nav_press_moves_only_where_a_row_lies() {
+        // One column: a vertical press moves one row, a horizontal press has
+        // nothing to find and leaves the highlight (and the command) alone.
+        let mut menu = Menu::main();
+        assert_eq!(menu.step(MenuInput::Down).unwrap(), MenuCommand::None);
+        assert_eq!(menu.selected(), 1);
+        assert_eq!(menu.step(MenuInput::Left).unwrap(), MenuCommand::None);
+        assert_eq!(menu.selected(), 1, "no row lies to the left");
+        assert_eq!(menu.step(MenuInput::Right).unwrap(), MenuCommand::None);
+        assert_eq!(menu.selected(), 1, "no row lies to the right");
+        assert_eq!(menu.step(MenuInput::Up).unwrap(), MenuCommand::None);
+        assert_eq!(menu.selected(), 0);
+        // The list still wraps at both ends.
+        menu.step(MenuInput::Up).unwrap();
+        assert_eq!(menu.selected(), 2);
+    }
+
+    #[test]
+    fn menu_id_follows_the_screen() {
+        let mut menu = Menu::main();
+        assert_eq!(menu.menu_id(), 1);
+        menu.step(MenuInput::Choose(1)).unwrap();
+        assert_eq!(
+            menu.screen(),
+            Screen::Settings {
+                from: ReturnTo::Main
+            }
+        );
+        assert_eq!(menu.menu_id(), 3, "settings names its own focus scope");
+        menu.step(MenuInput::Back).unwrap();
+        assert_eq!(menu.menu_id(), 1, "back to the main table");
+        let mut pause = Menu::pause();
+        assert_eq!(pause.menu_id(), 2);
+        pause.step(MenuInput::Choose(1)).unwrap();
+        assert_eq!(pause.menu_id(), 3);
+        pause.step(MenuInput::Back).unwrap();
+        assert_eq!(pause.menu_id(), 2, "back to the pause table");
     }
 
     #[test]
