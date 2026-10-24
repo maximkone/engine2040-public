@@ -164,6 +164,26 @@ impl HitDir {
             Self::Left | Self::FrontLeft | Self::BackLeft => ARM_L,
         }
     }
+
+    /// Planar push in Q10 integer units (1024 reads unity): the same octant
+    /// table as [`HitDir::push`] with no float, so the capture-point balance
+    /// rule reads an integer direction. Diagonals use 724, the floor of
+    /// 1024/sqrt 2. Mirror-exact: swapping left and right flips the x lane and
+    /// holds the z lane, so a mirrored blow mirrors the reaction.
+    pub fn push_q10(self) -> [i32; 2] {
+        const U: i32 = 1024;
+        const D: i32 = 724;
+        match self {
+            Self::Front => [0, -U],
+            Self::FrontRight => [-D, -D],
+            Self::Right => [-U, 0],
+            Self::BackRight => [-D, D],
+            Self::Back => [0, U],
+            Self::BackLeft => [D, D],
+            Self::Left => [U, 0],
+            Self::FrontLeft => [D, -D],
+        }
+    }
 }
 
 /// One landed hit as animation input: direction, Q8 impulse and the tick the
@@ -1083,5 +1103,48 @@ mod tests {
             flinch(HitDir::Front, IMPULSE_Q8_MAX + 1, &mut out).unwrap_err(),
             HitError::BadImpulse(IMPULSE_Q8_MAX + 1)
         );
+    }
+
+    #[test]
+    fn push_q10_is_the_integer_push_and_mirrors() {
+        const U: i32 = 1024;
+        const D: i32 = 724;
+        for dir in all_dirs() {
+            let q = dir.push_q10();
+            let f = dir.push();
+            // The integer table agrees with the float one lane by lane.
+            for lane in 0..2 {
+                assert_eq!(q[lane] >= 0, f[lane] >= 0.0, "{dir:?} lane {lane} sign");
+            }
+            match dir.octant() % 2 {
+                // Axis hits push one lane at unity and leave the other at rest.
+                0 => {
+                    assert_eq!(q[0].abs() + q[1].abs(), U, "{dir:?} axis push");
+                    assert!(q[0] == 0 || q[1] == 0, "{dir:?} single lane");
+                }
+                // Diagonals split evenly at 1024/sqrt 2, floored.
+                _ => {
+                    assert_eq!(q[0].abs(), D, "{dir:?} diagonal x");
+                    assert_eq!(q[1].abs(), D, "{dir:?} diagonal z");
+                }
+            }
+        }
+        // Mirroring a blow swaps left and right: the x lane flips and the z
+        // lane holds, so a mirrored hit mirrors the reaction.
+        for (left, right) in [
+            (HitDir::Left, HitDir::Right),
+            (HitDir::FrontLeft, HitDir::FrontRight),
+            (HitDir::BackLeft, HitDir::BackRight),
+        ] {
+            let (l, r) = (left.push_q10(), right.push_q10());
+            assert_eq!(l[0], -r[0], "{left:?}/{right:?} x flips");
+            assert_eq!(l[1], r[1], "{left:?}/{right:?} z holds");
+            // The push magnitude is one value, so no side is weaker.
+            assert_eq!(l[0].abs() + l[1].abs(), r[0].abs() + r[1].abs());
+        }
+        // Front and back mirror across the plane: the z lane flips, x holds.
+        let (front, back) = (HitDir::Front.push_q10(), HitDir::Back.push_q10());
+        assert_eq!(front[0], -back[0], "front/back x");
+        assert_eq!(front[1], -back[1], "front/back z flips");
     }
 }
