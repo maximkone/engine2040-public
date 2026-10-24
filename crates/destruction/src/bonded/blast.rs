@@ -9,6 +9,7 @@
 //! events and the same `state_hash` on every PC.
 
 use super::{BondedCollection, BreakError};
+use engine_core::checked::f32_from_u64;
 
 /// Largest accepted blast reach, millimeters (100 m).
 pub const MAX_BLAST_RADIUS_MM: u32 = 100_000;
@@ -16,6 +17,11 @@ pub const MAX_BLAST_RADIUS_MM: u32 = 100_000;
 const MAX_CENTER_MM: u32 = 1_000_000;
 
 /// A chunk coordinate in meters as whole millimeters, truncating toward zero.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "bonded chunk coordinates are validated finite and well inside +-1e6 m, so the millimetre product is exact in f32 and fits i64 with room to spare"
+)]
 fn mm(meters: f32) -> i64 {
     (meters * 1000.0) as i64
 }
@@ -48,8 +54,8 @@ impl BondedCollection {
                 .into_iter()
                 .zip(center_mm)
                 .map(|(at, center)| {
-                    let d = mm(at) - i64::from(center);
-                    (d * d) as u64
+                    let d = (mm(at) - i64::from(center)).unsigned_abs();
+                    d.saturating_mul(d)
                 })
                 .fold(0, u64::saturating_add);
             let distance = d2.isqrt();
@@ -57,7 +63,7 @@ impl BondedCollection {
                 continue;
             }
             let share = u64::from(impulse) * (reach - distance) / reach;
-            self.apply_impact(chunk, share as f32, tick)?;
+            self.apply_impact(chunk, f32_from_u64(share), tick)?;
             struck += 1;
         }
         Ok(struck)
