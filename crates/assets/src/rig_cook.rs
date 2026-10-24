@@ -19,7 +19,7 @@
 //!
 //! Units: meters, UVs in `0..=1`, bytes. Determinism: the same body bytes
 //! give the same cooked bytes - no clock, no RNG, no hash-order dependence.
-//! Errors: [`RigCookError`], every one naming the file and the reason.
+//! Errors: [`RigCookError`](crate::rig_cook::RigCookError), every one naming the file and the reason.
 //! Budget: one-shot cook (a full read of a body), never on a tick.
 //!
 //! The cook edits the source document, not a new glTF: every node, skin,

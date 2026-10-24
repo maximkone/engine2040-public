@@ -14,6 +14,11 @@ use super::super::*;
 use super::live::LiveSink;
 use super::presenter::Presenter;
 
+mod upscale_gpu;
+mod upscale_live;
+pub(super) use upscale_gpu::SpanStamps;
+pub(super) use upscale_live::UpscaleLive;
+
 /// Where a window frame's pre-look pass writes and where its display write
 /// reads.
 #[derive(Clone, Copy)]
@@ -141,5 +146,69 @@ impl Presenter {
     /// after the blit and the display write reads its output.
     pub fn look_lut_bound(&self) -> bool {
         self.lut.applied().is_some()
+    }
+}
+
+impl Presenter {
+    /// Render size of a window frame. A surface frame follows the live render scale; the old
+    /// half-resolution switch still wins when it is on, and a frame that stays on the device
+    /// (the twin) never takes the scale.
+    pub(super) fn live_render_size(&self, surface: bool, width: u32, height: u32) -> (u32, u32) {
+        let legacy =
+            super::live::live_present_size(width, height, super::live::live_half_res_enabled());
+        if !surface || legacy != (width, height) {
+            return legacy;
+        }
+        self.upscale.config.render_size(width, height)
+    }
+
+    /// Ready the upscale chain for this frame (and arm or disarm it). Call after the targets
+    /// exist and before the frame borrows them.
+    pub(super) fn prepare_upscale(&mut self, surface: bool, render: (u32, u32), out: (u32, u32)) {
+        let want_final = self.look_lut_bound();
+        self.upscale
+            .prepare(&self.device, &self.queue, surface, render, out, want_final);
+    }
+
+    /// Take the picker's scale for this frame from the newest resolved GPU ms (a no-op unless
+    /// `E2040_DYNRES=1`).
+    pub(super) fn tick_dynres(&mut self) {
+        let latest = self.gpu_timer.as_ref().and_then(|t| t.latest_total());
+        self.upscale.tick_dynres(latest);
+    }
+
+    /// The receipt lines of the upscale chain and the dyn-res picker, `None` while both are off.
+    #[must_use]
+    pub fn upscale_receipt(&self) -> Option<String> {
+        self.upscale.receipt_line()
+    }
+
+    /// Render the window frame at `pct` percent of the output edge (50 to 100). Below 100 the
+    /// picture is stretched back to the output by the upscaler: bilinear in the blit, or the
+    /// FSR 1.0 EASU pass when [`Self::set_upscale_fsr1`] is on.
+    pub fn set_render_scale_pct(&mut self, pct: u8) {
+        self.upscale.config.set_scale_pct(pct);
+    }
+
+    /// The live render scale in percent of the output edge.
+    #[must_use]
+    pub fn render_scale_pct(&self) -> u8 {
+        self.upscale.config.scale_pct()
+    }
+
+    /// Switch the FSR 1.0 EASU upscale for frames that render below the output.
+    pub fn set_upscale_fsr1(&mut self, on: bool) {
+        self.upscale.config.set_fsr1(on);
+    }
+
+    /// True when the EASU upscale is on.
+    #[must_use]
+    pub fn upscale_fsr1(&self) -> bool {
+        self.upscale.config.fsr1()
+    }
+
+    /// Sharpen strength after the upscale, `0` (off) to `1`.
+    pub fn set_upscale_sharpness(&mut self, sharpness: f32) {
+        self.upscale.config.set_sharpness(sharpness);
     }
 }
