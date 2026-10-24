@@ -26,9 +26,11 @@ const TONEMAP_CHUNK: &str = include_str!("shaders/tonemap.wgsl");
 fn shipped_source<'a>(name: &str, wgsl: &'a str) -> std::borrow::Cow<'a, str> {
     let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
     match file {
-        "forward.wgsl" | "blit.wgsl" | "post_chain.wgsl" | "composite_compute.wgsl" => {
-            std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{wgsl}"))
+        "forward_torch_vertex.wgsl" => {
+            std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{FORWARD_CHUNK}{wgsl}"))
         }
+        "forward.wgsl" | "blit.wgsl" | "post_chain.wgsl" | "composite_compute.wgsl"
+        | "grade_lut.wgsl" => std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{wgsl}")),
         _ => std::borrow::Cow::Borrowed(wgsl),
     }
 }

@@ -545,4 +545,108 @@ mod tests {
             "p95 {p95} ns per tick is over the {P95_BAR_NS} ns (0.1 ms) bar"
         );
     }
+
+    /// The seeded fields stay inside their bounds: subject is 0..16 and kind
+    /// is 0..4, and neither field collapses to a constant.
+    #[test]
+    fn seeded_event_fields_stay_inside_their_bounds() {
+        let schedule = EventSchedule::seeded(2040, 256, 1000);
+        let subjects: Vec<u32> = schedule
+            .events()
+            .iter()
+            .map(|event| event.subject)
+            .collect();
+        let kinds: Vec<u32> = schedule
+            .events()
+            .iter()
+            .map(|event| u32::from(event.kind))
+            .collect();
+        assert_eq!(subjects.len(), 256);
+        assert_eq!(
+            subjects.iter().filter(|subject| **subject < 16).count(),
+            256,
+            "subject is (word >> 32) % 16"
+        );
+        assert!(
+            subjects.iter().any(|subject| *subject != 0),
+            "subjects are not all zero"
+        );
+        assert_eq!(
+            kinds.iter().filter(|kind| **kind < 4).count(),
+            256,
+            "kind is (word >> 52) % 4"
+        );
+        assert!(
+            kinds.iter().any(|kind| *kind != 0),
+            "kinds are not all zero"
+        );
+    }
+
+    /// `at` returns the events of its own tick and nothing else.
+    #[test]
+    fn at_returns_only_its_own_tick() {
+        let mut schedule = EventSchedule::new();
+        for (tick, payload) in [(5u32, 0xa1u64), (5, 0xb2), (9, 0xc3)] {
+            schedule.push(InjectedEvent {
+                tick,
+                subject: 1,
+                kind: 0,
+                payload,
+            });
+        }
+        let at_five: Vec<u64> = schedule.at(5).iter().map(|event| event.payload).collect();
+        assert_eq!(at_five, vec![0xa1, 0xb2]);
+        let at_nine: Vec<u64> = schedule.at(9).iter().map(|event| event.payload).collect();
+        assert_eq!(at_nine, vec![0xc3]);
+        assert_eq!(schedule.at(6).len(), 0, "a tick with no event is empty");
+    }
+
+    /// `is_empty` follows the event count.
+    #[test]
+    fn is_empty_tracks_the_schedule() {
+        assert!(EventSchedule::new().is_empty());
+        let one = EventSchedule::seeded(1, 1, 10);
+        assert!(!one.is_empty());
+        assert_eq!(one.len(), 1);
+    }
+
+    /// A plain closure is a clock, and it returns its own reading.
+    #[test]
+    fn a_closure_is_a_clock() {
+        let clock = || 42u64;
+        let as_clock: &dyn Clock = &clock;
+        assert_eq!(as_clock.now_ns(), 42);
+    }
+
+    /// The run digest is the chain digest, and the harness overhead per tick is
+    /// exactly the two clock readings it takes around dispatch and fold.
+    #[test]
+    fn run_digest_and_overhead_are_the_measured_ones() {
+        let mut sim = RuleSim::new(7);
+        let run = SimRun::run(&mut sim, 7, 5, &EventSchedule::new(), None);
+        assert_eq!(run.digest(), run.chain().digest());
+        assert_ne!(run.digest(), 0, "a five-tick run folds a real chain");
+
+        let calls = AtomicU64::new(0);
+        let clock = || calls.fetch_add(1, Ordering::Relaxed);
+        let as_clock: &dyn Clock = &clock;
+        let mut sim = RuleSim::new(7);
+        let timed = SimRun::run(&mut sim, 7, 5, &EventSchedule::new(), Some(as_clock));
+        assert_eq!(timed.overhead_ns(), &[2, 2, 2, 2, 2]);
+        let mut sim = RuleSim::new(7);
+        let untimed = SimRun::run(&mut sim, 7, 5, &EventSchedule::new(), None);
+        assert_eq!(untimed.overhead_ns(), &[] as &[u64]);
+    }
+
+    /// The percentile reads an exact ranked sample, keeps the caller's order and
+    /// clamps a rank past the end to the last sample.
+    #[test]
+    fn percentile_picks_the_ranked_sample() {
+        assert_eq!(percentile_ns(&[], 50), 0);
+        let samples = [50u64, 10, 30, 40, 20];
+        assert_eq!(percentile_ns(&samples, 0), 10);
+        assert_eq!(percentile_ns(&samples, 50), 30);
+        assert_eq!(percentile_ns(&samples, 100), 50);
+        assert_eq!(samples, [50, 10, 30, 40, 20], "the caller keeps its order");
+    }
 }
