@@ -49,6 +49,8 @@ pub mod music;
 /// Std-only.
 pub mod occlude;
 pub mod playlist;
+/// Named mixer settings as data: bus gains in permille, applied to a [`dsp::BusMixer`].
+pub mod preset;
 /// Parametric reverb tails with tunnel preset: delay-line pure fns,
 /// zero audio-thread allocs. Std-only.
 pub mod reverb;
