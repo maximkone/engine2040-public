@@ -168,8 +168,8 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   `cargo clippy -p engine-arena --no-default-features --all-targets -- -D warnings`
   exits 0; the tool prints PASS for the crate. F2P: the bare build warns.
   P2P: the default-feature build and golden unchanged. needs: none.
-- [ ] BG14 endpoint: EG49 stopped at the tool surface — `tools/memory/memory.mjs`
-  and `tools/tasks/run.mjs` exist, but `rg "e2040://memory" crates` is 0 and
+- [x] BG14 endpoint: EG49 stopped at the tool surface — Landed 8bba23d0b.
+  `tools/memory/memory.mjs` and `tools/tasks/run.mjs` exist, but `rg "e2040://memory" crates` is 0 and
   `run.mjs:26,203` scores only a canned log. Expose the same records as
   `e2040://memory?path=...`, `memory.record` (a 16-hex hash required) and
   `tasks.list` (ten jobs), and give `run.mjs --solve --arm scripted|mutation`
