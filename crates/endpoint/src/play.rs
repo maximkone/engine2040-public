@@ -43,6 +43,7 @@ use rmcp::serde::{Deserialize, Serialize};
 use rmcp::serde_json::Value;
 
 use super::mcp::{McpServer, McpToolError};
+use crate::play_task::{reached_ticks, task_progress};
 
 /// Tool: headless arena match job (start/poll/cancel multiplexed in `action`).
 pub const TOOL_PLAY_RUN: &str = "play.run";
@@ -382,121 +383,30 @@ impl JobStatus {
     }
 }
 
-/// The job counters: one count per status word.
-///
-/// AX28: the counts are backed by disk. The table keeps them live and writes
-/// them to `target/reports/play-jobs.json` when a job reaches a terminal
-/// status, so a session that starts later reconciles against the file
-/// instead of counting from zero. The file is the evidence; the live
-/// counters are this session's view of it.
-///
-/// Units: jobs. Determinism: the same jobs in the same order give the same
-/// counts and the same file body.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(crate = "rmcp::serde")]
-pub struct JobCounters {
-    /// Jobs filed and not yet run.
-    pub pending: u64,
-    /// Jobs working.
-    pub running: u64,
-    /// Jobs that finished with a result.
-    pub completed: u64,
-    /// Jobs that finished with a refusal.
-    pub failed: u64,
-    /// Jobs the caller stopped.
-    pub cancelled: u64,
-    /// Jobs that outlived their poll budget.
-    pub expired: u64,
-}
-
-impl JobCounters {
-    /// Where the counters live, relative to the workspace root.
-    pub const FILE: &'static str = "target/reports/play-jobs.json";
-
-    /// Count one job in one status.
-    pub fn bump(&mut self, status: JobStatus) {
-        match status {
-            JobStatus::Pending => self.pending += 1,
-            JobStatus::Running => self.running += 1,
-            JobStatus::Completed => self.completed += 1,
-            JobStatus::Failed => self.failed += 1,
-            JobStatus::Cancelled => self.cancelled += 1,
-            JobStatus::Expired => self.expired += 1,
-        }
-    }
-
-    /// The count for one status.
-    #[must_use]
-    pub fn count(&self, status: JobStatus) -> u64 {
-        match status {
-            JobStatus::Pending => self.pending,
-            JobStatus::Running => self.running,
-            JobStatus::Completed => self.completed,
-            JobStatus::Failed => self.failed,
-            JobStatus::Cancelled => self.cancelled,
-            JobStatus::Expired => self.expired,
-        }
-    }
-
-    /// Every count, one line per status, in vocabulary order.
-    #[must_use]
-    pub fn to_text(&self) -> String {
-        let mut out = String::new();
-        for status in JobStatus::ALL {
-            out.push_str(&format!("{}: {}\n", status.as_str(), self.count(status)));
-        }
-        out
-    }
-
-    /// The total number of jobs counted.
-    #[must_use]
-    pub fn total(&self) -> u64 {
-        JobStatus::ALL
-            .into_iter()
-            .map(|status| self.count(status))
-            .sum()
-    }
-
-    /// Write the counters under `root` and return the relative path.
-    ///
-    /// The write is best effort for the caller: a job that already happened
-    /// is never undone because the disk said no.
-    pub fn write(&self, root: &std::path::Path) -> Result<String, McpToolError> {
-        let dir = root.join("target/reports");
-        let failed = |why: std::io::Error| {
-            McpToolError::new(
-                "counters_unwritten",
-                format!("could not write {} ({why})", Self::FILE),
-            )
-        };
-        std::fs::create_dir_all(&dir).map_err(failed)?;
-        let body = rmcp::serde_json::to_string_pretty(self).unwrap_or_default();
-        std::fs::write(root.join(Self::FILE), body).map_err(failed)?;
-        Ok(Self::FILE.to_owned())
-    }
-
-    /// Read the counters back from `root`; `None` when there is no file.
-    #[must_use]
-    pub fn read(root: &std::path::Path) -> Option<Self> {
-        let text = std::fs::read_to_string(root.join(Self::FILE)).ok()?;
-        rmcp::serde_json::from_str(&text).ok()
-    }
-}
+/// The job counters: one count per status word, backed by
+/// `target/reports/play-jobs.json` (AX28, [`play_counters`]).
+mod play_counters;
+pub use self::play_counters::JobCounters;
 
 /// One match job: the eager result plus the handle protocol around it.
-struct PlayJob {
-    status: JobStatus,
+pub(crate) struct PlayJob {
+    pub(crate) status: JobStatus,
     seed: u64,
     half_extent_m: f32,
     scene_rev: Option<u64>,
     scene_digest: Option<String>,
-    ticks: u32,
+    pub(crate) ticks: u32,
     fighters: u8,
     checkpoints: Vec<Checkpoint>,
     logs: Vec<String>,
     truncated_logs: bool,
-    polls_used: u64,
+    pub(crate) polls_used: u64,
     ttl_polls: u64,
+    // AX28: a job a task-shaped client started advances its reported progress
+    // in task slices (see `play_task::TASK_SLICE_TICKS`), one per poll, instead
+    // of the plain two step 0 -> halfway -> done walk. The result itself is
+    // still the eager one.
+    pub(crate) task: bool,
     // Measured at `start` only when the caller asked for `timing`; a job that
     // measured nothing answers `unknown` on a later timed poll.
     timing: Option<PlayTimingDto>,
@@ -526,10 +436,11 @@ pub type RunMatch<'a> = dyn Fn(&ArenaConfig, &FighterTape, Option<&MatchWorld>) 
     + 'a;
 
 /// Session job table: monotonic ids over a `BTreeMap` (stable order, no
-/// wall clock in the ids). Bounded at [`MAX_JOBS`] live entries.
+/// wall clock in the ids). Bounded at [`MAX_JOBS`] live entries. The
+/// task-shaped answer is [`crate::play_task`].
 pub struct PlayJobs {
     next_id: u64,
-    jobs: BTreeMap<u64, PlayJob>,
+    pub(crate) jobs: BTreeMap<u64, PlayJob>,
     /// Bounded ring of start wall times: read only when `timing` is asked.
     timing: play_session::TimingRing,
     /// AX28: the live job counters, backed by `target/reports/play-jobs.json`.
@@ -613,6 +524,20 @@ impl PlayJobs {
         self.play_run_in(args, None)
     }
 
+    /// [`play_run`](Self::play_run) for a client that may declare the tasks
+    /// extension (AX28): `wants_tasks` only shapes a `start` job, whose
+    /// progress then walks in [`TASK_SLICE_TICKS`] slices and which
+    /// [`task_for`](Self::task_for) answers. The tool bytes stay the start and
+    /// poll answer, so a client that does not declare the extension is served
+    /// exactly as before.
+    pub fn play_run_for(
+        &mut self,
+        args: &PlayRunArgs,
+        wants_tasks: bool,
+    ) -> Result<PlayRunOutput, McpToolError> {
+        self.play_run_with_for(args, None, None, wants_tasks)
+    }
+
     /// [`play_run`](Self::play_run) with the match world of the scene
     /// revision the caller named (`scene_rev`), built by the host from its
     /// document ([`world_load::world_for_revision`]). A start that names a
@@ -635,10 +560,22 @@ impl PlayJobs {
         world: Option<PinnedWorld>,
         runner: Option<&MatchRunner<'_>>,
     ) -> Result<PlayRunOutput, McpToolError> {
+        self.play_run_with_for(args, world, runner, false)
+    }
+
+    /// The one dispatch body: [`play_run_with`](Self::play_run_with) plus the
+    /// task-shaped start flag.
+    pub fn play_run_with_for(
+        &mut self,
+        args: &PlayRunArgs,
+        world: Option<PinnedWorld>,
+        runner: Option<&MatchRunner<'_>>,
+        wants_tasks: bool,
+    ) -> Result<PlayRunOutput, McpToolError> {
         let action = PlayAction::parse(&args.action)?;
         let wants_timing = args.timing.unwrap_or(false);
         match action {
-            PlayAction::Start => self.start(args, world, runner),
+            PlayAction::Start => self.start(args, world, runner, wants_tasks),
             PlayAction::Poll => self.poll(action.job_id(args)?, wants_timing),
             PlayAction::Cancel => self.cancel(action.job_id(args)?, wants_timing),
         }
@@ -651,6 +588,7 @@ impl PlayJobs {
         args: &PlayRunArgs,
         world: Option<PinnedWorld>,
         runner: Option<&MatchRunner<'_>>,
+        task: bool,
     ) -> Result<PlayRunOutput, McpToolError> {
         if self.jobs.len() >= MAX_JOBS {
             return Err(McpToolError::new(
@@ -780,6 +718,7 @@ impl PlayJobs {
             truncated_logs: false,
             polls_used: 0,
             ttl_polls: ttl,
+            task,
             timing,
         };
         push_log(
@@ -857,7 +796,18 @@ impl PlayJobs {
                     return Ok(out);
                 }
                 job.polls_used += 1;
-                if job.polls_used == 1 {
+                if job.task {
+                    // AX28: a task job reports one slice per poll, so a client
+                    // watching the task sees `tick 240/600`, then `480/600`,
+                    // and the result on the poll that reaches the last tick.
+                    let (reached, ticks) = (reached_ticks(job), job.ticks);
+                    if reached < ticks {
+                        push_log(job, format!("job {id} task tick {reached}/{ticks}"));
+                        let counters = self.counters_path.clone();
+                        let events = vec![format!("tick {reached}/{ticks}")];
+                        return Ok(render_output(id, job, events, timing, &counters));
+                    }
+                } else if job.polls_used == 1 {
                     let ticks = job.ticks;
                     push_log(job, format!("job {id} simulating {ticks} ticks"));
                     let job = self.jobs.get(&id).expect("polled job reads back");
@@ -1107,7 +1057,13 @@ fn render_output(
 ) -> PlayRunOutput {
     let (progress, events, checkpoints, final_hash) = match job.status {
         JobStatus::Running => {
-            let progress = if job.polls_used == 0 { 0.0 } else { 0.5 };
+            let progress = if job.polls_used == 0 {
+                0.0
+            } else if job.task {
+                task_progress(job)
+            } else {
+                0.5
+            };
             (progress, events, Vec::new(), None)
         }
         JobStatus::Completed => {
@@ -1548,7 +1504,13 @@ impl ToolBase for PlayRunTool {
 
 impl SyncTool<McpServer> for PlayRunTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch_screened(TOOL_PLAY_RUN, &param, |state| state.play_run(&param))
+        service.dispatch_screened(TOOL_PLAY_RUN, &param, |state| {
+            let out = state.play_run(&param)?;
+            // AD9: a finished job leaves one typed row in the session ring, so
+            // a client reading `log.query` sees the end state without polling.
+            state.note_play_end(out.job_id, &out.status);
+            Ok(out)
+        })
     }
 }
 
@@ -1740,6 +1702,51 @@ mod tests {
         assert_eq!(replay, done);
     }
 
+    /// The ring rows a session holds for finished play jobs.
+    fn ring_end_rows(server: &McpServer) -> Vec<String> {
+        crate::log_tools::LogQueryTool::invoke(
+            server,
+            crate::log_tools::LogQueryArgs {
+                cursor: None,
+                limit: None,
+                code: Some(engine_observe::EventCode::PLAY_JOB_ENDED.raw()),
+            },
+        )
+        .expect("the ring reads")
+        .events
+        .into_iter()
+        .map(|row| row.message)
+        .collect()
+    }
+
+    /// AD9: a job that reaches its end state leaves one typed ring row, so a
+    /// client reading `log.query` learns the end without polling the handle; a
+    /// running job writes none and a replayed terminal handle writes no second.
+    #[test]
+    fn play_job_end_leaves_one_ring_row() {
+        let server = server();
+        let started = invoke(&server, start_args(32)).expect("start validates");
+        let id = started.job_id;
+        invoke(&server, run_action("poll", Some(id))).expect("first poll runs");
+        assert!(
+            ring_end_rows(&server).is_empty(),
+            "a running job wrote no end row"
+        );
+        let done = invoke(&server, run_action("poll", Some(id))).expect("second poll completes");
+        assert_eq!(done.status, "completed");
+        assert_eq!(
+            ring_end_rows(&server),
+            vec![format!("job {id} completed")],
+            "one row for the one end"
+        );
+        invoke(&server, run_action("poll", Some(id))).expect("the done handle replays");
+        assert_eq!(
+            ring_end_rows(&server).len(),
+            1,
+            "a replayed end writes no second row"
+        );
+    }
+
     #[test]
     fn play_cancel_stops_a_running_job() {
         let server = server();
@@ -1873,6 +1880,11 @@ mod tests {
              cancel refused the job PASS"
         );
     }
+
+    /// AX28 task answers: the task-shaped `play.run` cases live in their own
+    /// file so `play.rs` stays inside the line cap.
+    #[path = "play_task_test.rs"]
+    mod task_cases;
 
     #[test]
     fn play_expiry_fires_on_poll_horizon() {

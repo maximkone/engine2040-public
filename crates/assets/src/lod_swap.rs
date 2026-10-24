@@ -12,7 +12,7 @@
 //! per-tick swap overflow is deferred, never dropped.
 //!
 //! Budget: each applied swap costs one event record plus a few integer
-//! compares; [`poll_into`] applies at most `min(budget, MAX_SWAPS_PER_TICK)`
+//! compares; [`poll_into`](crate::lod_swap::LodSwapper::poll_into) applies at most `min(budget, MAX_SWAPS_PER_TICK)`
 //! swaps, pre-reserves the event log, and allocates nothing per tick after
 //! construction (proven by the steady-state test below).
 
@@ -27,7 +27,7 @@ pub const LOD_BAND_MM: [u32; 3] = [15_000, 30_000, 60_000];
 /// distance strictly below `band - HYSTERESIS_MM`, so jitter inside the depth
 /// never oscillates. Coarsening applies exactly at the band.
 pub const HYSTERESIS_MM: u32 = 2_000;
-/// Most swaps applied by one [`poll_into`] call; extra demand waits for the
+/// Most swaps applied by one [`poll_into`](crate::lod_swap::LodSwapper::poll_into) call; extra demand waits for the
 /// next tick in actor order, so a full-roster snap never hitches one frame.
 pub const MAX_SWAPS_PER_TICK: usize = 8;
 /// Most actors tracked by one [`LodSwapper`]; bounds state scans.
@@ -474,7 +474,7 @@ impl LodSwapper {
         Ok(applied)
     }
 
-    /// Allocating convenience over [`poll_into`] for captures and tests; the
+    /// Allocating convenience over [`poll_into`](crate::lod_swap::LodSwapper::poll_into) for captures and tests; the
     /// per-tick path reuses a buffer with `poll_into` instead.
     pub fn poll(
         &mut self,
