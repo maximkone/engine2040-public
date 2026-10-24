@@ -82,6 +82,49 @@ impl Gtao {
     }
 }
 
+/// Sun-shadow compare tap count and pattern for a tier (SW92): fewer taps are
+/// fewer shadow-map fetches on every lit pixel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ShadowFilter {
+    /// 3x3 texel grid: nine compares, the reference picture.
+    Pcf3x3,
+    /// Four taps on a 1x1 texel box rotated by the 4x4 Bayer angle: nine
+    /// compares become four, and the rotation keeps the pattern from banding.
+    Rotated4,
+    /// Two taps along one fixed diagonal, no per-pixel rotation: the web arm,
+    /// where a noisy pattern would survive a missing TAA pass.
+    Tap2,
+}
+
+impl ShadowFilter {
+    /// Every filter, softest first.
+    pub const ALL: [ShadowFilter; 3] = [
+        ShadowFilter::Pcf3x3,
+        ShadowFilter::Rotated4,
+        ShadowFilter::Tap2,
+    ];
+
+    /// Pipeline-constant word the forward shader switches on.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        match self {
+            Self::Pcf3x3 => 0,
+            Self::Rotated4 => 1,
+            Self::Tap2 => 2,
+        }
+    }
+
+    /// Compare taps this filter spends per lit pixel.
+    #[must_use]
+    pub const fn taps(self) -> u32 {
+        match self {
+            Self::Pcf3x3 => 9,
+            Self::Rotated4 => 4,
+            Self::Tap2 => 2,
+        }
+    }
+}
+
 /// One row of the quality table. All integer data, no clock, no float.
 ///
 /// Units: `render_scale_pct` (%), `shadow_cascades` (count), `shadow_map_px`
@@ -102,6 +145,12 @@ pub struct Knobs {
     pub shadow_cascades: u8,
     /// Shadow map edge length (px).
     pub shadow_map_px: u16,
+    /// Sun depth cadence: frame period per cascade (frames). Cascade `i`
+    /// re-renders when `frame % period[i] == 0` or its light matrix moved, so
+    /// the far cascades may run slower than the near one. `0` reads as `1`,
+    /// so a bad row never freezes a map. Never hashed: it picks which frames
+    /// draw a map, not the picture the tier asks for.
+    pub shadow_update_period: [u8; 3],
     /// Ambient occlusion level (level).
     pub gtao: Gtao,
     /// Bloom at half resolution (bool).
@@ -141,8 +190,74 @@ pub struct Knobs {
     pub look_potato_guard: bool,
 }
 
+/// HDR working-target format a tier pays per pixel (SW6).
+///
+/// The top tier keeps half float, so a tone-mapped highlight above 1.0 and the
+/// bloom it feeds survive; the rows that run no bloom (`Potato`, `Mobile`) drop
+/// to a packed unorm, and the mid rows keep float headroom in 4 bytes. Units:
+/// bytes per pixel. Presentation only, never hashed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HdrFormat {
+    /// Half float RGBA: 8 bytes per pixel (the top-tier default).
+    Rgba16Float,
+    /// 10-bit RGB plus 2-bit alpha, unorm: 4 bytes per pixel, clamps at 1.0.
+    Rgb10a2Unorm,
+    /// 11+11+10-bit float: 4 bytes per pixel, keeps the headroom above 1.0.
+    Rg11B10Ufloat,
+}
+
+impl HdrFormat {
+    /// Short name for the page and logs.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Rgba16Float => "rgba16float",
+            Self::Rgb10a2Unorm => "rgb10a2unorm",
+            Self::Rg11B10Ufloat => "rg11b10float",
+        }
+    }
+
+    /// Bytes one pixel costs in this format.
+    #[must_use]
+    pub const fn bytes_per_pixel(self) -> u32 {
+        match self {
+            Self::Rgba16Float => 8,
+            Self::Rgb10a2Unorm | Self::Rg11B10Ufloat => 4,
+        }
+    }
+}
+
+/// How the forward pass sums the frame torches (SW5).
+///
+/// The potato tier pays the 8-light sum once per vertex and interpolates it
+/// across the triangle; every other tier keeps the shipped per-fragment loop.
+/// Presentation only, never hashed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TorchLighting {
+    /// Per fragment: the shipped 8-torch loop (`forward.wgsl` `fs`).
+    Pixel,
+    /// Per vertex: the same sum at each vertex, interpolated
+    /// (`shaders/forward_torch_vertex.wgsl` `vs_torch`/`fs_torch`).
+    Vertex,
+}
+
+impl TorchLighting {
+    /// Short name for the page and logs.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Pixel => "pixel",
+            Self::Vertex => "vertex",
+        }
+    }
+}
+
 /// Quality row for a tier. Bias stays at 100 hundredths on every tier in
 /// this slice so the accept monotone holds flat.
+///
+/// The two presentation extras (SW6's HDR format, SW5's torch rate) ride
+/// [`hdr_format_for_tier`] and [`torch_lighting_for_tier`] instead of a line
+/// per row, so the row table stays inside the function cap.
 #[must_use]
 pub const fn knobs(q: Quality) -> Knobs {
     match q {
@@ -150,6 +265,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             render_scale_pct: 67,
             shadow_cascades: 1,
             shadow_map_px: 1024,
+            shadow_update_period: [1, 2, 4],
             gtao: Gtao::Off,
             bloom_half_res: false,
             taa: false,
@@ -172,6 +288,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             render_scale_pct: 100,
             shadow_cascades: 2,
             shadow_map_px: 1024,
+            shadow_update_period: [1, 2, 2],
             gtao: Gtao::Half,
             bloom_half_res: true,
             taa: false,
@@ -193,6 +310,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             render_scale_pct: 100,
             shadow_cascades: 3,
             shadow_map_px: 2048,
+            shadow_update_period: [1, 1, 1],
             gtao: Gtao::Half,
             bloom_half_res: true,
             taa: true,
@@ -214,6 +332,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             render_scale_pct: 100,
             shadow_cascades: 4,
             shadow_map_px: 4096,
+            shadow_update_period: [1, 1, 1],
             gtao: Gtao::Full,
             bloom_half_res: true,
             taa: true,
@@ -234,6 +353,58 @@ pub const fn knobs(q: Quality) -> Knobs {
     }
 }
 
+/// The presentation extras over one row, split from [`Knobs`]: SW6's HDR
+/// working format, SW5's torch sum rate and SW53's output dither width.
+///
+/// They are not hashed picture budgets, so they live in their own slice and
+/// [`knobs`] keeps its row table untouched.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Presentation {
+    /// HDR working-target format this tier pays per pixel (SW6).
+    pub hdr_format: HdrFormat,
+    /// Torch sum rate this tier pays (SW5).
+    pub torch_lighting: TorchLighting,
+    /// Bits the output store dithers against (SW53).
+    pub output_dither_px_bits: u8,
+}
+
+/// The presentation slice for one tier row.
+#[must_use]
+pub const fn presentation(q: Quality) -> Presentation {
+    Presentation {
+        hdr_format: hdr_format_for_tier(q),
+        torch_lighting: torch_lighting_for_tier(q),
+        output_dither_px_bits: dither_bits_for_tier(q),
+    }
+}
+
+/// SW6: the HDR working-target format a tier pays per pixel. The rows that run
+/// no bloom take the packed unorm, the mid rows keep float headroom in four
+/// bytes, and the top row keeps half float.
+#[must_use]
+pub const fn hdr_format_for_tier(q: Quality) -> HdrFormat {
+    match q {
+        Quality::Potato | Quality::Mobile => HdrFormat::Rgb10a2Unorm,
+        Quality::Web | Quality::Comfort => HdrFormat::Rg11B10Ufloat,
+        Quality::High => HdrFormat::Rgba16Float,
+    }
+}
+
+/// SW53: the integer bits the 8-bit output store dithers against: 8 on the SDR
+/// present path, 10 where the target carries more. Not hashed.
+pub const fn dither_bits_for_tier(_q: Quality) -> u8 {
+    crate::tonemap::dither::DITHER_BITS
+}
+
+/// SW5: the torch sum rate a tier pays. Only the potato row runs it per vertex.
+#[must_use]
+pub const fn torch_lighting_for_tier(q: Quality) -> TorchLighting {
+    match q {
+        Quality::Potato => TorchLighting::Vertex,
+        Quality::Mobile | Quality::Web | Quality::Comfort | Quality::High => TorchLighting::Pixel,
+    }
+}
+
 /// The phone row (BG8). It lives beside the table so the tier match stays
 /// inside the function cap: one cascade, no AO, no TAA, the device pixel ratio
 /// capped at 2, and phone-sized caps under every desktop row.
@@ -242,6 +413,7 @@ const fn mobile_knobs() -> Knobs {
         render_scale_pct: 100,
         shadow_cascades: 1,
         shadow_map_px: 1024,
+        shadow_update_period: [1, 2, 4],
         gtao: Gtao::Off,
         bloom_half_res: false,
         taa: false,
@@ -268,6 +440,7 @@ pub fn unit(knob: &str) -> &'static str {
         "render_scale_pct" => "%",
         "shadow_cascades" => "count",
         "shadow_map_px" => "px",
+        "shadow_update_period" => "frames",
         "gtao" => "level",
         "bloom_half_res" => "bool",
         "taa" => "bool",
@@ -283,6 +456,8 @@ pub fn unit(knob: &str) -> &'static str {
         "physfx_contacts" => "pairs",
         "texture_max_px" => "px",
         "dpr_cap" => "device px per CSS px",
+        "hdr_format" => "bytes/px",
+        "torch_lighting" => "rate",
         _ => "",
     }
 }
@@ -330,18 +505,6 @@ pub fn look_guard_constants(k: &Knobs) -> [(&'static str, f64); 1] {
     )]
 }
 
-/// What the browser page cuts when the frame misses its budget, first to last: Babylon's
-/// SceneOptimizer order (cheap invisible savings first, the picture's own size last). The page
-/// takes one step per missed second and prints `tier=<name> cut=<step>` with each.
-pub const WEB_CUT_ORDER: [&str; 6] = [
-    "merge_draws",
-    "shadows",
-    "post_and_particles",
-    "texture_size",
-    "render_targets",
-    "render_scale",
-];
-
 /// Smallest `maxTextureDimension2D` of a device that gets the `Web` tier or better. WebGPU's
 /// default limit is 8192; an adapter below 4096 is a very weak or restricted GPU and gets
 /// `Potato`.
@@ -383,7 +546,11 @@ pub enum DeviceClass {
 
 impl DeviceClass {
     /// Every class, weakest device first.
-    pub const ALL: [DeviceClass; 3] = [DeviceClass::Phone, DeviceClass::Tablet, DeviceClass::Desktop];
+    pub const ALL: [DeviceClass; 3] = [
+        DeviceClass::Phone,
+        DeviceClass::Tablet,
+        DeviceClass::Desktop,
+    ];
 
     /// Lowercase class name, as the startup line prints it in `device=<name>`.
     #[must_use]
@@ -480,11 +647,52 @@ pub fn shadow_edge_px(k: &Knobs, max_texture_2d: u32) -> u32 {
         .max(MIN_SHADOW_EDGE)
 }
 
+/// Smallest texture edge the cap hands an upload, texels: an adapter that reports no usable
+/// limit still gets a 1 px edge, never a zero-size texture.
+pub const MIN_TEXTURE_EDGE: u32 = 1;
+
+/// Largest texture edge the tier's uploads keep resident: `texture_max_px`, cut to what the
+/// adapter can hold (`max_texture_2d`, the device's `maxTextureDimension2D`) and never under
+/// [`MIN_TEXTURE_EDGE`]. The loader caps every upload to this edge, so a 4096 tier value on a
+/// 2048 adapter loads the 2048 mip instead of failing the upload. QT9: the page prints the
+/// result as `tex_max=`.
+#[must_use]
+pub fn texture_edge_px(k: &Knobs, max_texture_2d: u32) -> u32 {
+    u32::from(k.texture_max_px)
+        .min(max_texture_2d)
+        .max(MIN_TEXTURE_EDGE)
+}
+
 /// Highest cascade band the live frame shades with: the tier's cascade count less one (the
 /// last cascade covers everything beyond it). At least band 0.
 #[must_use]
 pub fn max_cascade_band(k: &Knobs) -> usize {
     usize::from(k.shadow_cascades.max(1)) - 1
+}
+
+/// Sun depth cadence for a tier: frame period per cascade, near to far. Cascade `i` re-renders
+/// when `frame % period[i] == 0` or its light matrix moved (`shadow_cascade::CascadeCadence`).
+/// Presentation only, never hashed.
+#[must_use]
+pub const fn cascade_periods(k: &Knobs) -> [u8; 3] {
+    k.shadow_update_period
+}
+
+/// Sun-shadow compare filter for a tier (SW92): 9 taps, 4 rotated taps, or 2.
+#[must_use]
+pub const fn shadow_filter(q: Quality) -> ShadowFilter {
+    match q {
+        Quality::Potato | Quality::Mobile => ShadowFilter::Rotated4,
+        Quality::Web => ShadowFilter::Tap2,
+        Quality::Comfort | Quality::High => ShadowFilter::Pcf3x3,
+    }
+}
+
+/// Pipeline constants the forward pipeline sets so one shader compiles every
+/// filter: `SHADOW_FILTER` carries [`ShadowFilter::as_u32`].
+#[must_use]
+pub fn shadow_filter_constants(q: Quality) -> [(&'static str, f64); 1] {
+    [("SHADOW_FILTER", f64::from(shadow_filter(q).as_u32()))]
 }
 
 /// True when the live GTAO pass runs: the look toggle is on and the tier has ambient occlusion.
@@ -554,6 +762,18 @@ pub fn choose_web_tier_probed(
     (tier, why)
 }
 
+/// Heat haze strength a tier pays (SW143), `0..=1`: the potato and phone rows pay nothing, the mid
+/// rows half the look, the top row the whole of it. Presentation only, never hashed: it picks
+/// whether one screen tap runs, not a picture budget.
+#[must_use]
+pub const fn heat_haze_strength(q: Quality) -> f32 {
+    match q {
+        Quality::Potato | Quality::Mobile => 0.0,
+        Quality::Web | Quality::Comfort => 0.5,
+        Quality::High => 1.0,
+    }
+}
+
 /// FNV-1a over the 18 hashed knob fields in struct order (bools as 0/1, gtao
 /// as its level byte, integers little-endian). Same tier twice gives the same
 /// hash; no map order involved. `look_potato_guard` stays out: it picks a
@@ -581,6 +801,24 @@ pub fn table_hash(q: Quality) -> u64 {
     h.write_u16(k.texture_max_px);
     h.write_u8(k.dpr_cap);
     h.finish()
+}
+
+/// Detail-cull threshold for a tier: a mesh whose projected diameter is under
+/// this many thousandths of the screen height never reaches the vertex stage
+/// (`gpu_cull::detail_cull_flags_into`). Cheaper tiers drop more, because
+/// their pixels are fewer and their vertex budget smaller; the top tier keeps
+/// everything at 1/500 of the screen height. `0` would disable the drop.
+/// Presentation only, never hashed: it picks which draws reach the vertex
+/// stage, not the picture the tier asks for.
+#[must_use]
+pub const fn detail_cull_permille(q: Quality) -> u16 {
+    match q {
+        Quality::Potato => 8,
+        Quality::Mobile => 7,
+        Quality::Web => 6,
+        Quality::Comfort => 4,
+        Quality::High => 2,
+    }
 }
 
 #[cfg(test)]
@@ -800,7 +1038,10 @@ mod tests {
         // The class hint round trips and a typo is nothing.
         for class in DeviceClass::ALL {
             assert_eq!(DeviceClass::from_name(class.name()), Some(class));
-            assert_eq!(DeviceClass::from_name(&class.name().to_uppercase()), Some(class));
+            assert_eq!(
+                DeviceClass::from_name(&class.name().to_uppercase()),
+                Some(class)
+            );
         }
         assert_eq!(DeviceClass::from_name(" phone "), Some(DeviceClass::Phone));
         assert_eq!(DeviceClass::from_name("watch"), None);
@@ -820,13 +1061,20 @@ mod tests {
             assert_eq!(low.0, high.0);
             assert!(low.1 <= high.1, "{} is over the desktop row", low.0);
         }
-        assert_eq!(mobile.dpr_cap, 2, "a 3x panel would cost three times the pixels");
+        assert_eq!(
+            mobile.dpr_cap, 2,
+            "a 3x panel would cost three times the pixels"
+        );
         assert_eq!(mobile.shadow_cascades, 1);
         assert_eq!(mobile.gtao, Gtao::Off);
         assert!(!gtao_runs(&mobile, true));
         assert_eq!(mobile.texture_max_px, 1024);
         assert_eq!(
-            (mobile.physfx_bodies, mobile.physfx_ragdolls, mobile.physfx_contacts),
+            (
+                mobile.physfx_bodies,
+                mobile.physfx_ragdolls,
+                mobile.physfx_contacts
+            ),
             (128, 3, 384)
         );
         assert_ne!(table_hash(Quality::Mobile), table_hash(Quality::Potato));
@@ -973,6 +1221,30 @@ mod tests {
         assert_eq!(edges, [1024, 1024, 1024, 2048, 4096]);
         assert_eq!(shadow_edge_px(&knobs(Quality::High), 2048), 2048);
         assert_eq!(shadow_edge_px(&knobs(Quality::Web), 0), MIN_SHADOW_EDGE);
+    }
+
+    #[test]
+    fn quality_texture_edge_is_the_tier_value_within_the_adapter() {
+        let edges: Vec<u32> = Quality::ALL
+            .iter()
+            .map(|q| texture_edge_px(&knobs(*q), 16384))
+            .collect();
+        assert_eq!(edges, [512, 1024, 1024, 2048, 4096]);
+        assert_eq!(
+            texture_edge_px(&knobs(Quality::High), 2048),
+            2048,
+            "a 4096 tier value on a 2048 adapter loads the 2048 mip"
+        );
+        assert_eq!(
+            texture_edge_px(&knobs(Quality::High), 8192),
+            4096,
+            "a wider adapter keeps the tier's 4096"
+        );
+        assert_eq!(
+            texture_edge_px(&knobs(Quality::Web), 0),
+            MIN_TEXTURE_EDGE,
+            "an adapter with no usable limit still gets one texel"
+        );
     }
 
     #[test]
@@ -1310,5 +1582,81 @@ mod tests {
         let err = crate::shader_gate::validate_source(name, &stripped)
             .expect_err("the gate refuses a look shader without the guard");
         assert!(err.message.contains(LOOK_GUARD_FN), "{err}");
+    }
+
+    /// SW6 F2P: the HDR working target is one format per tier. The rows that
+    /// run no bloom drop to a packed unorm, the mid rows keep float headroom in
+    /// four bytes, and the top row keeps half float; bytes per pixel never fall
+    /// as the tier rises.
+    #[test]
+    fn hdr_format_follows_the_tier() {
+        assert_eq!(
+            presentation(Quality::Potato).hdr_format,
+            HdrFormat::Rgb10a2Unorm,
+            "the potato row pays 4 bytes per pixel"
+        );
+        assert_eq!(
+            presentation(Quality::Mobile).hdr_format,
+            HdrFormat::Rgb10a2Unorm,
+            "the phone row pays 4 bytes per pixel too"
+        );
+        assert_eq!(
+            presentation(Quality::Web).hdr_format,
+            HdrFormat::Rg11B10Ufloat,
+            "the web row keeps headroom above 1.0 in 4 bytes"
+        );
+        assert_eq!(
+            presentation(Quality::Comfort).hdr_format,
+            HdrFormat::Rg11B10Ufloat,
+            "the middle tier keeps headroom above 1.0 in 4 bytes"
+        );
+        assert_eq!(
+            presentation(Quality::High).hdr_format,
+            HdrFormat::Rgba16Float,
+            "the top row keeps half float"
+        );
+        let mut last = 0_u32;
+        for tier in Quality::ALL {
+            let bytes = presentation(tier).hdr_format.bytes_per_pixel();
+            assert!(
+                bytes >= last,
+                "{tier:?} pays {bytes} bytes per pixel under a weaker row"
+            );
+            assert!(bytes == 4 || bytes == 8, "{tier:?} pays {bytes}");
+            last = bytes;
+        }
+        // One word per row, so the page prints a distinct name for each.
+        let mut names: Vec<&str> = Quality::ALL
+            .iter()
+            .map(|tier| presentation(*tier).hdr_format.name())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names, ["rg11b10float", "rgb10a2unorm", "rgba16float"]);
+        assert_eq!(unit("hdr_format"), "bytes/px");
+        // SW53's knob rides the same slice: every row stores 8-bit output, so the
+        // ordered dither's step is the one the present path already names.
+        let dither = crate::tonemap::dither::DITHER_BITS;
+        for tier in Quality::ALL {
+            assert_eq!(
+                presentation(tier).output_dither_px_bits,
+                dither,
+                "{tier:?} dithers against {dither} bits"
+            );
+        }
+    }
+
+    /// SW6 accept numbers: at 1280x720 the HDR target drops from 7.4 MB
+    /// (Rgba16Float, 8 bytes per pixel) to 3.7 MB (Rgb10a2Unorm, 4 bytes), so
+    /// the potato row pays exactly half the bandwidth of the top row.
+    #[test]
+    fn potato_hdr_target_is_half_the_bytes() {
+        let voxels = 1280_u64 * 720;
+        let bytes =
+            |tier: Quality| u64::from(presentation(tier).hdr_format.bytes_per_pixel()) * voxels;
+        assert_eq!(bytes(Quality::High), 7_372_800, "7.4 MB at the top row");
+        assert_eq!(bytes(Quality::Potato), 3_686_400, "3.7 MB on potato");
+        assert_eq!(bytes(Quality::Potato) * 2, bytes(Quality::High));
+        assert_eq!(bytes(Quality::Web), 3_686_400, "the mid row is 4 bytes too");
     }
 }

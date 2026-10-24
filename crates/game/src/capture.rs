@@ -924,6 +924,18 @@ impl CaptureSink {
         self.frames
     }
 
+    /// The capture directory.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// File name and tick of the frame written last, `None` before the first.
+    #[must_use]
+    pub fn last_frame(&self) -> Option<(&str, u32)> {
+        self.rows.last().map(|row| (row.file.as_str(), row.tick))
+    }
+
     /// Note the session's spectator-camera cuts plus held shot before
     /// sealing: the sink encodes the canonical cut log itself and files the
     /// digest over those exact bytes, so a caller can never file a digest

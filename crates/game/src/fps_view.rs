@@ -7,9 +7,16 @@
 use crate::camera::camera_rig::{smooth_trauma_offset, trauma_gain};
 use crate::camera::CameraError;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
+/// The first person played well (row POV2 and the look audit of 2026-10-24): the eye on the
+/// head's real eye point riding a halflife spring, the aim ray that stays put, a spawn that
+/// looks into the arena, the reticle and the view laws.
+#[path = "fps_pov.rs"]
+pub mod fps_pov;
 /// The pad rumbles on a hit: the mapping from this eye's trauma to a rumble, and the gilrs call.
 #[path = "pad_rumble.rs"]
 pub mod pad_rumble;
+/// The short name the window and the view laws use: `fps_view::pov`.
+pub use self::fps_pov as pov;
 /// Mouse sensitivity.
 pub const SENSITIVITY: f32 = 0.001;
 /// Pitch pad from the pole.

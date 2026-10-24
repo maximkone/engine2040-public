@@ -23,10 +23,17 @@
 
 use std::collections::BTreeMap;
 
+/// The frame audit's per-part and per-spear truth (`tools/frame-audit.mjs`).
+pub mod audit;
+
+use engine_core::vec3::cross3 as cross;
 use engine_render::v1::Camera;
 
 use super::camera_arm::Aabb;
+use super::fps_view::pov;
 
+/// Joints the frame audit places in the world per body (`audit::ANCHOR_NAMES`).
+pub const ANCHORS: usize = 4;
 /// Sand top: the pit floor every body stands on, in meters.
 pub const GROUND_Y: f32 = 0.0;
 /// A joint that misses its constant-velocity prediction by more than this
@@ -75,9 +82,17 @@ pub struct BodyTruth {
     /// Head travel from the rotation flinch this frame, meters (AM23); 0 when
     /// no hit reaction is live. The max is the `react_head_cm_max` receipt.
     pub react_head_m: f32,
+    /// The wearer's own pose for the first person: the mount points and the posed vertices the
+    /// view laws read. Only the body the first-person eye sits in carries it.
+    pub pov: Option<Box<pov::PovBody>>,
     /// Drawn from its ragdoll bones this frame (RZ2w), not from a clip. A ragdoll falls and
     /// tumbles under physics, so the clip-snap law does not judge its joints.
     pub ragdolled: bool,
+    /// Posed parts with bounds, length and material, folded only while the
+    /// look's audit switch is on (a capture run); empty otherwise.
+    pub parts: Vec<audit::PartTruth>,
+    /// World positions of the audit joints (palms and weapon sockets), same switch.
+    pub anchors: [Option<[f32; 3]>; ANCHORS],
 }
 
 impl BodyTruth {
@@ -110,7 +125,10 @@ impl BodyTruth {
             error_parts: 0,
             foot_slide_m: [None; 2],
             react_head_m: 0.0,
+            pov: None,
             ragdolled: false,
+            parts: Vec::new(),
+            anchors: [None; ANCHORS],
         }
     }
 
@@ -238,6 +256,26 @@ pub fn screen_rect(camera: &Camera, min: [f32; 3], max: [f32; 3]) -> Option<[f32
     (rect[0] < rect[2] && rect[1] < rect[3]).then_some(rect)
 }
 
+/// Where world point `p` lands in NDC (`-1..=1`, y up); `None` behind the near
+/// plane or for an unusable camera. The frame audit's own projection is
+/// pinned to this one by the `root_ndc` of each audit row.
+#[must_use]
+pub fn project_ndc(camera: &Camera, p: [f32; 3]) -> Option<[f32; 2]> {
+    let view = camera.view_matrix().ok()?;
+    let half = (camera.fov_y * 0.5).tan();
+    let mut at = camera.eye;
+    (at.x, at.y, at.z) = (p[0], p[1], p[2]);
+    let local = view.transform_point3(at);
+    let depth = -local.z;
+    if !(depth > camera.near && half > 0.0 && camera.aspect > 0.0) {
+        return None;
+    }
+    Some([
+        local.x / (depth * half * camera.aspect),
+        local.y / (depth * half),
+    ])
+}
+
 /// Share of the picture a clipped NDC rect covers, `0..=1`.
 #[must_use]
 pub fn cover(rect: [f32; 4]) -> f32 {
@@ -344,6 +382,19 @@ pub struct ViewLaws {
     spears_max: u32,
     /// Most ropes alive at once in a folded frame (spear grapple).
     tethers_max: u32,
+    /// First-person frames folded, with the frames the near plane cut own geometry and the
+    /// frames own geometry covered more than the cap (`note_frame_pov`).
+    pov_frames: u32,
+    pov_near: u32,
+    pov_cover: u32,
+    /// Most of the picture own geometry covered in one frame, `0..=1`.
+    pov_share_max: f32,
+    /// Frames in a row with own geometry on the screen centre now, and the longest run.
+    pov_centre_run: u32,
+    pov_centre_max: u32,
+    /// The slot the first-person eye sits in, while the window plays the first person: the
+    /// director's frames are then not folded (`note_frame`), the eye's own are (`note_frame_pov`).
+    pov_slot: Option<u8>,
     tracks: Vec<Option<Track>>,
 }
 
@@ -392,6 +443,75 @@ impl ViewLaws {
     /// slides. Joint motion is deliberately absent: [`Self::note_tick`] owns
     /// it, once per sim tick.
     pub fn note_frame(&mut self, camera: &Camera, t: f64, bodies: &[BodyTruth]) {
+        if self.pov_slot.is_none() {
+            self.fold_frame(camera, t, bodies, None);
+        }
+    }
+
+    /// Set while the window plays the first person (`Some(slot)`): [`Self::note_frame`] then
+    /// folds nothing, because the director's camera is not the one on screen and the eye's own
+    /// frame arrives through [`Self::note_frame_pov`].
+    pub fn set_pov_slot(&mut self, slot: Option<u8>) {
+        self.pov_slot = slot;
+    }
+
+    /// [`Self::note_frame`] for the first person: `camera` sits in the head of body `own`, so
+    /// that body never counts as one the eye is inside (the box test would fail every frame).
+    /// Its own geometry is judged by `cover` instead: a frame whose near plane cuts it, or that it
+    /// covers past [`pov::COVER_MAX`], counts into `eye_in_body`, and so does every frame past
+    /// [`pov::CENTRE_FRAMES_MAX`] in a row with it on the screen centre. One frame counts once.
+    pub fn note_frame_pov(
+        &mut self,
+        camera: &Camera,
+        t: f64,
+        bodies: &[BodyTruth],
+        own: u8,
+        cover: &pov::PovCover,
+    ) {
+        self.fold_frame(camera, t, bodies, Some((own, cover)));
+    }
+
+    /// The first-person run of the view line: `None` until a first-person frame was folded.
+    #[must_use]
+    pub fn pov_line(&self) -> Option<String> {
+        (self.pov_frames > 0).then(|| {
+            format!(
+                "arena pov: frames={} near_cut_frames={} cover_over_frames={} cover_max={:.2} centre_run_max={}",
+                self.pov_frames,
+                self.pov_near,
+                self.pov_cover,
+                self.pov_share_max,
+                self.pov_centre_max
+            )
+        })
+    }
+
+    /// Fold one first-person frame's cover; true when the frame breaks a law.
+    fn fold_pov(&mut self, cover: &pov::PovCover) -> bool {
+        self.pov_frames = self.pov_frames.saturating_add(1);
+        if cover.near_cut > 0 {
+            self.pov_near = self.pov_near.saturating_add(1);
+        }
+        if cover.share > pov::COVER_MAX {
+            self.pov_cover = self.pov_cover.saturating_add(1);
+        }
+        self.pov_share_max = self.pov_share_max.max(cover.share);
+        self.pov_centre_run = if cover.centre_m.is_some() {
+            self.pov_centre_run.saturating_add(1)
+        } else {
+            0
+        };
+        self.pov_centre_max = self.pov_centre_max.max(self.pov_centre_run);
+        cover.broken() || self.pov_centre_run > pov::CENTRE_FRAMES_MAX
+    }
+
+    fn fold_frame(
+        &mut self,
+        camera: &Camera,
+        t: f64,
+        bodies: &[BodyTruth],
+        first_person: Option<(u8, &pov::PovCover)>,
+    ) {
         self.frames = self.frames.saturating_add(1);
         self.first_t.get_or_insert(t);
         self.last_t = t;
@@ -399,10 +519,15 @@ impl ViewLaws {
         if eye[1] < GROUND_Y {
             self.eye_below_ground = self.eye_below_ground.saturating_add(1);
         }
-        if bodies
+        let own = first_person.map(|(slot, _)| slot);
+        let in_body = bodies
             .iter()
-            .any(|body| (0..3).all(|axis| body.min[axis] < eye[axis] && eye[axis] < body.max[axis]))
-        {
+            .filter(|body| Some(body.slot) != own)
+            .any(|body| {
+                (0..3).all(|axis| body.min[axis] < eye[axis] && eye[axis] < body.max[axis])
+            });
+        let broken_pov = first_person.is_some_and(|(_, cover)| self.fold_pov(cover));
+        if in_body || broken_pov {
             self.eye_in_body = self.eye_in_body.saturating_add(1);
         }
         let ragdolls = bodies.iter().filter(|body| body.ragdolled).count();
@@ -417,7 +542,18 @@ impl ViewLaws {
             if body.react_head_m.is_finite() {
                 self.react_head_m = self.react_head_m.max(body.react_head_m.max(0.0));
             }
-            match screen_rect(camera, body.min, body.max) {
+            // Cover reads the body's own reach: a cape in the wind or one stray vertex
+            // must not claim a picture no frame shows.
+            let core = crate::camera_frame::Subject {
+                min: body.min,
+                max: body.max,
+            };
+            let core = if body.ragdolled {
+                core
+            } else {
+                core.trimmed(body.root)
+            };
+            match screen_rect(camera, core.min, core.max) {
                 Some(rect) => self.cover_max = self.cover_max.max(cover(rect)),
                 None => self.offscreen = self.offscreen.saturating_add(1),
             }
@@ -1054,14 +1190,6 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
 /// Unit vector, or `None` when the input has no direction or is non-finite.
 fn unit(v: [f32; 3]) -> Option<[f32; 3]> {
     let len = dot(v, v).sqrt();
@@ -1538,6 +1666,22 @@ mod tests {
         }
         assert_eq!(laws.frames, 0, "a tick note draws no frame");
         assert_eq!(laws.pops, 0, "steady joint motion is predicted");
+    }
+
+    #[test]
+    fn a_stray_vertex_cannot_claim_the_picture() {
+        // A cape vertex flung across the pit used to stretch the body's box over the
+        // whole frame: cover_max read 1.00 in a tour where no body filled one.
+        let cam = camera();
+        let mut stray = body(0, "idle", [0.0; 3], vec![[0.0, 1.0, 0.0]]);
+        stray.fold_vertices(&[[-30.0, 0.0, 0.0], [30.0, 9.0, 0.0]]);
+        let mut laws = ViewLaws::default();
+        laws.note(&cam, 1.0, &[stray]);
+        assert!(
+            laws.cover_max > 0.05 && laws.cover_max < 0.5,
+            "cover_max {}",
+            laws.cover_max
+        );
     }
 
     #[test]

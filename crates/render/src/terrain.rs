@@ -109,7 +109,9 @@ impl TerrainDraw {
             ));
         }
         if indices.is_empty() || !indices.len().is_multiple_of(3) {
-            return Err(TerrainError::BadMesh("the indices are empty or not in threes"));
+            return Err(TerrainError::BadMesh(
+                "the indices are empty or not in threes",
+            ));
         }
         let triangles = indices.len() / 3;
         if triangles > MAX_TERRAIN_TRIANGLES {

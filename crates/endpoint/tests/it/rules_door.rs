@@ -15,8 +15,9 @@ use engine_editor::capability::Capability;
 use engine_editor::commands::{self, Batch, Document, Journal, Op};
 use engine_endpoint::mcp::McpServer;
 use engine_endpoint::packs::rules::{
-    RulesExplainArgs, RulesExplainTool, RulesGetArgs, RulesGetTool, RulesSetArgs, RulesSetTool,
-    RulesTestArgs, RulesTestTool, RulesUndoArgs, RulesUndoTool,
+    set_approval_hash, RulesApproval, RulesExplainArgs, RulesExplainTool, RulesGetArgs,
+    RulesGetTool, RulesSetArgs, RulesSetTool, RulesTestArgs, RulesTestTool, RulesUndoArgs,
+    RulesUndoTool,
 };
 use engine_endpoint::play::world_load;
 use engine_endpoint::play::{CheckpointDto, PlayRunArgs, PlayRunTool};
@@ -79,11 +80,20 @@ fn play_at(server: &McpServer, seed: u64, scene_rev: u64) -> (Vec<CheckpointDto>
 }
 
 fn set(server: &McpServer, source: &str, slots: Option<Vec<u8>>) -> Result<String, String> {
+    // AD13: an install is Commit class; the helper approves the exact text
+    // against whatever revision is installed now.
+    let rev = RulesGetTool::invoke(server, RulesGetArgs::default()).map_or(0, |info| info.rev);
     RulesSetTool::invoke(
         server,
         RulesSetArgs {
             source: source.to_owned(),
             slots,
+            approval: Some(RulesApproval {
+                script_hash: set_approval_hash(source),
+                rules_revision: rev,
+            }),
+            expected_hash: None,
+            no_op: None,
         },
     )
     .map(|out| out.hash)

@@ -70,6 +70,25 @@ pub fn timeout_for(kind: &str) -> u64 {
     }
 }
 
+/// The timeout table's kind for one door tool: the one place a tool name maps
+/// onto a budget word, so every caller reads the same row.
+pub fn kind_of(tool: &str) -> &'static str {
+    match tool {
+        "api.search" => "search",
+        "scene.read" | "api.describe" | "scene.query" | "world.query" | "log.query" => "read",
+        "tx.preview" | "tx.apply" | "tx.undo" | "scene.place" => "batch",
+        name if name.ends_with(".build") || name == "test.run" => "proof",
+        _ => "patch",
+    }
+}
+
+/// The deadline one door call owns, in whole seconds from [`timeout_for`].
+/// The door reads it once per call at the audited seam and refuses a call that
+/// overran it as `deadline_exceeded` (`door_dispatch::dispatch_locked`).
+pub fn deadline_for(tool: &str) -> std::time::Duration {
+    std::time::Duration::from_secs(timeout_for(kind_of(tool)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

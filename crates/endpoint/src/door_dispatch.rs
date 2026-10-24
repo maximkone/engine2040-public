@@ -15,6 +15,7 @@ use engine_core::Fnv64;
 use engine_editor::capability::{canonical_action_hash, Capability, OpMask};
 use engine_editor::commands::{Batch, Document, Op};
 use engine_observe::{Event, EventCode};
+use std::time::{Duration, Instant};
 
 use super::audit::{code_hash, AuditError, AuditOutcome, DoorAudit};
 use super::guards::DESTRUCTIVE_TIER;
@@ -205,14 +206,16 @@ impl McpServer {
             (op(&state), revision, session)
         };
         let mut state = self.lock()?;
+        let mut asked = None;
         let (outcome, detail) = match &result {
             Ok(_) => (AuditOutcome::Ok, revision),
             Err(error) => {
                 note_refusal(&mut state, tool, error.code);
+                asked = crate::mcp::mcp_input::asked_state(error);
                 (AuditOutcome::Refused, code_hash(error.code))
             }
         };
-        seal_locked(&mut state, tool, session, revision, outcome, detail)?;
+        seal_locked(&mut state, tool, session, revision, outcome, detail, asked)?;
         result
     }
 
@@ -251,23 +254,60 @@ impl McpServer {
     /// The per-tool remainder stays generic over `R` but holds no audit
     /// words of its own: outcome plus detail are plain `u64`s, the seal
     /// below is one shared copy for every dispatched tool.
+    ///
+    /// NB2: the call owns a deadline. The span is timed with `Instant`, and a
+    /// call that overran its budget answers `deadline_exceeded` in the same
+    /// record: the answer is late, so the caller re-reads and narrows instead
+    /// of trusting it. A refusal the op made itself keeps its own code, and a
+    /// call inside its budget is unchanged.
     fn dispatch_locked<R>(
         &self,
         tool: &str,
         op: impl FnOnce(&mut ServerState) -> Result<R, McpToolError>,
     ) -> Result<R, McpToolError> {
+        self.dispatch_locked_with(tool, super::transport::deadline_for(tool), op)
+    }
+
+    /// [`Self::dispatch_locked`] under an explicit budget, so a fixture proves
+    /// a miss without waiting out a real one: a zero budget is missed by any
+    /// call, and the sealed record is the same one a production call makes.
+    pub(crate) fn dispatch_locked_with<R>(
+        &self,
+        tool: &str,
+        budget: Duration,
+        op: impl FnOnce(&mut ServerState) -> Result<R, McpToolError>,
+    ) -> Result<R, McpToolError> {
         let mut state = self.lock()?;
         let session = state.session;
+        let started = Instant::now();
         let result = op(&mut state);
+        let spent = started.elapsed();
+        // A slow answer is refused, not returned late; an op refusal keeps its
+        // own code so a real refusal never hides behind the deadline.
+        let result = if result.is_ok() && spent > budget {
+            Err(McpToolError::new(
+                "deadline_exceeded",
+                format!(
+                    "`{tool}` ran {} ms, past its {} ms deadline; nothing it staged is \
+                     reported, re-read scene.read and narrow the call",
+                    spent.as_millis(),
+                    budget.as_millis()
+                ),
+            ))
+        } else {
+            result
+        };
         let revision = state.doc.revision;
+        let mut asked = None;
         let (outcome, detail) = match &result {
             Ok(_) => (AuditOutcome::Ok, revision),
             Err(error) => {
                 note_refusal(&mut state, tool, error.code);
+                asked = crate::mcp::mcp_input::asked_state(error);
                 (AuditOutcome::Refused, code_hash(error.code))
             }
         };
-        seal_locked(&mut state, tool, session, revision, outcome, detail)?;
+        seal_locked(&mut state, tool, session, revision, outcome, detail, asked)?;
         result
     }
 
@@ -285,6 +325,7 @@ impl McpServer {
         let revision = state.doc.revision;
         let detail = code_hash(refusal.code);
         note_refusal(&mut state, tool, refusal.code);
+        let asked = crate::mcp::mcp_input::asked_state(&refusal);
         match seal_locked(
             &mut state,
             tool,
@@ -292,6 +333,7 @@ impl McpServer {
             revision,
             AuditOutcome::Refused,
             detail,
+            asked,
         ) {
             Ok(()) => refusal,
             Err(error) => error,
@@ -402,11 +444,17 @@ fn seal_locked(
     revision: u64,
     outcome: AuditOutcome,
     detail: u64,
+    asked: Option<&str>,
 ) -> Result<(), McpToolError> {
     state
         .audit
         .append(session, tool, revision, outcome, detail)
         .map_err(|error| McpToolError::new("audit_exhausted", error.to_string()))?;
+    // MCP31: one ledger entry per call. An ask keys its entry by the state a
+    // retry echoes; a retry folds its record into the entry that asked.
+    state.audit.mark_ask(asked);
+    let round = state.round.clone();
+    state.audit.note_round(round.as_ref());
     Ok(())
 }
 
@@ -565,6 +613,7 @@ mod tests {
     use engine_scene::ids::ObjectId;
     use engine_scene::transform::Transform;
     use rmcp::handler::server::router::tool::SyncTool;
+    use std::time::Duration;
 
     fn server() -> McpServer {
         McpServer::new(7, Capability::unrestricted(7))
@@ -1087,6 +1136,75 @@ mod tests {
         let record = log.iter().next().expect("one record");
         assert_eq!(record.tool, "api.call");
         assert_eq!(record.outcome, AuditOutcome::Refused);
+    }
+
+    #[test]
+    fn a_call_past_its_deadline_refuses_deadline_exceeded_in_one_record() {
+        // A zero budget is missed by any call, so the fixture wedges without
+        // waiting out a real budget.
+        let server = server();
+        let refused = server
+            .dispatch_locked_with("scene.read", Duration::ZERO, |_state| Ok(7u32))
+            .expect_err("a zero budget is always missed");
+        assert_eq!(refused.code, "deadline_exceeded");
+        assert!(
+            refused.message.contains("deadline"),
+            "the message names the miss: {}",
+            refused.message
+        );
+        let log = server.audit_log().expect("audit reads");
+        assert_eq!(log.len(), 1, "the miss seals one record");
+        let record = log.iter().next().expect("one record");
+        assert_eq!(record.tool, "scene.read");
+        assert_eq!(record.outcome, AuditOutcome::Refused);
+        assert_eq!(record.detail, code_hash("deadline_exceeded"));
+
+        // The same call inside its budget answers and seals Ok: normal calls
+        // are unchanged by the deadline.
+        let answered = server
+            .dispatch_locked_with("scene.read", Duration::from_secs(30), |state| {
+                Ok(state.doc.revision)
+            })
+            .expect("a call inside its budget answers");
+        assert_eq!(answered, 0);
+        let log = server.audit_log().expect("audit reads");
+        assert_eq!(log.len(), 2);
+        assert_eq!(
+            log.iter().nth(1).expect("second record").outcome,
+            AuditOutcome::Ok
+        );
+
+        // An op's own refusal keeps its code, so a real refusal never hides
+        // behind the deadline.
+        let refused = server
+            .dispatch_locked_with("scene.read", Duration::ZERO, |_state| {
+                Err(McpToolError::new("bad_args", "no anchor"))
+            })
+            .expect_err("the op refused");
+        assert_eq!(refused.code, "bad_args");
+    }
+
+    #[test]
+    fn the_timeout_table_reaches_the_door() {
+        // The budget the door reads is the one table's own row.
+        assert_eq!(super::super::transport::kind_of("api.search"), "search");
+        assert_eq!(super::super::transport::kind_of("scene.read"), "read");
+        assert_eq!(super::super::transport::kind_of("tx.apply"), "batch");
+        assert_eq!(super::super::transport::kind_of("game.build"), "proof");
+        assert_eq!(super::super::transport::kind_of("play.run"), "patch");
+        assert_eq!(
+            super::super::transport::deadline_for("api.search"),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            super::super::transport::deadline_for("tx.apply"),
+            Duration::from_secs(29)
+        );
+        assert_eq!(
+            super::super::transport::deadline_for("shell.exec"),
+            Duration::from_secs(10),
+            "an unknown name takes the table's default row"
+        );
     }
 
     #[test]

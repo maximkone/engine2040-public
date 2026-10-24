@@ -160,7 +160,7 @@ fn impostor(args: &ImpostorArgs) -> Result<ImpostorOutput, McpToolError> {
             TIER_NAMES.join(", ")
         )));
     };
-    let fighters = u32::try_from(args.fighters).unwrap_or(u32::MAX);
+    let fighters = u32::from(args.fighters);
     let distance = f32::from(args.distance_m);
     // The tier table's own fighter cap is smaller than a legion, so ask it for the
     // base tier at this distance and apply its nearest-full rule here.

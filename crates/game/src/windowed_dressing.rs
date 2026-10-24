@@ -22,8 +22,9 @@ use std::cell::RefCell;
 /// the same file gives the same actors and meshes; pixels never enter the
 /// sim hash. Errors: typed [`WinError`], never panics.
 pub const DRESSING_JSON: &str = include_str!("../../../content/arena/dressing.json");
-/// Dressing actors staged from the file (2 torches + 4 banners).
-pub const DRESSING_ACTOR_COUNT: usize = 6;
+/// Dressing actors staged from the file (2 torches + 4 banners + 2 marble
+/// busts).
+pub const DRESSING_ACTOR_COUNT: usize = 8;
 /// Mesh id base for dressing draws (the central cube keeps id 1).
 pub const DRESSING_MESH_ID_BASE: u64 = 0xD2E5_5100;
 /// Twin establishing eye in meters (west of the walls, down the axis).
@@ -33,13 +34,16 @@ pub const DRESSING_TARGET_M: [f32; 3] = [14.0, 1.0, 0.0];
 /// Twin establishing vertical fov in degrees.
 pub const DRESSING_FOV_DEG: f32 = 50.0;
 
-/// Dressing asset kind: torch approach pair or banner court/far pairs.
+/// Dressing asset kind: torch approach pair, banner court/far pairs, or a
+/// scanned marble bust standing in a wall niche.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DressingAsset {
     /// Approach torch flanking the tunnel mouth.
     Torch,
     /// Court or far banner pairing the gate axis.
     Banner,
+    /// Poly Haven `Marble Bust 01` (SW121), a real glb mesh in a wall niche.
+    Bust,
 }
 
 /// One staged dressing actor: box center plus full extents in meters.
@@ -109,6 +113,7 @@ fn dressing_parse_asset(block: &str) -> Result<DressingAsset, WinError> {
     match tail.get(..end).unwrap_or("") {
         "torch" => Ok(DressingAsset::Torch),
         "banner" => Ok(DressingAsset::Banner),
+        "bust" => Ok(DressingAsset::Bust),
         _ => Err(WinError::Render("dressing bad \"asset\"".to_string())),
     }
 }
@@ -208,11 +213,15 @@ pub fn dressing_mesh_key(actor: &DressingActor) -> MeshKey {
     )
 }
 
-/// Transformed cube mesh for one actor: the unit cube scaled by the full
+/// Transformed cube mesh for one box actor: the unit cube scaled by the full
 /// extents and translated to the box center. Normals stay axis-aligned
-/// (boxes only); UVs and indices ride through. Validation failures are
-/// typed, never panics.
+/// (boxes only); UVs and indices ride through. A [`DressingAsset::Bust`] is a
+/// real glb instead: [`bust_mesh`] imports the scanned marble and fits it to the
+/// actor's box. Validation failures are typed, never panics.
 pub fn dressing_mesh(actor: &DressingActor) -> Result<engine_render::v1::MeshData, WinError> {
+    if actor.asset == DressingAsset::Bust {
+        return bust_mesh(actor);
+    }
     let cube = engine_render::v1::cube();
     let mut positions = Vec::with_capacity(cube.positions.len());
     for p in &cube.positions {
@@ -224,6 +233,43 @@ pub fn dressing_mesh(actor: &DressingActor) -> Result<engine_render::v1::MeshDat
     }
     engine_render::v1::upload_mesh(&positions, &cube.normals, &cube.uvs, &cube.indices)
         .map_err(|err| WinError::Render(format!("dressing mesh: {err}")))
+}
+
+/// The scanned marble bust's glb, beside the other Roman props.
+pub const BUST_GLB: &str = "content/props/polyhaven/marble_bust_01/marble_bust_01.glb";
+
+/// The bust fitted into one actor's box: source positions scaled so the model's
+/// height is the actor's `sy`, centred on the actor's center, with the model's
+/// feet on the box floor.
+pub fn bust_mesh(actor: &DressingActor) -> Result<engine_render::v1::MeshData, WinError> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = root.join(BUST_GLB);
+    let bytes = std::fs::read(&path).map_err(|err| WinError::Render(format!("bust: {err}")))?;
+    let import = engine_assets::mesh_import::import_gltf_path(BUST_GLB, &bytes)
+        .map_err(|err| WinError::Render(format!("bust import: {err}")))?;
+    let mesh = import
+        .meshes
+        .first()
+        .ok_or_else(|| WinError::Render("bust glb has no mesh".to_string()))?;
+    let (mut low, mut high) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in &mesh.positions {
+        for axis in 0..3 {
+            low[axis] = low[axis].min(p[axis]);
+            high[axis] = high[axis].max(p[axis]);
+        }
+    }
+    let height = (high[1] - low[1]).max(1e-6);
+    let scale = actor.size_m[1] / height;
+    let mut positions = Vec::with_capacity(mesh.positions.len());
+    for p in &mesh.positions {
+        positions.push([
+            actor.pos_m[0] + (p[0] - (low[0] + high[0]) * 0.5) * scale,
+            actor.pos_m[1] + (p[1] - low[1]) * scale,
+            actor.pos_m[2] + (p[2] - (low[2] + high[2]) * 0.5) * scale,
+        ]);
+    }
+    engine_render::v1::upload_mesh(&positions, &mesh.normals, &mesh.uv0, &mesh.indices)
+        .map_err(|err| WinError::Render(format!("bust mesh: {err}")))
 }
 
 /// PBR factors per asset: torches read warm and bright, banners deep red;
@@ -241,6 +287,13 @@ pub fn dressing_material(asset: DressingAsset) -> engine_render::v1::PbrMaterial
             base_color: [0.55, 0.08, 0.08],
             metallic: 0.0,
             roughness: 0.8,
+            exposure: 1.0,
+        },
+        // Scanned marble: a light warm dielectric, polished but not a mirror.
+        DressingAsset::Bust => engine_render::v1::PbrMaterial {
+            base_color: [0.86, 0.84, 0.80],
+            metallic: 0.0,
+            roughness: 0.35,
             exposure: 1.0,
         },
     }
@@ -518,6 +571,59 @@ mod tests {
     }
 
     #[test]
+    fn dressing_parses_the_two_marble_busts_and_draws_the_scanned_mesh() {
+        // SW121: the file carries two more actors than the CT53 court, both the
+        // scanned Poly Haven bust (not a sandstone stand-in), one per wall niche.
+        let actors = dressing_actors().expect("dressing parses");
+        assert_eq!(actors.len(), DRESSING_ACTOR_COUNT);
+        let busts: Vec<&DressingActor> = actors
+            .iter()
+            .filter(|actor| actor.asset == DressingAsset::Bust)
+            .collect();
+        assert_eq!(busts.len(), 2, "one bust per wall niche");
+        for (index, bust) in busts.iter().enumerate() {
+            assert_eq!(bust.id, 107 + index as u32);
+            assert!((bust.size_m[1] - 2.2).abs() < 1e-6, "bust stands 2.2 m");
+            assert!(
+                (bust.pos_m[2].abs() - 9.3).abs() < 1e-6,
+                "bust {} on a wall niche, z {}",
+                bust.id,
+                bust.pos_m[2]
+            );
+            // The mesh is the scanned glb, not the 24-vertex cube: it has
+            // thousands of positions and its height is the actor's.
+            let mesh = dressing_mesh(bust).expect("bust mesh imports");
+            assert!(
+                mesh.positions.len() > 1_000,
+                "bust {} has {} positions",
+                bust.id,
+                mesh.positions.len()
+            );
+            let (mut low, mut high) = (f32::MAX, f32::MIN);
+            for p in &mesh.positions {
+                low = low.min(p[1]);
+                high = high.max(p[1]);
+            }
+            assert!(
+                (high - low - 2.2).abs() < 0.01,
+                "bust {} spans {} m",
+                bust.id,
+                high - low
+            );
+        }
+        // The box actors keep the cube path: 24 positions.
+        let torch = actors
+            .iter()
+            .find(|actor| actor.asset == DressingAsset::Torch)
+            .expect("a torch");
+        assert_eq!(
+            dressing_mesh(torch).expect("cube mesh").positions.len(),
+            24,
+            "torches stay boxes"
+        );
+    }
+
+    #[test]
     fn dressing_frame_one_keeps_the_order_and_refuses_no_frame() {
         // A fresh swapper starts at LOD0, so frame one equals the stateless
         // band pick; a refused poll changes nothing and still draws all six.
@@ -534,7 +640,17 @@ mod tests {
             .map(|item| item.mesh)
             .filter(|key| resident.contains(key))
             .collect();
-        assert_eq!(order, resident, "nearer band first, file order within");
+        // Every actor draws once; the ranking is (band, distance), so within
+        // one band the nearest comes first and the file order only breaks ties.
+        assert_eq!(order.len(), DRESSING_ACTOR_COUNT);
+        let mut sorted = order.clone();
+        sorted.sort_by_key(|key| {
+            resident
+                .iter()
+                .position(|known| known == key)
+                .expect("a dressed actor")
+        });
+        assert_eq!(sorted, resident, "every actor draws once");
         let before = live_state(actors[0].id);
         let mut nan = frame_at([f32::NAN, 5.0, 0.0]);
         assert_eq!(
