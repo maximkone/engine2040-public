@@ -312,6 +312,7 @@ pilum volley timing, tool weights, gladius forging times, road thickness and cam
 | Directional hits | Unreal-Melee-Combat-System (MIT) | hit reaction by direction, blocked-hit variants |
 | Orders | Arma 3 command menu | four or five orders, never micro |
 | Camp loop | We Are Legion: Rome, Summa Expeditionis, Legatus (commercial references) | camp life between fights; the dusk camp |
+| Service walkers | Julius (bvschaik/julius) and Augustus (Keriew/augustus), the open Caesar III re-implementations | a service building spawns a walker that roams the roads and sets the coverage of every house within 2 tiles to 96, decaying 1 a day; houses evolve on coverage; a roadblock stops a roaming walker, not one going home; a city-wide labour pool staffs buildings and an unstaffed one sends nobody (row CITY1, `crates/rome/src/city.rs`, `content/rome/service.toml`) |
 
 ## 8. What changes in the old Rome plans
 

@@ -38,6 +38,10 @@ pub const SUN_SHADOW_SLOPE_SCALE: f32 = 2.0;
 pub const SUN_SHADOW_NORMAL_OFFSET_TEXELS: f32 = 1.0;
 
 #[cfg(test)]
+mod layers_tests;
+#[cfg(test)]
+mod skinned_tests;
+#[cfg(test)]
 mod steady_tests;
 /// Ortho box center in meters: the pit center.
 pub const SUN_SHADOW_CENTER_M: [f32; 3] = [0.0, 0.0, 0.0];
@@ -47,6 +51,18 @@ pub const SUN_SHADOW_HALF_EXTENT_M: f32 = 15.0;
 pub const SUN_SHADOW_NEAR_M: f32 = 0.5;
 /// Sun camera far in meters from the sun eye.
 pub const SUN_SHADOW_FAR_M: f32 = 60.0;
+/// Cascade layers of the sun map, near to far (SW1): one texture array, one
+/// layer per cascade, each re-rendered on its own [`CascadeCadence`] period.
+///
+/// [`CascadeCadence`]: crate::shadow_cascade::CascadeCadence
+pub const SUN_LAYERS: usize = 3;
+/// Span of each layer over the near one: the pit (30 m), the pit and its
+/// stands (60 m), the whole bowl (120 m). Layer 0 is the live pit map.
+pub const SUN_LAYER_SCALE: [f32; SUN_LAYERS] = [1.0, 2.0, 4.0];
+/// Layers the forward pass samples today: the near one. Only these draw in
+/// the live frame, so no tier pays for a map nobody reads; the band-select
+/// reader raises it to [`SUN_LAYERS`].
+pub const SUN_LAYERS_READ: usize = 1;
 /// Half-arm edge in texels: 1024 over the pit, the optional cost arm.
 pub const SUN_SHADOW_HALF_SIZE: u32 = 1024;
 /// Live sun depth edge switch: false runs the row's full 2048 (the row's
@@ -121,6 +137,25 @@ fn sun_light_basis(sun: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3]) {
 /// Owner render lane; Caller `arena_sun_view_proj` plus `submit::encode_forward` live depth keep the snap.
 /// Units meters in, matrix out. Determinism pure, never hashed.
 pub fn sun_view_proj_for_dir(sun_dir: [f32; 3]) -> Result<[[f32; 4]; 4], SunShadowError> {
+    sun_view_proj_scaled(sun_dir, 1.0)
+}
+/// Sun view-projection of cascade `layer` (SW1): the pit ortho of
+/// [`sun_view_proj_for_dir`] grown by [`SUN_LAYER_SCALE`], width and depth
+/// alike, about the same centre; layer 0 is that matrix bit for bit. A layer
+/// past [`SUN_LAYERS`] fails loudly.
+/// Units meters in, matrix out. Determinism pure, never hashed.
+pub fn sun_layer_view_proj(
+    sun_dir: [f32; 3],
+    layer: usize,
+) -> Result<[[f32; 4]; 4], SunShadowError> {
+    let scale = SUN_LAYER_SCALE
+        .get(layer)
+        .copied()
+        .ok_or_else(|| SunShadowError::Invalid(format!("sun layer {layer} of {SUN_LAYERS}")))?;
+    sun_view_proj_scaled(sun_dir, scale)
+}
+/// The pit ortho with its half-extent and far plane times `scale`.
+fn sun_view_proj_scaled(sun_dir: [f32; 3], scale: f32) -> Result<[[f32; 4]; 4], SunShadowError> {
     if !sun_dir.iter().all(|c| c.is_finite()) {
         return Err(SunShadowError::Invalid("sun dir is not finite".into()));
     }
@@ -137,8 +172,8 @@ pub fn sun_view_proj_for_dir(sun_dir: [f32; 3]) -> Result<[[f32; 4]; 4], SunShad
         sun_snap_origin_for_size(SUN_SHADOW_CENTER_M[1], edge),
         sun_snap_origin_for_size(SUN_SHADOW_CENTER_M[2], edge),
     ];
-    let half = SUN_SHADOW_HALF_EXTENT_M;
-    let span = SUN_SHADOW_FAR_M - SUN_SHADOW_NEAR_M;
+    let half = SUN_SHADOW_HALF_EXTENT_M * scale;
+    let span = SUN_SHADOW_FAR_M * scale - SUN_SHADOW_NEAR_M;
     let (t, u, _) = sun_light_basis(sun);
     let dot_c = center[0] * sun[0] + center[1] * sun[1] + center[2] * sun[2];
     let dot_ct = center[0] * t[0] + center[1] * t[1] + center[2] * t[2];
@@ -184,6 +219,40 @@ pub fn sun_shadow_depth_desc_for(edge: u32) -> wgpu::TextureDescriptor<'static> 
         ..crate::shadow_cluster::gpu::cascade_depth_desc(edge)
     }
 }
+/// The live map's texture (SW1): [`SUN_LAYERS`] layers of the square `edge`
+/// map, one per cascade; copyable so a proof can read a kept layer back.
+pub fn sun_layers_depth_desc(edge: u32) -> wgpu::TextureDescriptor<'static> {
+    let mut desc = sun_shadow_depth_desc_for(edge);
+    desc.size.depth_or_array_layers = u32::try_from(SUN_LAYERS).unwrap_or(1);
+    desc.usage |= wgpu::TextureUsages::COPY_SRC;
+    desc
+}
+/// One cascade layer due this frame: its matrix and the 80 uniform bytes it
+/// draws with.
+pub type SunLayerDraw = ([[f32; 4]; 4], [u8; 80]);
+/// The frame's layer plan (SW1): per layer under `layers`, the matrix and
+/// bytes to draw with when `cadence` says it is due, `None` when it keeps the
+/// map and uniform it was last drawn with. Every matrix is built before the
+/// cadence moves, so a bad sun direction fails with the cadence untouched.
+/// Units frames in. Determinism pure over the cadence, never hashed.
+pub fn plan_sun_layers(
+    cadence: &mut crate::shadow_cascade::CascadeCadence,
+    frame: u64,
+    sun_dir: [f32; 3],
+    layers: usize,
+) -> Result<[Option<SunLayerDraw>; SUN_LAYERS], SunShadowError> {
+    let mut vps = [[[0.0f32; 4]; 4]; SUN_LAYERS];
+    for (layer, vp) in vps.iter_mut().enumerate().take(layers) {
+        *vp = sun_layer_view_proj(sun_dir, layer)?;
+    }
+    let mut plan = [None; SUN_LAYERS];
+    for (layer, (slot, vp)) in plan.iter_mut().zip(vps).enumerate().take(layers) {
+        if cadence.due(frame, layer, &vp) {
+            *slot = Some((vp, sun_shadow_uniform_bytes(vp, SUN_SHADOW_BIAS, 1.0)));
+        }
+    }
+    Ok(plan)
+}
 /// Uniform bytes: 80 bytes, matrix first (64), then `bias` and `scale`.
 pub fn sun_shadow_uniform_bytes(vp: [[f32; 4]; 4], bias: f32, scale: f32) -> [u8; 80] {
     let mut out = [0u8; 80];
@@ -210,22 +279,39 @@ pub struct SunFwdSample {
     pub normal_offset_m: f32,
     /// Slope bias per unit `tan(theta)`: [`sun_shadow_slope_scale_for`].
     pub slope_scale: f32,
+    /// Share of the allocated texture the live map covers: `edge / alloc`.
+    /// A tier below the allocation draws into the low corner of the one
+    /// texture (a viewport) and the reader scales its uv by this, so a tier
+    /// change never replaces the texture the forward binds already hold.
+    pub uv_scale: f32,
 }
-/// The live compare settings for `edge`: on, 2^-19, one texel offset.
+/// The live compare settings for `edge`: on, 2^-19, one texel offset, the map
+/// filling its whole texture.
 /// Units texels in, settings out. Determinism pure, never hashed.
+#[cfg(test)]
 #[must_use]
 pub fn sun_fwd_sample_for_edge(edge: u32) -> SunFwdSample {
+    sun_fwd_sample_for_live(edge, edge)
+}
+/// The live compare settings for a map of `edge` texels drawn into the low
+/// corner of an `alloc`-texel texture (`edge <= alloc`; a larger edge is
+/// clamped to the allocation).
+/// Units texels in, settings out. Determinism pure, never hashed.
+#[must_use]
+pub fn sun_fwd_sample_for_live(edge: u32, alloc: u32) -> SunFwdSample {
+    let edge = edge.min(alloc).max(1);
     SunFwdSample {
         bias: SUN_SHADOW_BIAS,
         enabled: 1.0,
         texel: 1.0 / edge_f32(edge),
         normal_offset_m: sun_shadow_normal_offset_m(edge),
         slope_scale: sun_shadow_slope_scale_for(edge),
+        uv_scale: edge_f32(edge) / edge_f32(alloc.max(1)),
     }
 }
 /// Forward-group bytes for the live sun compare: 96 bytes, the pass matrix
 /// first (64), then `bias`, `enabled`, `texel`, `normal_offset` and
-/// `slope_scale`, then three pads, in the `SunFwdU` order.
+/// `slope_scale` and `uv_scale`, then two pads, in the `SunFwdU` order.
 pub fn sun_forward_uniform_bytes(vp: [[f32; 4]; 4], sample: SunFwdSample) -> [u8; 96] {
     let mut out = [0u8; 96];
     for (ci, col) in vp.iter().enumerate() {
@@ -238,6 +324,7 @@ pub fn sun_forward_uniform_bytes(vp: [[f32; 4]; 4], sample: SunFwdSample) -> [u8
     out[72..76].copy_from_slice(&sample.texel.to_le_bytes());
     out[76..80].copy_from_slice(&sample.normal_offset_m.to_le_bytes());
     out[80..84].copy_from_slice(&sample.slope_scale.to_le_bytes());
+    out[84..88].copy_from_slice(&sample.uv_scale.to_le_bytes());
     out
 }
 /// Depth-only vertex shader for the live sun map: sun matrix transform.
@@ -253,9 +340,47 @@ fn vs(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
     return sun.view_proj * vec4<f32>(pos, 1.0);
 }
 "#;
+/// Depth-only vertex shader for skinned casters: the same joint blend the
+/// forward `vs_skinned` runs, then the sun matrix. A fighter's body is drawn
+/// from the 80-byte skinned vertex and the frame's joint block, so its shadow
+/// is the posed body and not the bind pose the 48-byte static reader would see.
+/// Binding 7 and 8 are the forward group's own palette and params buffers.
+/// Owner render lane; Caller `sun_skinned_depth_pipeline` below.
+/// Units WGSL text. Determinism fixed bytes.
+pub(crate) const SUN_SHADOW_SKINNED_WGSL: &str = r#"
+struct SunU {
+    view_proj: mat4x4<f32>,
+};
+struct SkinParams {
+    joint_count: u32,
+    has_skin: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+@group(0) @binding(0) var<uniform> sun: SunU;
+@group(0) @binding(7) var<storage, read> skin_joints: array<mat4x4<f32>, 64>;
+@group(0) @binding(8) var<uniform> skin_params: SkinParams;
+@vertex
+fn vs_skinned(
+    @location(0) pos: vec3<f32>,
+    @location(3) joints: vec4<u32>,
+    @location(4) weights: vec4<f32>,
+) -> @builtin(position) vec4<f32> {
+    var sp = pos;
+    if (skin_params.has_skin != 0u) {
+        sp = vec3<f32>(0.0);
+        for (var k = 0u; k < 4u; k = k + 1u) {
+            let idx = min(joints[k], 63u);
+            sp += weights[k] * (skin_joints[idx] * vec4<f32>(pos, 1.0)).xyz;
+        }
+    }
+    return sun.view_proj * vec4<f32>(sp, 1.0);
+}
+"#;
 /// Live sun uniform for one forward light direction: view-proj plus 80 bytes from the live list.
-/// Owner render lane; Caller `submit::encode_forward` below runs the live edge.
+/// Test oracle: the layer-0 draw [`plan_sun_layers`] hands the live pass.
 /// Units meters in, matrix plus bytes out. Determinism pure, never hashed.
+#[cfg(test)]
 pub(crate) fn live_sun_shadow_for_dir(
     sun_dir: [f32; 3],
 ) -> Result<([[f32; 4]; 4], [u8; 80]), SunShadowError> {
@@ -308,6 +433,97 @@ fn sun_depth_pipeline(
         cache: None,
     })
 }
+/// The skinned twin of [`sun_depth_pipeline`]: 80-byte vertices, position plus
+/// the four joints and weights, the same depth state.
+/// Owner render lane; Caller `SunShadowSubmitter::build` below.
+/// Units GPU handles. Presentation only, never hashed.
+fn sun_skinned_depth_pipeline(
+    device: &wgpu::Device,
+    bind_layout: &wgpu::BindGroupLayout,
+    shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    use crate::pipeline_warmup::CountedPipelines as _;
+    let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("eg11-sun-skinned-pipe-layout"),
+        bind_group_layouts: &[Some(bind_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
+        label: Some("eg11-sun-skinned-pipeline"),
+        layout: Some(&pipe_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_skinned"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: super::submit::SKINNED_VERTEX_STRIDE,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Uint32x4,
+                        offset: 48,
+                        shader_location: 3,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 64,
+                        shader_location: 4,
+                    },
+                ],
+            })],
+            compilation_options: Default::default(),
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+/// One layer's sun bind: its own matrix uniform at 0, the forward group's
+/// joint palette (one block per draw offset) at 7 and skin params at 8.
+/// `buffers` is `[uniform, skin_joints, skin_params]`.
+/// Units GPU handles. Presentation only, never hashed.
+fn sun_layer_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    buffers: [&wgpu::Buffer; 3],
+) -> wgpu::BindGroup {
+    let [uniform, skin_joints, skin_params] = buffers;
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("eg11-sun-bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: skin_joints,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(super::submit::SKIN_BLOCK_BYTES),
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: skin_params.as_entire_binding(),
+            },
+        ],
+    })
+}
 /// Live sun depth map for one presenter: the live `Depth32Float` map (1024 on
 /// the half arm, the pinned 2048 with the switch off), its uniform, the bind
 /// and the depth pipeline built once, so a live frame records the pass only.
@@ -318,14 +534,32 @@ fn sun_depth_pipeline(
 /// `Presenter::build` holds one.
 /// Units GPU handles. Presentation only, never hashed.
 pub(crate) struct SunShadowSubmitter {
-    /// The map itself: a view does not keep the texture alive on its own.
+    /// The map itself, [`SUN_LAYERS`] layers: a view does not keep the
+    /// texture alive on its own.
     _map: wgpu::Texture,
+    /// Layer 0 as a plain 2D view: the forward group binds it at 13.
     view: wgpu::TextureView,
-    /// Edge of the map in texels.
+    /// One attachment view per layer: a pass clears and draws only its own,
+    /// so a layer that is not due keeps its depths.
+    layer_views: [wgpu::TextureView; SUN_LAYERS],
+    /// Edge of the live map in texels: the tier's shadow size, never above
+    /// `alloc_edge`.
     edge: u32,
-    uniform: wgpu::Buffer,
-    bind: wgpu::BindGroup,
+    /// Edge of the texture, fixed at build: the forward binds hold its view.
+    alloc_edge: u32,
+    /// One sun matrix uniform and bind per layer: a frame drawing several
+    /// layers needs each pass to read its own matrix.
+    uniforms: [wgpu::Buffer; SUN_LAYERS],
+    binds: [wgpu::BindGroup; SUN_LAYERS],
+    /// Which layers re-render this frame, and the matrix each was drawn with.
+    cadence: std::cell::Cell<crate::shadow_cascade::CascadeCadence>,
+    /// Frames the map was asked for, the cadence's clock.
+    frame: std::cell::Cell<u64>,
+    /// Layers the live frame draws: `1..=SUN_LAYERS`.
+    layers: usize,
     pipeline: wgpu::RenderPipeline,
+    /// Skinned casters: joint blend, then the sun matrix.
+    skinned_pipeline: wgpu::RenderPipeline,
     /// EG11b: the forward group's pass frame (matrix, bias, enabled, texel).
     fwd_uniform: wgpu::Buffer,
     /// EG11b: the comparison sampler the forward group binds at 14.
@@ -335,50 +569,82 @@ pub(crate) struct SunShadowSubmitter {
 impl SunShadowSubmitter {
     /// Build the live map plus its pipeline once for one device.
     /// Units GPU handles. Presentation only, never hashed.
-    pub(crate) fn build(device: &wgpu::Device) -> Self {
-        let desc = sun_shadow_depth_desc();
-        let edge = desc.size.width;
-        let texture = device.create_texture(&desc);
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("eg11-sun-uniform"),
-            size: 80,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+    pub(crate) fn build(
+        device: &wgpu::Device,
+        skin_joints: &wgpu::Buffer,
+        skin_params: &wgpu::Buffer,
+    ) -> Self {
+        let edge = sun_shadow_depth_desc().size.width;
+        let texture = device.create_texture(&sun_layers_depth_desc(edge));
+        let layer_view = |layer: usize| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("sw1-sun-layer"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: u32::try_from(layer).unwrap_or(0),
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let view = layer_view(0);
+        let layer_views = std::array::from_fn(layer_view);
+        let uniforms: [wgpu::Buffer; SUN_LAYERS] = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("eg11-sun-uniform"),
+                size: 80,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
+        // Binding 0 is the sun matrix; 7 and 8 are the forward group's joint
+        // palette (one block per draw offset) and skin params, read by the
+        // skinned caster only. A static draw passes offset 0 and ignores them.
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("eg11-sun-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                super::submit::skin_joints_entry(7),
+                super::submit::skin_params_entry(8),
+            ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("eg11-sun-depth"),
             source: wgpu::ShaderSource::Wgsl(SUN_SHADOW_DEPTH_WGSL.into()),
         });
+        let skinned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("eg11-sun-depth-skinned"),
+            source: wgpu::ShaderSource::Wgsl(SUN_SHADOW_SKINNED_WGSL.into()),
+        });
         let pipeline = sun_depth_pipeline(device, &bind_layout, &shader);
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("eg11-sun-bind"),
-            layout: &bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            }],
+        let skinned_pipeline = sun_skinned_depth_pipeline(device, &bind_layout, &skinned_shader);
+        let binds = std::array::from_fn(|layer| {
+            sun_layer_bind(
+                device,
+                &bind_layout,
+                [&uniforms[layer], skin_joints, skin_params],
+            )
         });
         Self {
             _map: texture,
             view,
+            layer_views,
             edge,
-            uniform,
-            bind,
+            alloc_edge: edge,
+            uniforms,
+            binds,
+            cadence: std::cell::Cell::new(crate::shadow_cascade::CascadeCadence::new([1; 3])),
+            frame: std::cell::Cell::new(0),
+            layers: SUN_LAYERS_READ,
             pipeline,
+            skinned_pipeline,
             fwd_uniform: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("eg11-sun-forward-uniform"),
                 size: 96,
@@ -420,9 +686,12 @@ impl SunShadowSubmitter {
     /// Caller: `submit::encode_forward` when the switch is off or the sun
     /// direction is invalid.
     pub(crate) fn disable_forward(&self, queue: &wgpu::Queue) {
+        // The lit uniform no longer names a drawn map: the next wanted frame
+        // re-renders every layer and writes the forward frame again.
+        self.force_all();
         let off = SunFwdSample {
             enabled: 0.0,
-            ..sun_fwd_sample_for_edge(self.edge)
+            ..sun_fwd_sample_for_live(self.edge, self.alloc_edge)
         };
         let bytes = sun_forward_uniform_bytes([[0.0; 4]; 4], off);
         queue.write_buffer(&self.fwd_uniform, 0, &bytes);
@@ -457,20 +726,47 @@ impl SunShadowSubmitter {
         self.edge
     }
 
-    /// Replace the map by a square one of `edge` texels (the tier's shadow size). The pipeline
-    /// and the bind do not depend on the size, so nothing else is rebuilt.
-    pub(crate) fn resize(&mut self, device: &wgpu::Device, edge: u32) {
-        if edge == self.edge {
-            return;
-        }
-        let texture = device.create_texture(&sun_shadow_depth_desc_for(edge));
-        self.view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self._map = texture;
-        self.edge = edge;
+    /// Set the live map to a square of `edge` texels (the tier's shadow size), clamped to the
+    /// texture built at start. The texture, its view and the forward binds that hold the view
+    /// stay as they are: a smaller tier draws into the low corner (`encode` sets the viewport)
+    /// and the forward reader scales its uv by `edge / alloc_edge`, so a tier change at run
+    /// time never leaves a bind pointing at a map nobody writes.
+    pub(crate) fn resize(&mut self, edge: u32) {
+        self.edge = edge.clamp(1, self.alloc_edge);
+        self.force_all();
     }
 
-    /// Record one sun depth map from the live draw list: ortho pass over the
-    /// 30 m pit, the uniform refreshed for this frame's sun direction.
+    /// A tier's cascades (SW1): `bands` layers drawn (`1..=SUN_LAYERS`) on
+    /// the tier's `periods`, every layer re-rendered on the next frame, which
+    /// is frame 0 of the new clock.
+    /// Caller: `quality_apply::apply_quality`, next to [`Self::resize`].
+    pub(crate) fn set_cascades(&mut self, bands: usize, periods: [u8; 3]) {
+        self.layers = bands.clamp(1, SUN_LAYERS);
+        self.cadence
+            .set(crate::shadow_cascade::CascadeCadence::new(periods));
+        self.frame.set(0);
+    }
+
+    /// Every layer re-renders on the next frame: the maps no longer match
+    /// what was drawn (resize, tier, a forward frame written off).
+    fn force_all(&self) {
+        let mut cadence = self.cadence.get();
+        cadence.force_all();
+        self.cadence.set(cadence);
+    }
+
+    /// The map texture, for a proof that reads a layer back.
+    #[cfg(test)]
+    pub(crate) fn map(&self) -> &wgpu::Texture {
+        &self._map
+    }
+
+    /// Record the frame's sun depth layers from the live draw list: one ortho
+    /// pass per layer the cadence finds due (layer 0 over the 30 m pit), each
+    /// with its own matrix uniform. A layer that is not due is neither
+    /// cleared nor drawn and its uniform is not written; the forward frame is
+    /// written only with layer 0, so it always names the matrix layer 0 was
+    /// drawn with. A frame with no layer due records nothing and reads 0 us.
     /// Owner render lane; Caller `submit::encode_forward` before the forward
     /// draws on the live path.
     /// Units meters for the pit fit, wall us out. Presentation only, never hashed.
@@ -483,18 +779,31 @@ impl SunShadowSubmitter {
     ) -> Option<u64> {
         let started = engine_clock::now();
         let dir = list.light.direction.to_array();
-        let (vp, uniform_bytes) = live_sun_shadow_for_dir(dir).ok()?;
-        presenter
-            .queue
-            .write_buffer(&self.uniform, 0, &uniform_bytes);
-        let fwd = sun_forward_uniform_bytes(vp, sun_fwd_sample_for_edge(self.edge));
-        presenter.queue.write_buffer(&self.fwd_uniform, 0, &fwd);
-        {
+        let mut cadence = self.cadence.get();
+        let frame = self.frame.get();
+        let plan = plan_sun_layers(&mut cadence, frame, dir, self.layers).ok()?;
+        self.cadence.set(cadence);
+        self.frame.set(frame.wrapping_add(1));
+        if plan.iter().all(Option::is_none) {
+            return Some(0);
+        }
+        if let Some((vp, _)) = plan[0] {
+            let fwd =
+                sun_forward_uniform_bytes(vp, sun_fwd_sample_for_live(self.edge, self.alloc_edge));
+            presenter.queue.write_buffer(&self.fwd_uniform, 0, &fwd);
+        }
+        for (layer, draw) in plan.iter().enumerate() {
+            let Some((_, uniform_bytes)) = draw else {
+                continue;
+            };
+            presenter
+                .queue
+                .write_buffer(&self.uniforms[layer], 0, uniform_bytes);
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("eg11-sun-depth-pass"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.view,
+                    view: &self.layer_views[layer],
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -505,12 +814,31 @@ impl SunShadowSubmitter {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind, &[]);
+            // The tier's edge draws into the low corner of the one texture.
+            let live = f32::from(u16::try_from(self.edge).unwrap_or(u16::MAX));
+            pass.set_viewport(0.0, 0.0, live, live, 0.0, 1.0);
+            let mut skinned_bound: Option<bool> = None;
             for item in list.items.iter() {
                 let Some(mesh) = presenter.meshes.get(&item.mesh) else {
                     continue;
                 };
+                // A skinned mesh carries 80-byte vertices: it takes the joint
+                // blend and its frame block, never the 48-byte static reader.
+                let skin_block = presenter.skin_blocks.get(&item.mesh).copied();
+                let skinned = skin_block.is_some();
+                if skinned_bound != Some(skinned) {
+                    skinned_bound = Some(skinned);
+                    pass.set_pipeline(if skinned {
+                        &self.skinned_pipeline
+                    } else {
+                        &self.pipeline
+                    });
+                }
+                pass.set_bind_group(
+                    0,
+                    &self.binds[layer],
+                    &[skin_block.map_or(0, super::submit::skin_block_offset)],
+                );
                 pass.set_vertex_buffer(0, mesh.vertex.slice(..));
                 pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.count, 0, 0..1);
