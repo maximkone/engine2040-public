@@ -445,4 +445,63 @@ mod tests {
             Ok(100_000_000)
         );
     }
+
+    /// `Display` names each error: the text is part of the receipt.
+    #[test]
+    fn display_names_each_time_error() {
+        assert_eq!(TimeError::NegativeDt.to_string(), "frame dt must be >= 0");
+        assert_eq!(
+            TimeError::NonFiniteDt.to_string(),
+            "frame dt must be finite"
+        );
+        assert_eq!(
+            TimeError::Overflow.to_string(),
+            "tick index or buffer would overflow"
+        );
+    }
+
+    /// Buffered state and alpha are exact readings, not just bounded ones.
+    #[test]
+    fn buffered_state_and_alpha_are_exact() {
+        let mut acc = IntAcc::new();
+        assert_eq!(acc.push_ns(16_000_000), Ok(0));
+        assert_eq!(acc.buffered_ns(), 16_000_000);
+        assert_eq!(acc.buffered_thirds(), 0);
+        assert_eq!(acc.alpha(), 0.96f32, "48000000 of 50000000 thirds");
+
+        let mut acc = IntAcc::new();
+        assert_eq!(acc.push_ns(16_666_667), Ok(1));
+        assert_eq!(acc.tick(), 1);
+        assert_eq!(acc.buffered_ns(), 0, "one whole step consumed the buffer");
+        assert_eq!(acc.buffered_thirds(), 1);
+        assert_eq!(acc.alpha(), 2e-8f32, "1 of 50000000 thirds");
+    }
+
+    /// The step cap forgives banked whole steps and keeps the sub-step remainder.
+    #[test]
+    fn forgiveness_keeps_the_sub_step_remainder() {
+        let mut acc = IntAcc::new();
+        assert_eq!(acc.push_ns(MAX_FRAME_NS - 1), Ok(5));
+        assert_eq!(acc.tick(), 5);
+        assert_eq!(acc.buffered_ns(), 16_666_665);
+        assert_eq!(acc.buffered_thirds(), 2);
+    }
+
+    /// A negative zero wall reading is not a negative dt.
+    #[test]
+    fn negative_zero_is_not_a_negative_dt() {
+        assert_eq!(f64_to_u64_checked((-0.0f64).to_bits()), Ok(0));
+    }
+
+    /// The u64 guard refuses only past the bound: a huge buffer that still fits
+    /// succeeds, a buffer at u64::MAX refuses.
+    #[test]
+    fn the_u64_guard_refuses_only_past_the_bound() {
+        let mut wide = IntAcc::new();
+        wide.acc_ns = 1 << 62;
+        assert_eq!(wide.push_ns(MAX_FRAME_NS), Ok(5));
+        let mut full = IntAcc::new();
+        full.acc_ns = u64::MAX;
+        assert_eq!(full.push_ns(MAX_FRAME_NS), Err(TimeError::Overflow));
+    }
 }
