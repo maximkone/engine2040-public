@@ -26,9 +26,11 @@ const TONEMAP_CHUNK: &str = include_str!("shaders/tonemap.wgsl");
 fn shipped_source<'a>(name: &str, wgsl: &'a str) -> std::borrow::Cow<'a, str> {
     let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
     match file {
-        "forward.wgsl" | "blit.wgsl" | "post_chain.wgsl" | "composite_compute.wgsl" => {
-            std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{wgsl}"))
+        "forward_torch_vertex.wgsl" => {
+            std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{FORWARD_CHUNK}{wgsl}"))
         }
+        "forward.wgsl" | "blit.wgsl" | "post_chain.wgsl" | "composite_compute.wgsl"
+        | "grade_lut.wgsl" => std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{wgsl}")),
         _ => std::borrow::Cow::Borrowed(wgsl),
     }
 }
@@ -192,6 +194,36 @@ mod tests {
     fn cluster_wgsl_validates() {
         let src = include_str!("shaders/cluster.wgsl");
         validate_source("cluster.wgsl", src).expect("cluster.wgsl validates");
+    }
+
+    /// A seeded type error in forward.wgsl fails with naga's line:col, which
+    /// the brace check the live swap used before would accept.
+    #[test]
+    fn dual_quat_skinning_shader_is_gated_at_32_bytes_a_joint() {
+        // AM30: the dual-quaternion path is its own file, so this gate covers it without the
+        // forward entries; the numbers are the ones the Rust palette writes.
+        let src = include_str!("shaders/skin_dual_quat.wgsl");
+        validate_source("skin_dual_quat.wgsl", src).expect("the dual-quat path validates");
+        for name in [
+            "fn dq_skin_point",
+            "fn dq_skin_vector",
+            "fn dq_blend",
+            "fn dq_transform_point",
+            "fn dq_translation",
+        ] {
+            assert!(src.contains(name), "{name} is in the shader");
+        }
+        assert!(src.contains("DQ_JOINT_BYTES: u32 = 32u"), "32 bytes a joint");
+        assert!(src.contains("array<DualQuat, 64>"), "the 64-joint cap");
+        assert!(
+            src.contains("dot(a.real, b.real) >= 0.0"),
+            "the shortest-arc flip is in the blend"
+        );
+        // The palette the anim side bakes is 32 B a joint (`DUAL_QUAT_PALETTE_BYTES`), and the
+        // biggest palette this shader reads is 64 joints, the same cap as the matrix one.
+        let palette_bytes = 64 * 32;
+        assert_eq!(palette_bytes, 2_048, "64 joints at 32 B");
+        assert_eq!(43 * 32, 1_376, "the 43-bone rig's dual palette");
     }
 
     /// A seeded type error in forward.wgsl fails with naga's line:col, which
