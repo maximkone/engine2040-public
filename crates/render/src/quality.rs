@@ -82,6 +82,49 @@ impl Gtao {
     }
 }
 
+/// Sun-shadow compare tap count and pattern for a tier (SW92): fewer taps are
+/// fewer shadow-map fetches on every lit pixel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ShadowFilter {
+    /// 3x3 texel grid: nine compares, the reference picture.
+    Pcf3x3,
+    /// Four taps on a 1x1 texel box rotated by the 4x4 Bayer angle: nine
+    /// compares become four, and the rotation keeps the pattern from banding.
+    Rotated4,
+    /// Two taps along one fixed diagonal, no per-pixel rotation: the web arm,
+    /// where a noisy pattern would survive a missing TAA pass.
+    Tap2,
+}
+
+impl ShadowFilter {
+    /// Every filter, softest first.
+    pub const ALL: [ShadowFilter; 3] = [
+        ShadowFilter::Pcf3x3,
+        ShadowFilter::Rotated4,
+        ShadowFilter::Tap2,
+    ];
+
+    /// Pipeline-constant word the forward shader switches on.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        match self {
+            Self::Pcf3x3 => 0,
+            Self::Rotated4 => 1,
+            Self::Tap2 => 2,
+        }
+    }
+
+    /// Compare taps this filter spends per lit pixel.
+    #[must_use]
+    pub const fn taps(self) -> u32 {
+        match self {
+            Self::Pcf3x3 => 9,
+            Self::Rotated4 => 4,
+            Self::Tap2 => 2,
+        }
+    }
+}
+
 /// One row of the quality table. All integer data, no clock, no float.
 ///
 /// Units: `render_scale_pct` (%), `shadow_cascades` (count), `shadow_map_px`
@@ -102,6 +145,12 @@ pub struct Knobs {
     pub shadow_cascades: u8,
     /// Shadow map edge length (px).
     pub shadow_map_px: u16,
+    /// Sun depth cadence: frame period per cascade (frames). Cascade `i`
+    /// re-renders when `frame % period[i] == 0` or its light matrix moved, so
+    /// the far cascades may run slower than the near one. `0` reads as `1`,
+    /// so a bad row never freezes a map. Never hashed: it picks which frames
+    /// draw a map, not the picture the tier asks for.
+    pub shadow_update_period: [u8; 3],
     /// Ambient occlusion level (level).
     pub gtao: Gtao,
     /// Bloom at half resolution (bool).
@@ -150,6 +199,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             render_scale_pct: 67,
             shadow_cascades: 1,
             shadow_map_px: 1024,
+            shadow_update_period: [1, 2, 4],
             gtao: Gtao::Off,
             bloom_half_res: false,
             taa: false,
@@ -172,6 +222,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             render_scale_pct: 100,
             shadow_cascades: 2,
             shadow_map_px: 1024,
+            shadow_update_period: [1, 2, 2],
             gtao: Gtao::Half,
             bloom_half_res: true,
             taa: false,
@@ -193,6 +244,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             render_scale_pct: 100,
             shadow_cascades: 3,
             shadow_map_px: 2048,
+            shadow_update_period: [1, 1, 1],
             gtao: Gtao::Half,
             bloom_half_res: true,
             taa: true,
@@ -214,6 +266,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             render_scale_pct: 100,
             shadow_cascades: 4,
             shadow_map_px: 4096,
+            shadow_update_period: [1, 1, 1],
             gtao: Gtao::Full,
             bloom_half_res: true,
             taa: true,
@@ -242,6 +295,7 @@ const fn mobile_knobs() -> Knobs {
         render_scale_pct: 100,
         shadow_cascades: 1,
         shadow_map_px: 1024,
+        shadow_update_period: [1, 2, 4],
         gtao: Gtao::Off,
         bloom_half_res: false,
         taa: false,
@@ -268,6 +322,7 @@ pub fn unit(knob: &str) -> &'static str {
         "render_scale_pct" => "%",
         "shadow_cascades" => "count",
         "shadow_map_px" => "px",
+        "shadow_update_period" => "frames",
         "gtao" => "level",
         "bloom_half_res" => "bool",
         "taa" => "bool",
@@ -480,11 +535,52 @@ pub fn shadow_edge_px(k: &Knobs, max_texture_2d: u32) -> u32 {
         .max(MIN_SHADOW_EDGE)
 }
 
+/// Smallest texture edge the cap hands an upload, texels: an adapter that reports no usable
+/// limit still gets a 1 px edge, never a zero-size texture.
+pub const MIN_TEXTURE_EDGE: u32 = 1;
+
+/// Largest texture edge the tier's uploads keep resident: `texture_max_px`, cut to what the
+/// adapter can hold (`max_texture_2d`, the device's `maxTextureDimension2D`) and never under
+/// [`MIN_TEXTURE_EDGE`]. The loader caps every upload to this edge, so a 4096 tier value on a
+/// 2048 adapter loads the 2048 mip instead of failing the upload. QT9: the page prints the
+/// result as `tex_max=`.
+#[must_use]
+pub fn texture_edge_px(k: &Knobs, max_texture_2d: u32) -> u32 {
+    u32::from(k.texture_max_px)
+        .min(max_texture_2d)
+        .max(MIN_TEXTURE_EDGE)
+}
+
 /// Highest cascade band the live frame shades with: the tier's cascade count less one (the
 /// last cascade covers everything beyond it). At least band 0.
 #[must_use]
 pub fn max_cascade_band(k: &Knobs) -> usize {
     usize::from(k.shadow_cascades.max(1)) - 1
+}
+
+/// Sun depth cadence for a tier: frame period per cascade, near to far. Cascade `i` re-renders
+/// when `frame % period[i] == 0` or its light matrix moved (`shadow_cascade::CascadeCadence`).
+/// Presentation only, never hashed.
+#[must_use]
+pub const fn cascade_periods(k: &Knobs) -> [u8; 3] {
+    k.shadow_update_period
+}
+
+/// Sun-shadow compare filter for a tier (SW92): 9 taps, 4 rotated taps, or 2.
+#[must_use]
+pub const fn shadow_filter(q: Quality) -> ShadowFilter {
+    match q {
+        Quality::Potato | Quality::Mobile => ShadowFilter::Rotated4,
+        Quality::Web => ShadowFilter::Tap2,
+        Quality::Comfort | Quality::High => ShadowFilter::Pcf3x3,
+    }
+}
+
+/// Pipeline constants the forward pipeline sets so one shader compiles every
+/// filter: `SHADOW_FILTER` carries [`ShadowFilter::as_u32`].
+#[must_use]
+pub fn shadow_filter_constants(q: Quality) -> [(&'static str, f64); 1] {
+    [("SHADOW_FILTER", f64::from(shadow_filter(q).as_u32()))]
 }
 
 /// True when the live GTAO pass runs: the look toggle is on and the tier has ambient occlusion.
@@ -581,6 +677,24 @@ pub fn table_hash(q: Quality) -> u64 {
     h.write_u16(k.texture_max_px);
     h.write_u8(k.dpr_cap);
     h.finish()
+}
+
+/// Detail-cull threshold for a tier: a mesh whose projected diameter is under
+/// this many thousandths of the screen height never reaches the vertex stage
+/// (`gpu_cull::detail_cull_flags_into`). Cheaper tiers drop more, because
+/// their pixels are fewer and their vertex budget smaller; the top tier keeps
+/// everything at 1/500 of the screen height. `0` would disable the drop.
+/// Presentation only, never hashed: it picks which draws reach the vertex
+/// stage, not the picture the tier asks for.
+#[must_use]
+pub const fn detail_cull_permille(q: Quality) -> u16 {
+    match q {
+        Quality::Potato => 8,
+        Quality::Mobile => 7,
+        Quality::Web => 6,
+        Quality::Comfort => 4,
+        Quality::High => 2,
+    }
 }
 
 #[cfg(test)]
@@ -973,6 +1087,30 @@ mod tests {
         assert_eq!(edges, [1024, 1024, 1024, 2048, 4096]);
         assert_eq!(shadow_edge_px(&knobs(Quality::High), 2048), 2048);
         assert_eq!(shadow_edge_px(&knobs(Quality::Web), 0), MIN_SHADOW_EDGE);
+    }
+
+    #[test]
+    fn quality_texture_edge_is_the_tier_value_within_the_adapter() {
+        let edges: Vec<u32> = Quality::ALL
+            .iter()
+            .map(|q| texture_edge_px(&knobs(*q), 16384))
+            .collect();
+        assert_eq!(edges, [512, 1024, 1024, 2048, 4096]);
+        assert_eq!(
+            texture_edge_px(&knobs(Quality::High), 2048),
+            2048,
+            "a 4096 tier value on a 2048 adapter loads the 2048 mip"
+        );
+        assert_eq!(
+            texture_edge_px(&knobs(Quality::High), 8192),
+            4096,
+            "a wider adapter keeps the tier's 4096"
+        );
+        assert_eq!(
+            texture_edge_px(&knobs(Quality::Web), 0),
+            MIN_TEXTURE_EDGE,
+            "an adapter with no usable limit still gets one texel"
+        );
     }
 
     #[test]

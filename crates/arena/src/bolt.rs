@@ -46,7 +46,7 @@ use engine_physics::query::{CastCapsule, SweptHit};
 use crate::match_wire::pos_mm;
 use crate::spear;
 use crate::world::MatchWorld;
-use crate::{facing_q16, ArenaRules, FighterState, FIGHT_RULES_V2, MAX_SLOTS};
+use crate::{facing_q16, geometry_rules, ArenaRules, FighterState, MAX_SLOTS};
 
 /// The slot that carries the manuballista: the ballistarius on the
 /// rampart. He is the only one with the engine, so the rest of the line
@@ -320,7 +320,7 @@ impl BoltState {
     /// weapon, so a v1 match leaves every tick and every hash untouched.
     pub(crate) fn step(&mut self, env: &mut Env<'_>) {
         self.events.clear();
-        if env.rules.version != FIGHT_RULES_V2 {
+        if !geometry_rules(env.rules.version) {
             return;
         }
         self.act(env);
