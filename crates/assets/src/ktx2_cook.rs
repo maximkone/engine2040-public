@@ -887,6 +887,115 @@ mod tests {
         assert_eq!(tex.levels[0].len() * 4, (w * h * 4) as usize);
     }
 
+    /// Encode one RGBA8 fixture as PNG (the codec the row's size bar names).
+    fn png_bytes(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+        let image = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+            .expect("fixture is width * height * 4");
+        let mut out = Vec::new();
+        {
+            let mut cursor = std::io::Cursor::new(&mut out);
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut cursor, image::ImageFormat::Png)
+                .expect("fixture png must encode");
+        }
+        out
+    }
+
+    /// One base/ORM/normal set cooked in one block shape, the shape a lane picks.
+    fn cook_set(
+        base: &[u8],
+        orm: &[u8],
+        normal: &[u8],
+        w: u32,
+        h: u32,
+        format: BcFormat,
+    ) -> Vec<Vec<u8>> {
+        [
+            (base, MapKind::BaseColor),
+            (orm, MapKind::Orm),
+            (normal, MapKind::Normal),
+        ]
+        .into_iter()
+        .map(|(src, kind)| {
+            let shape = if kind == MapKind::Normal {
+                BcFormat::Bc5
+            } else {
+                format
+            };
+            cook_ktx2_as(src, w, h, kind, shape, 0).expect("fixture cooks")
+        })
+        .collect()
+    }
+
+    fn set_bytes(set: &[Vec<u8>]) -> usize {
+        set.iter().map(Vec::len).sum()
+    }
+
+    /// VR2 Accept leg: the cooked set measured against PNG of the same texels.
+    ///
+    /// The number is printed for both block shapes the lanes use: BC7 colour and
+    /// ORM with a BC5 normal (the arena cook today), and BC1 colour and ORM with
+    /// the same BC5 normal (the wire shape the fighter atlas takes). The asserts
+    /// pin the facts the cook promises — BC7 and BC5 are one byte a texel at level
+    /// 0 and BC1 is half, so the wire set is two bytes a texel against the arena
+    /// set's three, identical bytes twice — and the printed line carries the PNG
+    /// ratio the row's bar asks about, which no block shape reaches on this
+    /// fixture (see the report).
+    #[test]
+    fn ktx2_cook_set_size_against_png_is_measured_with_both_block_shapes() {
+        let (w, h) = (256, 256);
+        let base = natural_fixture(w, h);
+        let mut orm = natural_fixture(w, h);
+        // A second packed map: the same family with the roughness channel inverted,
+        // so the two colour maps are not the same bytes.
+        for texel in orm.chunks_exact_mut(4) {
+            texel[1] = 255 - texel[1];
+        }
+        let normal = normal_fixture(w, h);
+        let bc7 = cook_set(&base, &orm, &normal, w, h, BcFormat::Bc7);
+        let bc1 = cook_set(&base, &orm, &normal, w, h, BcFormat::Bc1);
+        assert_eq!(bc7, cook_set(&base, &orm, &normal, w, h, BcFormat::Bc7));
+
+        // Level 0 bytes per shape: BC7 is 16 bytes a block and BC5 two 8-byte
+        // channels, both one byte a texel; BC1 is 8 bytes a block, half.
+        let texels = (w * h) as usize;
+        let level0 = |file: &[u8]| parse_ktx2(file).expect("parses").levels[0].len();
+        assert_eq!(level0(&bc7[0]), texels, "BC7 albedo one byte a texel");
+        assert_eq!(level0(&bc7[1]), texels, "BC7 ORM one byte a texel");
+        assert_eq!(
+            level0(&bc7[2]),
+            texels,
+            "BC5 normal one byte a texel (two channels)"
+        );
+        assert_eq!(
+            level0(&bc1[0]),
+            texels / 2,
+            "BC1 albedo half a byte a texel"
+        );
+        assert_eq!(level0(&bc1[2]), texels, "the normal stays BC5 in both sets");
+
+        let png: usize = [&base, &orm, &normal]
+            .into_iter()
+            .map(|src| png_bytes(w, h, src).len())
+            .sum();
+        let (wide, wire) = (set_bytes(&bc7), set_bytes(&bc1));
+        println!(
+            "ktx2 set {w}x{h} base+orm+normal with mips: bc7 {wide} B, bc1 {wire} B, \
+             png {png} B, png/bc7 {:.2}x, png/bc1 {:.2}x, 4x would need png >= {} B",
+            png as f64 / wide as f64,
+            png as f64 / wire as f64,
+            wide * 4
+        );
+        // The wire shape is the lever the row's bar can pull: at least a quarter smaller.
+        assert!(
+            wire * 4 <= wide * 3,
+            "bc1 set {wire} B is not at least 25% under the bc7 set {wide} B"
+        );
+        // Both sets stay under two bytes a texel with the whole mip chain: the
+        // block shapes are chosen, never a fallback to RGBA8.
+        assert!(wide * 2 < texels * 3 * 4, "bc7 set {wide} B over RGBA8");
+    }
+
     /// A seeded tangent-space normal map: three sine hills with slopes up to about 0.5 each,
     /// plus fine noise of +-0.03 on the slope, so every 4x4 block holds real detail. RGBA8
     /// with Z in blue, the way an artist's file stores it.

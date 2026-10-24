@@ -44,6 +44,11 @@ pub struct MatchSpec {
     /// button throws a spear and tethers fighters. Off by default; off leaves
     /// the match, its hash and its identity exactly as before.
     pub spear: bool,
+    /// Laquearius noose on (row SG11, `docs/plan/spear-grapple.md`): the
+    /// `THROW_NOOSE` button throws a loop that snares a man. Independent of
+    /// [`MatchSpec::spear`]. Off by default; off leaves the match, its hash
+    /// and its identity exactly as before.
+    pub noose: bool,
     /// Height channel on (row SG5): fighters fall under gravity and land on
     /// the floor, and the spear tether may swing them through the air. Off by
     /// default; off leaves the match, its hash and its identity exactly as
@@ -78,6 +83,7 @@ impl MatchSpec {
             rules,
             world,
             spear: false,
+            noose: false,
             height: false,
             input_delay_ticks: DEFAULT_INPUT_DELAY_TICKS,
             weapons: Vec::new(),
@@ -95,6 +101,13 @@ impl MatchSpec {
     #[must_use]
     pub fn with_spear(mut self) -> Self {
         self.spear = true;
+        self
+    }
+
+    /// This spec with the laquearius noose on.
+    #[must_use]
+    pub fn with_noose(mut self) -> Self {
+        self.noose = true;
         self
     }
 
@@ -170,7 +183,7 @@ impl MatchSpec {
     /// One digest over config, rules and world: two peers with equal
     /// identities play the same match from the same tape. The lobby build id
     /// carries it, so a peer on other rules or another world is refused
-    /// before tick 0. The spear flag, a non-default input delay and armed
+    /// before tick 0. The spear and noose flags, a non-default input delay and armed
     /// weapons are mixed in only when set, so every spec on the shipped
     /// defaults digests exactly as it did before those fields existed.
     #[must_use]
@@ -187,6 +200,10 @@ impl MatchSpec {
         // Mixed in only when on, so every spear-less identity is unchanged.
         if self.spear {
             hash.write_u8(0x5A);
+        }
+        // The noose flag is mixed in the same way (row SG11).
+        if self.noose {
+            hash.write_u8(0x4E);
         }
         // Same rule for the height channel: off keeps every shipped identity.
         if self.height {
@@ -289,6 +306,39 @@ mod tests {
     }
 
     #[test]
+    fn noose_spec_identity_moves_only_when_on() {
+        let base = MatchSpec::duel(config(), MatchWorld::empty());
+        let cord = base.clone().with_noose();
+        assert!(cord.noose && !base.noose);
+        assert_ne!(
+            base.identity(),
+            cord.identity(),
+            "a peer without it is refused"
+        );
+        assert_ne!(
+            base.clone().with_spear().identity(),
+            base.clone().with_spear().with_noose().identity(),
+            "the noose is not the spear"
+        );
+        assert_ne!(
+            base.clone().with_spear().identity(),
+            cord.identity(),
+            "a noose-only match is not a spear match"
+        );
+        // A match that never asked for the noose digests as it did before.
+        let c = base.config;
+        let mut old = Fnv64::new();
+        old.write_u64(c.seed);
+        old.write_u32(c.ticks);
+        old.write_u8(c.fighters);
+        old.write_u32(c.half_extent_m.to_bits());
+        old.write_u32(c.table_version);
+        old.write_u64(base.rules_digest());
+        old.write_u64(base.world_digest());
+        assert_eq!(base.identity(), old.finish());
+    }
+
+    #[test]
     fn spear_spec_identity_moves_only_when_on() {
         let base = MatchSpec::duel(config(), MatchWorld::empty());
         let armed = base.clone().with_spear();
@@ -372,8 +422,8 @@ mod tests {
         assert_eq!(base.identity(), old.finish());
         // The ids reach the sim: each slot swings its own row.
         let live = armed.live().expect("armed duel");
-        assert_eq!(live.weapon(0).map(|w| w.startup_ticks), Some(12), "pugio");
-        assert_eq!(live.weapon(1).map(|w| w.startup_ticks), Some(21), "clava");
+        assert_eq!(live.weapon(0).map(|w| w.startup_ticks), Some(24), "pugio");
+        assert_eq!(live.weapon(1).map(|w| w.startup_ticks), Some(42), "clava");
         assert!(base.live().expect("bare duel").weapon(0).is_none());
     }
 
