@@ -5,6 +5,10 @@
 pub mod articulated;
 /// Center-of-mass balance core plus stagger response.
 pub mod balance;
+/// The capture point picks hold, step or fall for one landed blow: the center
+/// of mass plus its velocity one pendulum time, integer millimetres against the
+/// feet box. Std-only, and no sim tick calls it yet.
+pub mod capture_point;
 /// Clinch pass for ragdolls that share a place: parts the bone capsules of several fighters in
 /// fighter-id order so none sinks into another. Float, client-side, never hashed.
 #[cfg(feature = "rapier")]
@@ -69,6 +73,11 @@ pub mod query;
 pub mod ragdoll;
 #[cfg(feature = "rapier")]
 mod ragdoll_contacts;
+/// Parent/child inertia stabilization beside `ragdoll`'s mass pass: a heavy
+/// child cannot out-torque a light parent (SW162). Client-local, never in the
+/// golden fold.
+#[cfg(feature = "rapier")]
+pub mod ragdoll_inertia;
 /// Frozen-baseline fall/clinch measurement tape: seeded scripts beside
 /// `ragdoll`, read-only on the tick; the fix rows consume its report.
 #[cfg(feature = "rapier")]

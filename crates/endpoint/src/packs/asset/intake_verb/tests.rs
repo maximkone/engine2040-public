@@ -205,12 +205,189 @@ fn non_commercial_models_and_parts_are_refused_and_write_nothing() {
     assert_eq!(err.code, "model_restricted");
     assert!(!dir.join("out").join("barrel.e204bndl").exists());
     let _ = std::fs::remove_dir_all(&dir);
+}
 
-    let (dir, glb, lane) = runner_folder("unknown", "see the card!", None);
-    let err =
-        IntakeTool::invoke(&door, args(&dir, &glb, &lane, &[CONDITION])).expect_err("no spdx");
-    assert_eq!(err.code, "license_not_spdx");
+/// The retry answers a scripted client sends after the licence ask.
+fn licence_answer(licence: &str) -> rmcp::model::InputResponses {
+    rmcp::serde_json::from_value(json!({
+        mcp_input::LICENCE_REQUEST_ID: {"action": "accept", "content": {"licence": licence}}
+    }))
+    .expect("answers decode")
+}
+
+#[test]
+fn input_required_an_unknown_licence_asks_before_it_refuses() {
+    let door = server();
+    let (dir, glb, lane) = runner_folder("ask", "see the card!", None);
+    let asked =
+        IntakeTool::invoke(&door, args(&dir, &glb, &lane, &[CONDITION])).expect_err("an ask");
+    assert_eq!(asked.code, mcp_input::CODE);
+    assert!(
+        !dir.join("out").join("barrel.e204bndl").exists(),
+        "an ask writes no bundle"
+    );
+    let response = mcp_input::into_response(&asked).expect("the ask is a typed result");
+    let rmcp::model::CallToolResponse::InputRequired(result) = response else {
+        panic!("an unknown licence answers input_required");
+    };
+    assert_eq!(
+        result
+            .input_requests
+            .as_ref()
+            .map(rmcp::model::InputRequests::len),
+        Some(1),
+        "one request, the licence"
+    );
+    let log = door.audit_log().expect("the door audit reads");
+    assert_eq!(log.len(), 1, "the ask seals one record");
+    let entries: Vec<&crate::audit::LedgerEntry> = log.entries().collect();
+    assert_eq!(entries.len(), 1, "one call, one ledger entry");
+    let entry = entries[0];
+    assert_eq!(entry.rounds, 1, "an unanswered ask is still one round");
+    assert_eq!(entry.outcome, crate::audit::LedgerOutcome::InputRequired);
+    assert_eq!(
+        entry.request_state.as_deref(),
+        Some(mcp_input::REQUEST_STATE),
+        "the entry is keyed by the state a retry echoes"
+    );
+    assert!(entry.answer.is_none(), "nothing was answered yet");
+    log.verify().expect("the ask chain verifies");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn input_required_a_scripted_retry_with_the_licence_lands_the_cook() {
+    let door = server();
+    let (dir, glb, lane) = runner_folder("retry", "unknown", None);
+    let a = args(&dir, &glb, &lane, &[CONDITION]);
+    let asked = IntakeTool::invoke(&door, a.clone()).expect_err("an ask");
+    assert_eq!(asked.code, mcp_input::CODE);
+
+    // The retry the door would receive: the asked state echoed back plus the
+    // licence answer. Both ride the call; the ledger folds it into the ask.
+    door.set_retry_answers(licence_answer("MIT"));
+    door.set_round(Some(crate::audit::RoundNote {
+        request_state: mcp_input::REQUEST_STATE.to_owned(),
+        answer: Some("MIT".to_owned()),
+    }));
+    let landed = IntakeTool::invoke(&door, a);
+    door.set_round(None);
+    door.clear_retry_answers();
+    let landed = landed.expect("the retry carrying the licence lands the cook");
+    assert_eq!(landed.provenance["model"]["license"], "MIT");
+    assert_eq!(landed.provenance["model"]["id"], "VAST-AI/TripoSG");
+    let bytes = std::fs::read(&landed.bundle_path).expect("bundle written");
+    assert_eq!(
+        engine_scene::ids::content_digest(&bytes),
+        landed.bundle_hash
+    );
+
+    // One call in two rounds: one ledger entry, the ask folded with the retry.
+    let log = door.audit_log().expect("the door audit reads");
+    assert_eq!(log.len(), 2, "two sealed records, one ask and one retry");
+    let entries: Vec<&crate::audit::LedgerEntry> = log.entries().collect();
+    assert_eq!(entries.len(), 1, "one call, one ledger entry");
+    let entry = entries[0];
+    assert_eq!(entry.rounds, 2, "the ask, then the landed retry");
+    assert_eq!(
+        entry.outcome,
+        crate::audit::LedgerOutcome::Ok,
+        "the outcome is the last round's"
+    );
+    assert_eq!(entry.seq, 2, "the entry points at the retry's record");
+    assert_eq!(
+        entry.request_state.as_deref(),
+        Some(mcp_input::REQUEST_STATE)
+    );
+    assert_eq!(
+        entry.answer.as_deref(),
+        Some("MIT"),
+        "the licence answer is recorded on the second round"
+    );
+    assert_eq!(entry.row(), "2 2 ok MIT asset.intake:licence");
+    log.verify().expect("the two-round chain still verifies");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn input_required_a_compliant_licence_never_asks() {
+    let door = server();
+    let (dir, glb, lane) = runner_folder("compliant", "MIT", None);
+    let first = IntakeTool::invoke(&door, args(&dir, &glb, &lane, &[CONDITION]))
+        .expect("a compliant licence cooks on the first call");
+    assert_eq!(first.provenance["model"]["license"], "MIT");
+    assert_eq!(
+        door.audit_log().expect("the door audit reads").len(),
+        1,
+        "one round, no ask"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One plain intake record's canonical entry bytes, pinned off HEAD's
+/// `entry_bytes` (session 71, `asset.intake`, revision 0, Ok, detail 0, seq 1).
+/// The ledger layer folds rounds beside the chain, so these bytes must not
+/// move: a plain call reads exactly as it did before MCP31.
+const PLAIN_ENTRY_HEX: &str = "47000000000000000c0000000000000061737365742e696e74616b65\
+0000000000000000000000000000000000000100000000000000";
+/// The chain digest that record seals: `digest(zeros || entry || seq 1)`.
+const PLAIN_CHAIN_HEX: &str = "20dfe2853cc12a9f0016a2386ac007a58f4a3e8aa60775bbe1d2327c864c4b70";
+
+/// Read a 32-byte chain digest from its lowercase hex.
+fn chain_from_hex(text: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (slot, pair) in out.iter_mut().zip(text.as_bytes().chunks(2)) {
+        let text = std::str::from_utf8(pair).expect("hex pair");
+        *slot = u8::from_str_radix(text, 16).expect("hex pair");
+    }
+    out
+}
+
+#[test]
+fn a_compliant_asset_intake_keeps_its_one_round_record_byte_equal() {
+    let row = |tag: &str| {
+        let door = server();
+        let (dir, glb, lane) = runner_folder(tag, "MIT", None);
+        IntakeTool::invoke(&door, args(&dir, &glb, &lane, &[CONDITION])).expect("a plain cook");
+        let log = door.audit_log().expect("the door audit reads");
+        let record = log.iter().next().expect("one sealed record");
+        let assert_plain = (
+            record.session,
+            record.tool.clone(),
+            record.revision,
+            record.seq,
+        );
+        assert_eq!(
+            assert_plain,
+            (71, "asset.intake".to_owned(), 0, 1),
+            "the plain call's record identity"
+        );
+        assert_eq!(
+            record.canonical_hex(),
+            PLAIN_ENTRY_HEX,
+            "a plain record's canonical bytes are unchanged"
+        );
+        assert_eq!(
+            record.chain,
+            chain_from_hex(PLAIN_CHAIN_HEX),
+            "a plain record chains to the pinned digest"
+        );
+        let entries: Vec<crate::audit::LedgerEntry> = log.entries().cloned().collect();
+        assert_eq!(entries.len(), 1, "one plain call, one entry");
+        let entry = &entries[0];
+        assert_eq!(entry.rounds, 1, "a plain call stays one round");
+        assert_eq!(entry.outcome, crate::audit::LedgerOutcome::Ok);
+        assert!(
+            entry.request_state.is_none() && entry.answer.is_none(),
+            "a plain call asked nothing and answered nothing"
+        );
+        log.verify().expect("the plain chain verifies");
+        let _ = std::fs::remove_dir_all(&dir);
+        entry.row()
+    };
+    // Same call twice: the same ledger row bytes, on two fresh doors.
+    assert_eq!(row("byte-a"), row("byte-b"), "same bytes twice");
+    assert_eq!(row("byte-c"), "1 1 ok - -", "the pinned plain row");
 }
 
 #[test]
