@@ -11,11 +11,11 @@
 //! poses only, steady-state allocates nothing.
 
 use super::contract::MAX_JOINTS;
-use super::feet::{
-    dist_m, lock_graph_pose, solve_two_bone, FootError, FootLocker, LegMap, LegSolution,
-};
+#[cfg(test)]
+use super::feet::solve_two_bone;
+use super::feet::{dist_m, lock_graph_pose, FootError, FootLocker, LegMap, LegSolution};
 use super::graph::Pose;
-use super::ik::fabrik;
+use super::ik::{fabrik, two_bone_soft};
 use engine_core::vec3::cross3;
 use engine_core::{quat_mul, Fnv64};
 
@@ -26,6 +26,15 @@ pub const FABRIK_ITERS: u32 = 8;
 pub const FABRIK_TOL_M: f32 = 0.001;
 /// Hand acceptance bar in millimeters: reach fixtures land inside 1 cm.
 pub const HAND_TOL_MM: u32 = 10;
+/// Soften band of the arm reach: the last 4% of the chain eases out instead
+/// of popping straight, about 25 mm on a 0.62 m arm.
+///
+/// chosen: the donor's `IKTwoBoneJob::soften` ratio is where the ease starts,
+/// so a band is `1 - soften` there. A 30% band (donor 0.3 read the other way)
+/// holds a full-length arm 58 mm short and fails the 1 cm hand bar
+/// (`reach_lands_inside_1cm_analytic_first`); 4% keeps the largest shortfall
+/// at band * 0.316 = 7.7 mm, inside the bar.
+pub const ARM_SOFTEN: f32 = 0.04;
 /// Posted cost of one analytic chain solve (closed-form pass + meters).
 pub const OPS_ANALYTIC_CHAIN: u32 = 64;
 /// Posted cost per joint per FABRIK iteration (forward + backward passes).
@@ -216,9 +225,14 @@ fn reach_on_lanes(
     let l1 = dist_m(elbow, shoulder);
     let l2 = dist_m(wrist, elbow);
     let clamped = dist_m(target, shoulder) > l1 + l2;
-    let (a_elbow, a_wrist) = solve_two_bone(shoulder, elbow, wrist, target);
+    let (a_elbow, a_wrist) = two_bone_soft(shoulder, elbow, wrist, target, ARM_SOFTEN);
     let a_err = error_mm(a_wrist, target);
     if a_err <= HAND_TOL_MM {
+        return (a_elbow, a_wrist, IkMethod::Analytic, 1, a_err, clamped);
+    }
+    // Inside the soften band the short reach is the answer by design: the ease
+    // is what stops the pop, so the FABRIK fallback must not chase past it.
+    if dist_m(target, shoulder) > (l1 + l2) * (1.0 - ARM_SOFTEN) {
         return (a_elbow, a_wrist, IkMethod::Analytic, 1, a_err, clamped);
     }
     let mut buf = [shoulder, elbow, wrist];
@@ -1925,6 +1939,23 @@ mod tests {
             "NS6 carry: climb edge ticks={ticks} loads={} hash=0x{:016x}",
             first.len(),
             first[ticks - 1]
+        );
+    }
+
+    #[test]
+    fn fbik_wire_reach_softens_the_last_centimetres_instead_of_popping() {
+        // The arm path the combat reach tick runs: a 0.62 m chain reaching for
+        // a target twice its length stays a curve, with no FABRIK chase.
+        let (shoulder, elbow, wrist) = ([0.0, 1.4, 0.0], [0.0, 1.1, 0.0], [0.0, 0.78, 0.0]);
+        let far = [0.0, 0.2, 0.0];
+        let (_, end, method, passes, _, clamped) = reach_on_lanes(shoulder, elbow, wrist, far);
+        assert!(matches!(method, IkMethod::Analytic), "no fallback");
+        assert_eq!(passes, 1, "one analytic pass inside the band");
+        assert!(clamped, "the target is beyond the chain");
+        let reach = dist_m(end, shoulder);
+        assert!(
+            (0.619..0.62).contains(&reach),
+            "held a hair short of the chain: {reach}"
         );
     }
 }

@@ -21,6 +21,7 @@ pub(super) mod cut;
 pub(super) mod draw;
 pub(super) mod flight;
 pub(super) mod hero;
+pub(crate) mod hud;
 mod num;
 pub(super) mod nyc;
 pub(crate) mod scene;
