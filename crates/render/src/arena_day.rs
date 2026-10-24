@@ -12,6 +12,7 @@
 //! height fog 0.2 ms, contact 0.3 ms; this preset adds no pass.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::fog::FogParams;
 use crate::shadow_cascade::{cascade_map_size, checked_ranges, CascadeRange, FIRST_CASCADE_FAR_M};
@@ -98,8 +99,19 @@ fn fog_err(e: crate::fog::FogError) -> ArenaDayError {
     ArenaDayError::Invalid(format!("arena day fog: {e}"))
 }
 
-/// The one arena day preset as sky bake inputs.
+/// The one arena day preset as sky bake inputs: the rig's afternoon sun, or the
+/// sun at [`sun_elevation_override`] when the run asked for another time of day
+/// (`arena --sun-elev`). Every reader of the day rig (the skybox, the fog, the
+/// baked ambient, the direct sun) goes through here, so they never disagree.
 pub fn arena_day_params() -> SkyParams {
+    match sun_elevation_override() {
+        Some(elevation_deg) => arena_params_at(elevation_deg),
+        None => day_rig_params(),
+    }
+}
+
+/// The day rig as authored, whatever the override says.
+fn day_rig_params() -> SkyParams {
     SkyParams {
         sun_dir: ARENA_DAY_SUN_DIR,
         turbidity: ARENA_DAY_TURBIDITY,
@@ -107,6 +119,121 @@ pub fn arena_day_params() -> SkyParams {
         exposure_ev100: ARENA_DAY_EXPOSURE_EV100,
         night_gain: 1.0,
     }
+}
+
+/// Bits of "no override": a NaN, which no elevation is.
+const NO_SUN_OVERRIDE: u32 = 0x7fc0_0000;
+/// The process-wide time of day the run asked for, as `f32` bits. Presentation
+/// only (never read by the simulation); set once at startup, before the
+/// presenter bakes its sky.
+static SUN_ELEVATION_OVERRIDE: AtomicU32 = AtomicU32::new(NO_SUN_OVERRIDE);
+
+/// Put the day rig's sun at `elevation_deg` for the rest of the run (`None`
+/// restores the rig's own afternoon). Call before the presenter is built: the
+/// sky, fog and ambient bake once at init.
+pub fn set_sun_elevation_override(elevation_deg: Option<f32>) {
+    let bits = match elevation_deg {
+        Some(deg) if deg.is_finite() => deg.to_bits(),
+        _ => NO_SUN_OVERRIDE,
+    };
+    SUN_ELEVATION_OVERRIDE.store(bits, Ordering::Relaxed);
+}
+
+/// The sun elevation the run asked for, degrees, if any.
+pub fn sun_elevation_override() -> Option<f32> {
+    let value = f32::from_bits(SUN_ELEVATION_OVERRIDE.load(Ordering::Relaxed));
+    value.is_finite().then_some(value)
+}
+
+/// The arena day rig with the sun raised or lowered: the day preset's azimuth,
+/// air and ground, the sun at `elevation_deg` (clamped to 0.5..=89 degrees so
+/// the direction stays a direction). The one function every time-of-day reader
+/// goes through, so the sky, the ambient keyframes and the sun light can never
+/// disagree about where the sun is. At the day rig's own elevation it is
+/// [`arena_day_params`] up to rounding.
+pub fn arena_params_at(elevation_deg: f32) -> SkyParams {
+    let base = day_rig_params();
+    let (x, z) = (base.sun_dir[0], base.sun_dir[2]);
+    let flat = (x * x + z * z).sqrt().max(1e-6);
+    let e = elevation_deg.clamp(0.5, 89.0).to_radians();
+    SkyParams {
+        sun_dir: [x / flat * e.cos(), e.sin(), z / flat * e.cos()],
+        ..base
+    }
+}
+
+/// The sky light's floor under a sun on the horizon, as a share of its noon
+/// strength.
+pub const DAYLIGHT_FLOOR: f32 = 0.15;
+/// The sine of the sun's elevation from which the sky light is at full
+/// strength: 0.57 is 34.7 degrees, just under the day rig's own afternoon sun
+/// (35.7), so the rig and every higher sun keep the ambient they always had.
+pub const DAYLIGHT_FULL_SIN: f32 = 0.57;
+
+/// How much of its noon strength the ambient keeps under this sun, in
+/// `DAYLIGHT_FLOOR..=1`. The single scatter model dims the air along the view
+/// ray, not along the sun's, so the sky it paints is as bright at dawn as at
+/// noon; the baked ambient scales with the sun's height instead (a smoothstep
+/// of the sine of the elevation), which is what makes a dawn frame read as
+/// dawn. The night family (`night_gain` under 1) is already its own gain and
+/// is never dimmed twice.
+pub fn daylight_scale(params: &SkyParams) -> f32 {
+    if params.night_gain < 1.0 {
+        return 1.0;
+    }
+    let d = params.sun_dir;
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
+    let t = ((d[1] / len) / DAYLIGHT_FULL_SIN).clamp(0.0, 1.0);
+    let t = t * t * (3.0 - 2.0 * t);
+    1.0 - (1.0 - DAYLIGHT_FLOOR) * (1.0 - t)
+}
+
+/// Intensity of the direct sun at the day rig, `color * intensity`: the same
+/// 3.0 the default light carried, so the exposure scale does not move.
+pub const ARENA_SUN_INTENSITY: f32 = 3.0;
+
+/// The direct sun of the day rig at one elevation: where it is, what colour
+/// the air leaves it and how strong it is. Feeds `DirectionalLight` (and so
+/// the sun shadow map); the ambient comes from the same params through
+/// `ibl_arena_env`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ArenaSun {
+    /// Unit direction toward the sun.
+    pub dir_to_light: [f32; 3],
+    /// Linear colour, the brightest channel 1: [`crate::sky::sun_color`].
+    pub color: [f32; 3],
+    /// Scale on the colour: [`ARENA_SUN_INTENSITY`] under the air's own dimming.
+    pub intensity: f32,
+}
+
+/// The sun of the day rig at `elevation_deg`. Pure; fails loudly when the sky
+/// refuses the params.
+pub fn arena_sun_at(elevation_deg: f32) -> Result<ArenaSun, ArenaDayError> {
+    let params = arena_params_at(elevation_deg);
+    let color = crate::sky::sun_color(&params).map_err(sky_err)?;
+    let through = crate::sky::sun_transmittance(&params).map_err(sky_err)?;
+    let len = params
+        .sun_dir
+        .iter()
+        .map(|c| c * c)
+        .sum::<f32>()
+        .sqrt()
+        .max(1e-6);
+    Ok(ArenaSun {
+        dir_to_light: params.sun_dir.map(|c| c / len),
+        color,
+        intensity: ARENA_SUN_INTENSITY * through[0].max(through[1]).max(through[2]),
+    })
+}
+
+/// The sun this run lights the frame with: [`sun_elevation_override`]'s, else
+/// the day rig's own afternoon sun.
+pub fn arena_sun_now() -> Result<ArenaSun, ArenaDayError> {
+    let elevation_deg = match sun_elevation_override() {
+        Some(elevation_deg) => elevation_deg,
+        None => sun_elevation_deg(ARENA_DAY_SUN_DIR)?,
+    };
+    arena_sun_at(elevation_deg)
 }
 
 /// Moon direction for the arena night rig: the sun's own angle with a low

@@ -51,10 +51,29 @@ url fs_rome_fori_341687 https://cdn.freesound.org/previews/341/341687_5272893-hq
 url oga_sword_attacks https://opengameart.org/sites/default/files/sword_-_starninjas_1.zip df2bdfa83a1751ff02d6e90c774b0bd4 CC0 StarNinjas
 url oga_sword_clashes https://opengameart.org/sites/default/files/sword_clash_-_starninjas_0.zip 3b82c7072f96dcec53d24072bf74a7b9 CC0 StarNinjas
 #
-# --- Sketchfab rows: none, by the row's own rule ---
-# The 7 CC-BY Sketchfab models (gladius b123c4388a6f4307aff353c165c94f92,
-# 7261d334924f4a9b835ef4b15c1e16d0, eeae43c837484f1b8f98acc60a7b2597;
-# Colosseum f9b800d747034c2d9908696c30b2338e, d9a8a96e16534bdab76be23c1f2c45fc,
-# 6459307c93e54394bed44b2583701dc6, 39e39dba81354367af36a4b975dd06aa) are
-# skipped: no SKETCHFAB_TOKEN on this seat, and the download API answers 401
-# {"detail":"Authentication credentials were not provided."}
+# --- Sketchfab rows: landed 2026-10-24 (17 models, CC-BY, token on the seat) ---
+# No `url` line here: tools/fetch-content.mjs sends no Authorization header, and
+# the Sketchfab download endpoint answers 401 without one. These were fetched
+# with GET /v3/models/{uid}/download plus `Authorization: Token $SKETCHFAB_TOKEN`
+# (the token is an env var, never in the tree), decimated headless in Blender to
+# the prop budget, and landed with their own table in
+# content/props/sketchfab/PROVENANCE.md (id, author, licence, url, bytes, tris,
+# sha256) and attribution lines in content/props/sketchfab/CREDITS.md.
+#
+#   gladius   b123c4388a6f4307aff353c165c94f92  DireRaven      -> gladius_direraven.glb 1500 tris
+#   gladius   7261d334924f4a9b835ef4b15c1e16d0  Samize         -> gladius_samize.glb 1500 tris
+#   gladius   eeae43c837484f1b8f98acc60a7b2597  Aren Boada     -> gladius_aren_boada.glb 1499 tris
+#   Colosseum f9b800d747034c2d9908696c30b2338e  giga           -> colosseum_gits3d.glb 4500 tris
+#   Colosseum d9a8a96e16534bdab76be23c1f2c45fc  jeremy@avrod.org -> colosseum_facade_jeremy.glb 4500 tris
+#   Colosseum 6459307c93e54394bed44b2583701dc6  cloud9_studio  -> colosseum_cloud9.glb 5000 tris
+#   Colosseum 39e39dba81354367af36a4b975dd06aa  LanaGre        -> colosseum_arch_ring_lanagre.glb 4500 tris
+#   pugio     4fbd48b57c3a440f87072226686bcf60  davicolt       -> pugio_davicolt.glb 1500 tris
+#   pilum     b700cb582841482abd7fb60b7df71bb3  Paul.OHare     -> pilum_paulohare.glb 662 tris
+#   scutum    10038602333f4901bd28cde290a2e397  Paul.OHare     -> scutum_paulohare.glb 990 tris
+#   scutum    d67564c8980b4e84acde74144da941ea  DennisVanMalderen -> scutum_dennisvanmalderen.glb 1400 tris
+#   lorica    77c9be620d894e0abff935f8375cf548  Mitro12345     -> lorica_segmentata.glb 1499 tris
+#   galea     7d1205de2a8048938cd1cc30b79b5f47  Killband       -> galea_killband.glb 2000 tris
+#   amphora   faed6c9c08b049839740328c72136de5  Shadic02       -> amphora_shadic02.glb 2000 tris
+#   brazier   fa194c993d99411d8b211b0df5a4bf8c  notmybest3d    -> brazier_notmybest3d.glb 2500 tris
+#   column    76cf35f293b345829aec96b499bc1313  nickhavas      -> corinthian_column_nickhavas.glb 3999 tris
+#   bust      194a677589814658be9e2c7c296e380f  avi            -> hadrian_bust_avi.glb 4000 tris
