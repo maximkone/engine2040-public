@@ -27,6 +27,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "no
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseAvatar, DEFAULT_HOME } from "./rocketbox.mjs";
+import { auditDir, render } from "../frame-audit.mjs";
 
 export const ROOT = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", ".."));
 export const ROLES = ["idle", "run", "attack1", "attack2", "attack3", "death"];
@@ -224,6 +225,12 @@ export function main(argv = process.argv) {
     for (const line of verdict.lines) console.log(line.trim());
     if (!verdict.ok) { console.error(`fighter: the window proof said no:\n  ${verdict.wrong.join("\n  ")}`); return 3; }
     console.log(`FIGHTER proof ok: frames in ${verdict.dir} - look at them`);
+    // Advisory beside view=ok: the picture laws (shadow, material, scale, attach) over the same frames.
+    try {
+      console.log(`FIGHTER audit: ${render(auditDir(verdict.dir))}`);
+    } catch (err) {
+      console.log(`FIGHTER audit: not run (${err.message})`);
+    }
   } else {
     console.log("FIGHTER next: --prove (the real window, view=ok), then node tools/gh-check.mjs cargo test -p engine-game --features app --lib rocketbox");
   }

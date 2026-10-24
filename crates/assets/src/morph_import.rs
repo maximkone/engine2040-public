@@ -5,7 +5,7 @@
 //! the one place that reads them. Units: meters in, meters out. Determinism: document order,
 //! no clock, so identical bytes import identically.
 //!
-//! One [`MorphMesh`] per glTF primitive that has targets, in mesh then primitive order. Only
+//! One [`MorphMesh`](crate::morph_import::MorphMesh) per glTF primitive that has targets, in mesh then primitive order. Only
 //! the `POSITION` deltas are read (normal and tangent deltas are ignored). Target names come
 //! from the mesh's `extras.targetNames` (what Blender writes), else `target_{i}`. Default
 //! weights come from the mesh `weights`, else zeros. Refused with a typed error instead of a

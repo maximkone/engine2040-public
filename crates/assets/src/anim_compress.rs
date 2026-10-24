@@ -1,14 +1,14 @@
 //! anim_compress: animation key compression — segment, quantize, error-loop.
 //!
-//! Consumer: the animation cook stores [`CompressedClip`] bytes beside a
+//! Consumer: the animation cook stores [`CompressedClip`](crate::anim_compress::CompressedClip) bytes beside a
 //! cooked clip, and the runtime decodes them into caller buffers with no
-//! allocation ([`decode_clip`]). Data owner: `engine-assets`; `engine-anim`
+//! allocation ([`decode_clip`](crate::anim_compress::decode_clip)). Data owner: `engine-assets`; `engine-anim`
 //! owns the track contract and never imports assets back.
 //! Units: meters and seconds in; positions decode in meters, rotation error
 //! is measured in degrees, and the payload header carries both measured worst
 //! errors so a consumer can read the bound without decoding.
 //!
-//! Pipeline (ideas from ACL, nfrechette/acl, MIT): [`compress_clip`] splits
+//! Pipeline (ideas from ACL, nfrechette/acl, MIT): [`compress_clip`](crate::anim_compress::compress_clip) splits
 //! every track into linear segments whose interior keys stay inside half the
 //! error budget, quantizes the segment endpoints (8-bit position codes and
 //! 8-bit rotation components, 16-bit when a range needs it) and then decodes
