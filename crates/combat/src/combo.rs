@@ -1,10 +1,13 @@
 //! combo: the shared string counter — one cursor of three stance positions,
-//! advanced by every attack and by movement.
+//! advanced by every attack and by movement, with an outcome-aware follow-up
+//! per step (SW46).
 //! Owner: engine-combat (code and data).
 //! Consumer: the arena match step advances the cursor on an attack press and
-//! on dash/shuffle, then reads [`ComboCursor::next`] to pick which move of a
-//! stance's string plays; the string position hashes beside the rest of the
-//! fighter state.
+//! on dash/shuffle, then reads [`ComboCursor::next_for`] with the last blow's
+//! [`ComboReq`] to pick which move of a stance's string plays: a blocked swing
+//! chains into its conditional follow-up, a clean hit takes the base slot and
+//! a whiff resets the string; the string position hashes beside the rest of
+//! the fighter state.
 //! Units: [`Stance`] and stance positions are plain `u8` move indices; no
 //! ticks, no floats, nothing to convert.
 //! Determinism: pure integer math over fixed arrays, no heap and no clock, so
@@ -27,6 +30,9 @@ pub const COMBO_VERSION_V1: u32 = 1;
 pub const STANCE_COUNT: usize = 3;
 /// Longest string a table may ask for, in moves.
 pub const MAX_STRING: u8 = 16;
+/// [`MAX_STRING`] as an array length, so table storage needs no cast; a test
+/// pins the two equal.
+const STEP_SLOTS: usize = 16;
 
 /// The three sword stances. Fixes the order every table and cursor uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,7 +73,73 @@ impl Stance {
     }
 }
 
-/// Stance order as a table: how many moves each stance's string holds.
+/// The last blow's outcome. A [`ComboStep`]'s optional conditional asks for
+/// one of these: a blocked swing chains into a different follow-up, a clean
+/// hit (or a dodge) takes the base, and a whiff resets the string (SW46).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComboReq {
+    /// The blow landed clean (damage or a block's chip).
+    AnyDamage,
+    /// The blow was blocked: the follow-up is the bash slot.
+    Blocked,
+    /// The blow missed everything: the string resets.
+    Whiffed,
+}
+
+/// One step of a stance's string: the move that plays by default plus an
+/// optional (move, outcome) that plays instead when the last blow's outcome
+/// matches. Rows carry these; a v1 row has `conditional: None` everywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComboStep {
+    /// Move index that plays after a clean hit (the default).
+    pub base: u8,
+    /// `(move, outcome)`: the follow-up that plays instead when the last
+    /// blow's outcome equals the required one.
+    pub conditional: Option<(u8, ComboReq)>,
+}
+
+impl ComboStep {
+    /// A step with no conditional: the same move whatever the last outcome.
+    #[must_use]
+    pub const fn plain(base: u8) -> Self {
+        Self {
+            base,
+            conditional: None,
+        }
+    }
+
+    /// The move this step plays after `last`: the conditional's move when its
+    /// outcome matches, otherwise the base.
+    #[must_use]
+    pub const fn pick(self, last: ComboReq) -> u8 {
+        match self.conditional {
+            Some((follow_up, req)) => {
+                if req.same(last) {
+                    follow_up
+                } else {
+                    self.base
+                }
+            }
+            None => self.base,
+        }
+    }
+}
+
+impl ComboReq {
+    /// True when both name the same outcome (const compare, no `as` cast).
+    #[must_use]
+    pub const fn same(self, other: Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::AnyDamage, Self::AnyDamage)
+                | (Self::Blocked, Self::Blocked)
+                | (Self::Whiffed, Self::Whiffed)
+        )
+    }
+}
+
+/// Stance order as a table: how many moves each stance's string holds, plus
+/// one [`ComboStep`] per move.
 ///
 /// The finisher is the last index of a string (position `count - 1`), so the
 /// count is part of the design, not a buffer size. Blade Symphony's strings
@@ -75,19 +147,66 @@ impl Stance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ComboTable {
     counts: [u8; STANCE_COUNT],
+    steps: [[ComboStep; STEP_SLOTS]; STANCE_COUNT],
 }
 
 impl ComboTable {
-    /// The shipped V1 row: three fast moves, four balanced, three heavy.
+    /// The shipped V1 row: three fast moves, four balanced, three heavy, every
+    /// step plain, so v1 strings and their digests are unchanged.
     #[must_use]
     pub const fn v1() -> Self {
-        Self { counts: [3, 4, 3] }
+        Self::from_counts([3, 4, 3])
+    }
+
+    /// A table from move counts whose steps are all plain `base = index`
+    /// steps: the v1 shape, also used by v2 rows that add no conditional.
+    #[must_use]
+    pub const fn from_counts(counts: [u8; STANCE_COUNT]) -> Self {
+        let mut steps = [[ComboStep::plain(0); STEP_SLOTS]; STANCE_COUNT];
+        let mut stance = 0;
+        while stance < STANCE_COUNT {
+            let mut index = 0;
+            let mut move_index = 0u8;
+            while index < STEP_SLOTS {
+                // Padding past the count stays `base = index` and is never
+                // read through `step`; the counts bound every walk.
+                steps[stance][index] = ComboStep::plain(move_index);
+                move_index = move_index.wrapping_add(1);
+                index += 1;
+            }
+            stance += 1;
+        }
+        Self { counts, steps }
+    }
+
+    /// This table with one step replaced: rows that add a conditional build
+    /// theirs from [`ComboTable::v1`] through this so validation still reads
+    /// the counts.
+    #[must_use]
+    pub const fn with_step(mut self, stance: Stance, position: usize, step: ComboStep) -> Self {
+        let index = stance.index();
+        if position < STEP_SLOTS {
+            self.steps[index][position] = step;
+        }
+        self
     }
 
     /// Move counts in [`Stance`] order.
     #[must_use]
     pub fn counts(&self) -> [u8; STANCE_COUNT] {
         self.counts
+    }
+
+    /// The step at `position` of this stance's string; an out-of-range
+    /// position reads the plain move 0 rather than panicking.
+    #[must_use]
+    pub fn step(&self, stance: Stance, position: u8) -> ComboStep {
+        let index = usize::from(position);
+        if index < usize::from(self.counts[stance.index()]) {
+            self.steps[stance.index()][index]
+        } else {
+            ComboStep::plain(0)
+        }
     }
 
     /// Range-check the row: every count in `1..=MAX_STRING`.
@@ -131,19 +250,36 @@ impl ComboCursor {
         self.positions
     }
 
-    /// The move of this stance's string that plays now.
+    /// The move of this stance's string that plays now: the step's base, no
+    /// outcome read.
     #[must_use]
     pub fn next(&self, stance: Stance) -> u8 {
         self.positions[stance.index()]
     }
 
-    /// One attack: advance every stance's string, wrapping each by its count.
-    pub fn attack(&mut self, table: &ComboTable) {
+    /// The move that plays now once the last blow's outcome is read: the step
+    /// at this stance's position resolves through [`ComboStep::pick`], so a
+    /// blocked swing chains into its conditional follow-up and a clean hit
+    /// takes the base.
+    #[must_use]
+    pub fn next_for(&self, table: &ComboTable, stance: Stance, last: ComboReq) -> u8 {
+        table
+            .step(stance, self.positions[stance.index()])
+            .pick(last)
+    }
+
+    /// One attack: a whiff resets every string; any other outcome advances
+    /// every stance's string, wrapping each by its count.
+    pub fn attack(&mut self, table: &ComboTable, last: ComboReq) {
+        if matches!(last, ComboReq::Whiffed) {
+            self.reset();
+            return;
+        }
         self.advance(table);
     }
 
-    /// One dash: advances every string exactly as an attack does, so movement
-    /// spends the same counter.
+    /// One dash: advances every string exactly as a landed attack does, so
+    /// movement spends the same counter.
     pub fn dash(&mut self, table: &ComboTable) {
         self.advance(table);
     }
@@ -247,7 +383,7 @@ mod tests {
     use super::*;
 
     fn table(counts: [u8; STANCE_COUNT]) -> ComboTable {
-        ComboTable { counts }
+        ComboTable::from_counts(counts)
     }
 
     fn cursor(positions: [u8; STANCE_COUNT]) -> ComboCursor {
@@ -267,6 +403,7 @@ mod tests {
             );
         }
         assert_eq!(COMBO_V1.validate(), Ok(()));
+        assert_eq!(usize::from(MAX_STRING), STEP_SLOTS, "step storage matches");
         assert_eq!(Stance::all().map(Stance::index), [0, 1, 2]);
         assert_eq!(Stance::Fast.name(), "fast");
         assert_eq!(Stance::Balanced.name(), "balanced");
@@ -288,10 +425,10 @@ mod tests {
         // Fast is at its finisher (2 of 3), balanced at its finisher (3 of 4),
         // heavy mid-string: one attack wraps the first two and steps the third.
         let mut c = cursor([2, 3, 2]);
-        c.attack(&COMBO_V1);
+        c.attack(&COMBO_V1, ComboReq::AnyDamage);
         assert_eq!(c.positions(), [0, 0, 0]);
         let mut d = cursor([2, 0, 1]);
-        d.attack(&COMBO_V1);
+        d.attack(&COMBO_V1, ComboReq::AnyDamage);
         assert_eq!(d.positions(), [0, 1, 2]);
     }
 
@@ -301,7 +438,7 @@ mod tests {
         c.dash(&COMBO_V1);
         assert_eq!(c.positions(), [0, 0, 0]);
         let mut attack = cursor([2, 3, 2]);
-        attack.attack(&COMBO_V1);
+        attack.attack(&COMBO_V1, ComboReq::AnyDamage);
         assert_eq!(c.positions(), attack.positions());
     }
 
@@ -335,8 +472,8 @@ mod tests {
         let mut b = ComboCursor::new();
         for step in 0..9 {
             if step % 3 == 0 {
-                a.attack(&COMBO_V1);
-                b.attack(&COMBO_V1);
+                a.attack(&COMBO_V1, ComboReq::AnyDamage);
+                b.attack(&COMBO_V1, ComboReq::AnyDamage);
             } else if step % 3 == 1 {
                 a.dash(&COMBO_V1);
                 b.dash(&COMBO_V1);
@@ -392,6 +529,71 @@ mod tests {
         assert_eq!(combo_table_for_version(2), None);
         assert_eq!(combo_table_for_version(0), None);
         assert_eq!(COMBO_V1, ComboTable::v1());
+    }
+
+    /// SW46: the shipped row plus one conditional. Balanced step 1 is the base
+    /// slot 1 and asks for a Blocked last blow to play the bash slot 3.
+    fn conditional_table() -> ComboTable {
+        ComboTable::v1().with_step(
+            Stance::Balanced,
+            1,
+            ComboStep {
+                base: 1,
+                conditional: Some((3, ComboReq::Blocked)),
+            },
+        )
+    }
+
+    #[test]
+    fn combo_conditional_blocked_chains_to_the_bash_slot() {
+        let table = conditional_table();
+        let c = cursor([0, 1, 0]);
+        let bash = c.next_for(&table, Stance::Balanced, ComboReq::Blocked);
+        assert_eq!(bash, 3, "a blocked swing chains into the bash slot");
+        assert_eq!(
+            c.next_for(&table, Stance::Balanced, ComboReq::Blocked),
+            bash,
+            "the same read twice gives the same slot"
+        );
+        // The step is design data: the v1 row it was built from still reads
+        // its own base, so adding a conditional moved no other slot.
+        assert_eq!(
+            COMBO_V1.step(Stance::Balanced, 1).pick(ComboReq::Blocked),
+            1
+        );
+    }
+
+    #[test]
+    fn combo_conditional_clean_hit_takes_the_base_slot() {
+        let table = conditional_table();
+        let c = cursor([0, 1, 0]);
+        assert_eq!(
+            c.next_for(&table, Stance::Balanced, ComboReq::AnyDamage),
+            1,
+            "a clean hit takes the base slot"
+        );
+        assert_eq!(
+            c.next_for(&table, Stance::Balanced, ComboReq::Blocked),
+            3,
+            "the conditional only answers its own outcome"
+        );
+    }
+
+    #[test]
+    fn combo_conditional_whiff_resets_the_string() {
+        let table = ComboTable::v1();
+        let mut a = cursor([1, 2, 1]);
+        let mut b = cursor([1, 2, 1]);
+        a.attack(&table, ComboReq::Whiffed);
+        b.attack(&table, ComboReq::Whiffed);
+        assert_eq!(a.positions(), [0, 0, 0], "a whiff resets every string");
+        assert_eq!(a.positions(), b.positions(), "x2 equal");
+        assert_eq!(a.digest(), b.digest(), "x2 equal digest");
+        // The same step landed advances instead of resetting, so the whiff
+        // reset is the outcome and not a dead no-op.
+        let mut landed = cursor([1, 2, 1]);
+        landed.attack(&table, ComboReq::AnyDamage);
+        assert_eq!(landed.positions(), [2, 3, 2], "a landed blow advances");
     }
 
     #[test]

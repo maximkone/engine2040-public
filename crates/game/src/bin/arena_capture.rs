@@ -1076,6 +1076,9 @@ pub(crate) mod capture {
         // day capture keeps the built-in light pair and stays byte-equal.
         if inputs.night {
             feed_night_lights(presenter, &mut list, inputs.torch_actors, inputs.tick);
+        } else {
+            // RL40: the day rig's sun, the one the sky and the ambient read.
+            engine_game::arena_kit::torch_feed::apply_day_sun(&mut list);
         }
         let out = presenter.render_offscreen(&list)?;
         if !out.manifest.is_clean() {
@@ -1281,6 +1284,7 @@ pub(crate) mod capture {
             sha: flags.sha.clone(),
             fps: flags.fps,
         };
+        engine_game::view_truth::audit::set_audit(true);
         let sink = CaptureSink::create(
             &flags.dir,
             flags.every,
