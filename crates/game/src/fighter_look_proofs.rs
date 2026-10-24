@@ -521,6 +521,10 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
             }
         }
     }
+    eprintln!(
+        "zzdiag duel_feet {frames_per_tick} ik={ik}: worst pop {:?}",
+        laws.pop_detail()
+    );
     DuelFeet {
         line: laws.line().expect("the duel folded frames"),
         drift_cm,
@@ -564,6 +568,13 @@ fn clip_switches_do_not_pop_in_a_real_duel() {
         let pops: u32 = receipt_field(&line, "pops=")
             .parse()
             .expect("pops is a number");
+        // The joints-only bounds floor at the lowest joint less the sole: the
+        // skin-radius pad once read every idle body 1.1 m under the sand.
+        let sunk = receipt_number(&line, "sunk_cm_max=");
+        assert!(
+            sunk < 3.0,
+            "{frames} frame(s) per tick: bodies sunk {sunk} cm: {line}"
+        );
         assert_eq!(
             pops_in(&line, "attack"),
             0,

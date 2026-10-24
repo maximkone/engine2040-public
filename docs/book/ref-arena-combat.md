@@ -183,6 +183,51 @@ Run: `node tools/gh-check.mjs cargo test -p engine-arena --features sim --lib`
 | `fork::Fork::from_snapshot(MatchSnapshot, tick) -> Option<Self>`; `apply_proposal(&mut self, ForkProposal) -> Result<(), ForkError>`; `run_n(&self, ticks) -> ForkMetrics`; `try_run_n -> Result<_, ForkCrashed>`; `run_recorded -> (ForkMetrics, Dataset)` | Counterfactual play from a snapshot. `STUCK_SPEED_MPS` 0.2. |
 | `gameworld::GameWorld::reset(game, seed)`, `step(action)`, `digest()`; `run_headless(game, seed, steps) -> Option<(i32, u64)>` | 10 integer games (`GAME_COUNT` 10, `GW1_STEPS` 10 000). Not in the golden. |
 
+### 1.11 Spear yank, rope cut, yank look (SG9, SG13, SG10)
+
+Landed 2026-10-24. The authority is `crates/arena/src/spear.rs` (integers, hashed when the spear is on). The picture is `crates/game/src/spear_look.rs` (floats, never hashed). The design is `docs/plan/spear-grapple.md`, sections "Yank" and "Rope cut". With the spear off none of this runs, and golden `d57b5c8ae3096614` is unchanged.
+
+**Yank (SG9).**
+
+- The yank is chosen at the hit. `holds_back` (`spear.rs:1245`) is true when the thrower's move wish points against the flight direction. Then the tether is a yank. Otherwise the hit is the old carry.
+- On the catch the victim is stunned for `YANK_STUN` (20 ticks), and the fight holds for `YANK_HITSTOP` (5 ticks) (`spear.rs:583-586`).
+- A yank tether folds one extra byte, `YANK_TAG` 0xA7 (`spear.rs:392`). A carry folds nothing extra.
+- Each pulled tick the victim moves toward the thrower at `clamp((gap - 1200) / 4, 30, 400)` mm per tick (`spear.rs:671-682`). The constants are `YANK_STOP` (1200), `YANK_EASE_DIV` (4), `YANK_MIN_SPEED` (30) and `YANK_SPEED` (400).
+- The yank lands when the gap is inside `YANK_STOP + YANK_MIN_SPEED` (`spear.rs:905-911`). A landing deals `YANK_ARRIVE_DAMAGE` (20 permille) and ends the tether with `EndWhy::Arrived`.
+
+**Rope cut (SG13).**
+
+- `rope_cut` (`spear.rs:1030-1057`) runs in the pull after the `Down` and `Timeout` ends and before the guard and parry checks (`spear.rs:652`).
+- The rope is the flat segment from the thrower to the victim. For a world anchor it is the segment from the thrower to `anchor_mm` (`spear.rs:1031-1037`).
+- The blade is the swept blade of every other fighter whose strike is live. A strike is live for `CUT_LIVE_TICKS` (4) ticks from its impact tick, while that fighter is up and has no `react` (`spear.rs:1039-1044`).
+- The cut needs the blade's half thickness plus `ROPE_HALF_MM` (60 mm) to reach the rope (`spear.rs:1049-1056`).
+- A cut ends the tether with `EndWhy::Cut`. The thrower's own swing never cuts its own rope (test below).
+- The sound: `window_audio_space::spear_cue` maps `EndWhy::Cut` to the `SEVER` cue (`crates/game/src/window_audio_space.rs:610`).
+
+**Yank look (SG10).**
+
+- `spear_look` tows only the victim. The planted thrower is never carried (module doc, `crates/game/src/spear_look.rs:11-12`).
+- For a yank the rope's slack factor is `YANK_TAUT` (0.96, `spear_look.rs:46`, used at `spear_look.rs:432`). The drawn rope is therefore shorter than the gap, so it is strained.
+
+**Run.**
+
+- `play-arena.bat --spear` starts the arena with the spear on. The flag is `SPEAR_FLAG` (`crates/game/src/bin/arena.rs:186`).
+- `arena.exe --spear-demo` adds a script for the human slot that walks at the nearest fighter (`arena.rs:189`).
+
+**Limits.**
+
+- Not built: the thrower's lean-back pose (SG10 row, `docs/SPRINT-08-hard-stuff.md`).
+- Open: a hand-played capture of a full pull to the stop (SG10 row).
+- Not built: SG11 (laquearius noose) and SG12 (retiarius net). They are meant to reuse the cut check (SG13 row).
+- Not in the showcase tour yet: the cut station is SHOW2 (`docs/plan/showcase.md`).
+
+**Tests.**
+
+- Authority: `node tools/gh-check.mjs cargo test -p engine-arena --lib spear` (the SG13 row records 37 passed).
+  - Yank: `yank_reels_the_hooked_enemy_to_a_planted_thrower` (`spear.rs:1642`), `a_held_guard_cannot_cut_a_yank` (`spear.rs:1682`), `a_yank_slides_round_a_corner_instead_of_dying_on_it` (`spear.rs:1701`), `a_third_fighter_cuts_a_yank` (`spear.rs:1867`).
+  - Cut: `a_victims_swing_across_the_rope_cuts_a_carry` (`spear.rs:1811`), `a_swing_that_misses_the_rope_does_not_cut_it` (`spear.rs:1830`), `the_throwers_own_swing_does_not_cut_its_rope` (`spear.rs:1889`), `rope_geometry_crossing_touching_and_missing` (`spear.rs:1907`).
+- Look: `node tools/gh-check.mjs cargo test -p engine-game --features app --lib spear_look`, which includes `spear_look_yank_tows_the_victim_and_leaves_the_thrower_standing` (`spear_look.rs:772`).
+
 ## 2. `engine-combat` (`crates/combat`)
 
 Frame-data combat: hits, hit-stop, move tables, sweeps, cuts, exchanges. Std-only, integer, each
