@@ -125,6 +125,11 @@ pub struct PresentationFeed {
     frames: Vec<CameraFrame>,
     trauma: Vec<u32>,
     rotations: Vec<RotationShake>,
+    /// The live directional recoil (SW21): the strongest blow of the last
+    /// [`IMPACT_RECOIL_TICKS`], or [`NO_RECOIL`].
+    recoil: Recoil,
+    /// Per presented tick, the recoil's own rotation kick, in tick order.
+    recoils: Vec<RotationShake>,
 }
 
 impl PresentationFeed {
@@ -139,6 +144,8 @@ impl PresentationFeed {
             frames: Vec::with_capacity(capacity),
             trauma: Vec::with_capacity(capacity),
             rotations: Vec::with_capacity(capacity),
+            recoil: NO_RECOIL,
+            recoils: Vec::with_capacity(capacity),
         })
     }
 
@@ -162,6 +169,7 @@ impl PresentationFeed {
             self.frames.remove(0);
             self.trauma.remove(0);
             self.rotations.remove(0);
+            self.recoils.remove(0);
         }
     }
 
@@ -189,10 +197,62 @@ impl PresentationFeed {
         } else {
             shake_rotation_offset(frame.trauma_permille, frame.tick)
         };
+        let recoil = if shake_bypassed {
+            RotationShake::NONE
+        } else {
+            let age = frame.tick.saturating_sub(self.recoil.start_tick);
+            if self.recoil.live && age < IMPACT_RECOIL_TICKS {
+                impact_shake(self.recoil.dir, self.recoil.strength_permille, age)
+            } else {
+                RotationShake::NONE
+            }
+        };
         self.frames.push(frame);
         self.trauma.push(frame.trauma_permille);
         self.rotations.push(rotation);
+        self.recoils.push(recoil);
         self.trim_receipts();
+    }
+
+    /// Note the tick's strongest blow for the goal-away recoil: the horizontal
+    /// direction from the victim toward the strike and the blow's weight. A
+    /// tick with no landing cue keeps the live recoil (it is still decaying).
+    fn note_recoil(&mut self, tick: u32, cues: &[FightCue], views: &[FighterView]) {
+        let mut best: Option<(u32, u8, u8)> = None;
+        for cue in cues {
+            let Some((strength, attacker, victim)) = cue_weight(*cue) else {
+                continue;
+            };
+            if best.is_none_or(|(weight, _, _)| strength > weight) {
+                best = Some((strength, attacker, victim));
+            }
+        }
+        let Some((strength, attacker, victim)) = best else {
+            return;
+        };
+        let Some(dir) = hit_direction(views, attacker, victim) else {
+            return;
+        };
+        self.recoil = Recoil {
+            dir,
+            strength_permille: strength,
+            start_tick: tick,
+            live: true,
+        };
+    }
+
+    /// The directional recoil the last presented tick held, already decaying.
+    /// [`RotationShake::NONE`] on a tick with no live blow, and on a bypassed
+    /// tick. Same tick script and views give the same kick twice.
+    #[must_use]
+    pub fn recoil_shake(&self) -> RotationShake {
+        self.recoils.last().copied().unwrap_or(RotationShake::NONE)
+    }
+
+    /// Per presented tick, the recoil's rotation kick, in tick order.
+    #[must_use]
+    pub fn recoil_log(&self) -> &[RotationShake] {
+        &self.recoils
     }
 
     /// Frames presented so far.
@@ -226,6 +286,7 @@ impl PresentationFeed {
     ) -> Result<CameraFrame, CameraError> {
         self.rig.set_bypass(0);
         self.rig.add_trauma(trauma_for_cues(cues));
+        self.note_recoil(tick, cues, views);
         let frame = self.rig.update(views, tick)?;
         debug_assert_eq!(
             feed_trauma_gain(frame.trauma_permille),
@@ -276,6 +337,7 @@ impl PresentationFeed {
     ) -> Result<CameraFrame, CameraError> {
         self.rig.set_bypass(bypass & (BYPASS_LOCK | BYPASS_SHAKE));
         self.rig.add_trauma(trauma_for_cues(cues));
+        self.note_recoil(tick, cues, views);
         let mut frame = self.rig.update(views, tick)?;
         let shake_bypassed = bypass & BYPASS_SHAKE != 0;
         // QL8 rotation-only feel: the translation shake never reaches the
@@ -664,6 +726,165 @@ pub fn shake_rotation_offset(trauma_permille: u32, tick: u32) -> RotationShake {
 /// `camera_rig` roll share). Dividing the rig's roll by it recovers the
 /// `[-gain, gain]` unit this stage scales into [`SHAKE_ROTATION_CAP_DEG`].
 const ROTATION_ROLL_RAIL_RAD: f32 = 0.1;
+
+// ---------------------------------------------------------------------------
+// SW21 impact camera: split tilt and roll budgets, plus a directional recoil.
+// ---------------------------------------------------------------------------
+
+/// Tilt budget for the impact camera, in degrees: the largest turn of the aim
+/// (yaw and pitch) one blow may ask for. A turn reads as a hit; a slide of the
+/// eye reads as the world moving, so the tilt carries the shot and the rail is
+/// small on purpose (Juicee's shipped 3D default, 1.6 deg).
+pub const SHAKE_TILT_BUDGET_DEG: f32 = 1.6;
+
+/// Roll budget for the impact camera, in degrees: the twist that comes with a
+/// blow, under half the tilt so the horizon stays readable (Juicee 0.9 deg).
+pub const SHAKE_ROLL_BUDGET_DEG: f32 = 0.9;
+
+/// Ticks a directional recoil takes to die away (12 ticks, 0.2 s at 60 Hz).
+pub const IMPACT_RECOIL_TICKS: u32 = 12;
+
+/// Share of the tilt budget a full-strength blow (1000 permille) reaches on its
+/// own tick, before the fall-off.
+const IMPACT_RECOIL_SHARE: f32 = 0.6;
+
+/// The split-budget rail: the QL8 trauma turn rescaled so yaw and pitch stay
+/// inside [`SHAKE_TILT_BUDGET_DEG`] and roll inside [`SHAKE_ROLL_BUDGET_DEG`],
+/// instead of one shared cap for all three channels. Zero trauma is exactly
+/// [`RotationShake::NONE`]. Same inputs give the same rotation twice. Pure.
+#[must_use]
+pub fn split_rotation_offset(trauma_permille: u32, tick: u32) -> RotationShake {
+    let base = shake_rotation_offset(trauma_permille, tick);
+    let tilt = SHAKE_TILT_BUDGET_DEG / SHAKE_ROTATION_CAP_DEG;
+    let roll = SHAKE_ROLL_BUDGET_DEG / SHAKE_ROTATION_CAP_DEG;
+    RotationShake {
+        yaw_rad: base.yaw_rad * tilt,
+        pitch_rad: base.pitch_rad * tilt,
+        roll_rad: base.roll_rad * roll,
+    }
+}
+
+/// The aim's kick away from a blow that landed `age_ticks` ago: `dir` is the
+/// horizontal unit direction from the victim toward the strike, `strength`
+/// its weight in permille (`0..=1000`, damage x10). The turn is purely
+/// rotational, points away from the blow (the view is shoved by the hit, not
+/// toward it) and falls with the square of the ticks left, so it peaks on the
+/// impact tick and is exactly [`RotationShake::NONE`] once
+/// [`IMPACT_RECOIL_TICKS`] are spent. No libm on any host. Pure.
+#[must_use]
+pub fn impact_shake(dir: Vec3, strength_permille: u32, age_ticks: u32) -> RotationShake {
+    if age_ticks >= IMPACT_RECOIL_TICKS {
+        return RotationShake::NONE;
+    }
+    let strength = f32::from(u16::try_from(strength_permille.min(1000)).unwrap_or(1000)) / 1000.0;
+    if strength <= 0.0 {
+        return RotationShake::NONE;
+    }
+    // Horizontal only: a blow from above or below does not tilt the aim.
+    let flat = Vec3::new(dir.x, 0.0, dir.z);
+    let len = flat.len();
+    if len <= 0.0 {
+        return RotationShake::NONE;
+    }
+    let left = {
+        let spent = u16::try_from(IMPACT_RECOIL_TICKS).unwrap_or(u16::MAX);
+        let age = u16::try_from(age_ticks).unwrap_or(u16::MAX);
+        let left_ticks = spent.saturating_sub(age);
+        f32::from(left_ticks) / f32::from(spent)
+    };
+    let fall = left * left;
+    let mag = strength * IMPACT_RECOIL_SHARE * fall * SHAKE_TILT_BUDGET_DEG.to_radians();
+    RotationShake {
+        yaw_rad: -(flat.x / len) * mag,
+        pitch_rad: -(flat.z / len) * mag,
+        roll_rad: 0.0,
+    }
+}
+
+/// The rotation one presented tick asks for: the split-budget trauma turn plus
+/// a live directional recoil, each channel clamped to its own budget so two
+/// blows at once can never stack past the tilt or roll rail. Zero trauma and a
+/// spent recoil give exactly [`RotationShake::NONE`]. Pure, no heap.
+#[must_use]
+pub fn presented_rotation(
+    trauma_permille: u32,
+    tick: u32,
+    dir: Vec3,
+    strength_permille: u32,
+    age_ticks: u32,
+) -> RotationShake {
+    let trauma = split_rotation_offset(trauma_permille, tick);
+    let recoil = impact_shake(dir, strength_permille, age_ticks);
+    let tilt_rad = SHAKE_TILT_BUDGET_DEG.to_radians();
+    let roll_rad = SHAKE_ROLL_BUDGET_DEG.to_radians();
+    RotationShake {
+        yaw_rad: (trauma.yaw_rad + recoil.yaw_rad).clamp(-tilt_rad, tilt_rad),
+        pitch_rad: (trauma.pitch_rad + recoil.pitch_rad).clamp(-tilt_rad, tilt_rad),
+        roll_rad: trauma.roll_rad.clamp(-roll_rad, roll_rad),
+    }
+}
+
+/// A live directional recoil: the strongest blow of the tick, the horizontal
+/// unit direction from its victim toward it, and the tick it landed.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Recoil {
+    /// Horizontal unit direction from the victim toward the blow.
+    dir: Vec3,
+    /// Blow weight in permille (`0..=1000`).
+    strength_permille: u32,
+    /// Tick the blow landed.
+    start_tick: u32,
+    /// False while no blow is inside [`IMPACT_RECOIL_TICKS`].
+    live: bool,
+}
+
+/// No blow live: every field zero and `live` false, so a feed built before any
+/// hit presents exactly the trauma rail.
+const NO_RECOIL: Recoil = Recoil {
+    dir: Vec3::ZERO,
+    strength_permille: 0,
+    start_tick: 0,
+    live: false,
+};
+
+/// The weight a cue carries into the recoil, in permille, and its two slots;
+/// `None` for a cue that lands nothing (a dodge, a stamina refusal). Damage
+/// and chip read x10, a parry is a mid kick, because the attacker is staggered
+/// by it without losing health.
+fn cue_weight(cue: FightCue) -> Option<(u32, u8, u8)> {
+    match cue {
+        FightCue::Hit {
+            attacker,
+            victim,
+            damage,
+        } => Some(((u32::from(damage) * 10).min(1000), attacker, victim)),
+        FightCue::Blocked {
+            attacker,
+            victim,
+            chip,
+        } => Some(((u32::from(chip) * 10).min(1000), attacker, victim)),
+        FightCue::Parried { attacker, victim } => Some((500, attacker, victim)),
+        _ => None,
+    }
+}
+
+/// Horizontal unit direction from `victim`'s feet toward `attacker`'s, or
+/// `None` when either slot is missing or the two stand on top of each other.
+fn hit_direction(views: &[FighterView], attacker: u8, victim: u8) -> Option<Vec3> {
+    let find = |id: u8| {
+        views
+            .iter()
+            .find(|view| view.id == id)
+            .map(|view| view.pos_m)
+    };
+    let (from, to) = (find(victim)?, find(attacker)?);
+    let flat = Vec3::new(to.x - from.x, 0.0, to.z - from.z);
+    let len = flat.len();
+    if len <= 1e-4 {
+        return None;
+    }
+    Some(Vec3::new(flat.x / len, 0.0, flat.z / len))
+}
 
 // ---------------------------------------------------------------------------
 // Wired game capture: the single pixel supplier for `capture_with` receipts.
@@ -2093,6 +2314,190 @@ mod tests {
         );
         let last = feed.last_frame().expect("frames presented");
         assert_eq!(last.shake_m, Vec3::ZERO, "decay never restores translation");
+    }
+
+    // SW21 impact camera: the split tilt/roll budgets and the directional
+    // recoil replace one shared cap for the whole feel shake.
+    // SW24: the impact camera's rails are the combat presentation row's, never a
+    // second copy of the numbers.
+    #[test]
+    fn sw24_the_camera_rails_read_the_presentation_table() {
+        let row = engine_combat::feel::PRESENTATION_V1;
+        assert_eq!(
+            SHAKE_TILT_BUDGET_DEG,
+            f32::from(row.shake_tilt_milli_deg) / 1000.0,
+            "the tilt rail is the table's"
+        );
+        assert_eq!(
+            SHAKE_ROLL_BUDGET_DEG,
+            f32::from(row.shake_roll_milli_deg) / 1000.0,
+            "the roll rail is the table's"
+        );
+        assert!(
+            (SHAKE_ROTATION_CAP_DEG - f32::from(row.shake_cap_milli_deg) / 1000.0).abs() < 1.0e-3,
+            "the QL8 cap is the table's, to the milli-degree"
+        );
+    }
+
+    #[test]
+    fn sw21_the_tilt_and_roll_budgets_are_split() {
+        let tilt = SHAKE_TILT_BUDGET_DEG.to_radians();
+        let roll = SHAKE_ROLL_BUDGET_DEG.to_radians();
+        eprintln!(
+            "impact camera: tilt={SHAKE_TILT_BUDGET_DEG:.1} deg roll={SHAKE_ROLL_BUDGET_DEG:.1} deg"
+        );
+        assert!(
+            SHAKE_ROLL_BUDGET_DEG < SHAKE_TILT_BUDGET_DEG,
+            "the roll twist stays under the tilt turn"
+        );
+        assert!(
+            tilt < SHAKE_ROTATION_CAP_DEG.to_radians(),
+            "the split rail sits inside the QL8 cap"
+        );
+        assert_eq!(
+            split_rotation_offset(0, 7),
+            RotationShake::NONE,
+            "calm is exact"
+        );
+        let mut turned = false;
+        for trauma in [1u32, TRAUMA_HIT, 1000, 4000] {
+            for tick in [0u32, 1, 7, 40, 41, 600] {
+                let shake = split_rotation_offset(trauma, tick);
+                assert!(
+                    shake.yaw_rad.abs() <= tilt + 1e-6,
+                    "yaw over the tilt budget at {trauma}/{tick}: {shake:?}"
+                );
+                assert!(
+                    shake.pitch_rad.abs() <= tilt + 1e-6,
+                    "pitch over the tilt budget at {trauma}/{tick}: {shake:?}"
+                );
+                assert!(
+                    shake.roll_rad.abs() <= roll + 1e-6,
+                    "roll over its own budget at {trauma}/{tick}: {shake:?}"
+                );
+                turned |= shake.peak_rad() > 0.0;
+            }
+        }
+        assert!(turned, "a saturated burst turns the view");
+    }
+
+    #[test]
+    fn sw21_a_blow_kicks_the_aim_away_from_the_hit() {
+        // A blow from +X: the aim is shoved the other way, so yaw turns negative.
+        let hit = impact_shake(Vec3::new(1.0, 0.0, 0.0), 1000, 0);
+        let peak = SHAKE_TILT_BUDGET_DEG.to_radians() * IMPACT_RECOIL_SHARE;
+        assert!(
+            (hit.yaw_rad + peak).abs() < 1e-6,
+            "a full blow reaches 0.6 of the tilt budget away from it: {hit:?}"
+        );
+        assert_eq!(hit.pitch_rad, 0.0, "a level blow does not pitch");
+        // The kick falls all the way to exactly nothing, never rising.
+        let mut last = f32::INFINITY;
+        for age in 0..IMPACT_RECOIL_TICKS {
+            let now = impact_shake(Vec3::new(1.0, 0.0, 0.0), 1000, age)
+                .yaw_rad
+                .abs();
+            assert!(now <= last, "the kick only falls, at age {age}");
+            last = now;
+        }
+        assert_eq!(
+            impact_shake(Vec3::new(1.0, 0.0, 0.0), 1000, IMPACT_RECOIL_TICKS),
+            RotationShake::NONE,
+            "a spent window is exactly calm"
+        );
+        // A blow from above does not tilt the aim, and no direction is calm.
+        for dir in [Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO] {
+            assert_eq!(
+                impact_shake(dir, 1000, 0),
+                RotationShake::NONE,
+                "no horizontal blow, no kick"
+            );
+        }
+        assert_eq!(
+            impact_shake(Vec3::new(1.0, 0.0, 0.0), 0, 0),
+            RotationShake::NONE,
+            "a weightless blow kicks nothing"
+        );
+        // Weight scales the kick.
+        let soft = impact_shake(Vec3::new(1.0, 0.0, 0.0), 250, 0);
+        assert!(
+            soft.yaw_rad.abs() < hit.yaw_rad.abs(),
+            "a quarter-strength blow kicks less"
+        );
+    }
+
+    #[test]
+    fn sw21_the_feed_kicks_the_view_away_from_the_blow_and_decays() {
+        let mut feed = PresentationFeed::new(0, DirectorParams::default()).unwrap();
+        // Attacker 0 stands at -X of victim 1, so the blow comes from -X and
+        // the aim is shoved toward +X: yaw turns positive.
+        let views = [
+            FighterView {
+                id: 0,
+                pos_m: Vec3::new(-1.0, 0.0, 0.0),
+                alive: true,
+            },
+            FighterView {
+                id: 1,
+                pos_m: Vec3::new(0.0, 0.0, 0.0),
+                alive: true,
+            },
+        ];
+        let hit = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 50,
+        };
+        feed.observe_tick(0, &views, &[]).expect("calm frame");
+        assert_eq!(feed.recoil_shake(), RotationShake::NONE, "no blow, no kick");
+        let struck = feed.observe_tick(1, &views, &[hit]).expect("hit frame");
+        assert!(struck.trauma_permille > 0, "the hit banks trauma");
+        let kick = feed.recoil_shake();
+        assert!(
+            kick.yaw_rad > 0.0,
+            "the aim is shoved away from the strike: {kick:?}"
+        );
+        // The kick decays over its own window and is spent before it.
+        let mut previous = kick.yaw_rad.abs();
+        for tick in 2..(IMPACT_RECOIL_TICKS + 1) {
+            feed.observe_tick(tick, &views, &[]).expect("decay frame");
+            let now = feed.recoil_shake().yaw_rad.abs();
+            assert!(
+                now < previous,
+                "the kick falls at {tick}: {now} !< {previous}"
+            );
+            previous = now;
+        }
+        feed.observe_tick(IMPACT_RECOIL_TICKS + 1, &views, &[])
+            .expect("spent frame");
+        assert_eq!(
+            feed.recoil_shake(),
+            RotationShake::NONE,
+            "a spent recoil is exactly calm"
+        );
+        assert_eq!(feed.recoil_log().len(), feed.frames().len());
+        // The same blow from the other side kicks the other way.
+        let mut mirrored = PresentationFeed::new(0, DirectorParams::default()).unwrap();
+        let other = [
+            views[0],
+            FighterView {
+                id: 1,
+                pos_m: Vec3::new(-2.0, 0.0, 0.0),
+                alive: true,
+            },
+        ];
+        mirrored
+            .observe_tick(0, &other, &[hit])
+            .expect("mirrored hit");
+        assert!(
+            mirrored.recoil_shake().yaw_rad < 0.0,
+            "the mirrored blow kicks the other way"
+        );
+        // A bypassed shake stage presents no kick at all.
+        let mut off = PresentationFeed::new(0, DirectorParams::default()).unwrap();
+        off.observe_tick_with_bypass(0, &views, &[hit], BYPASS_SHAKE)
+            .expect("bypassed hit");
+        assert_eq!(off.recoil_shake(), RotationShake::NONE, "shake off is calm");
     }
 
     #[test]

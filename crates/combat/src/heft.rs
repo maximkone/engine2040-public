@@ -5,7 +5,7 @@
 //! A swinger with no weapon armed (its `heft` is `None`) swings the
 //! table row, so every match that never arms one steps exactly as before and
 //! rules v1 replays never move. The gladius row equals the shipped table
-//! (startup 15, recovery 8, damage 120, hit react 6): only the other weapons
+//! (startup 30, recovery 6, damage 120, hit react 6): only the other weapons
 //! change a bout. Integer only; parsing is a cold path, the step reads four
 //! plain fields.
 //!
