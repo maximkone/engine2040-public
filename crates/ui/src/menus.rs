@@ -25,6 +25,9 @@ use engine_input::MAX_PARTICIPANTS;
 /// Locale tables for menu labels (static en/de, integer plurals, test pseudo).
 pub mod locale;
 
+/// Locale table as data: parse, merge and check one file per locale.
+pub mod catalog;
+
 /// Menu screens as data: a `.ui.toml` names the same rows this module names, in the
 /// same order, and draws the same [`MenuItem`] values.
 #[path = "menu_layout.rs"]

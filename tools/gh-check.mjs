@@ -29,6 +29,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { applyHunks, parseDiff } from "./commit-mine.mjs";
 import { lowerPriority, poolEnv } from "./jobserver.mjs";
 // Public-gate safe (2026-10-16): no static import of ./public-export.mjs here.
 // That file is in its own export DENY list, so the public checkout lacks it and
@@ -59,8 +60,56 @@ const run = (cmd, args, o = {}) => execFileSync(cmd, args, { encoding: "utf8", m
 const gdir = () => join(CLONE, ".git");
 const g = (args, o = {}) => run("git", ["--git-dir", gdir(), "-c", "core.autocrlf=false", ...args], o).trim();
 
-// Only one plain cargo check, test or clippy line goes to the runner (the workflow refuses the rest again).
-export const okCmd = (cmd) => /^cargo (check|test|clippy) /.test(cmd) && !/[&;|`<>]|\$\(/.test(cmd);
+// GitHub's rate limits (owner 2026-10-24: 20 agents dispatching at once got "HTTP 403: API rate limit exceeded"). A limited call
+// is not a broken check: wait and try again. RATE_WAITS_MS are the waits between tries; POLL_MS is one run-status read.
+export const RATE_WAITS_MS = [30_000, 60_000, 120_000];
+const POLL_MS = 20_000;
+export const rateLimited = (e) => /rate limit|secondary rate|HTTP 429|abuse detection/i.test(String(e?.stderr ?? e?.message ?? e));
+export const withRateRetry = async (call, waits = RATE_WAITS_MS, wait = sleep) => {
+  for (let i = 0; ; i++) {
+    try { return await call(); } catch (e) {
+      if (!rateLimited(e) || i >= waits.length) throw e;
+      console.log(`GitHub rate limit; trying again in ${waits[i] / 1000} s`);
+      await wait(waits[i]);
+    }
+  }
+};
+
+// One plain cargo check, test or clippy line, or one cargo-mutants slice (okMutants), goes to the runner; the workflow refuses the rest again.
+export const okCmd = (cmd) => (/^cargo (check|test|clippy) /.test(cmd) || okMutants(cmd)) && !/[&;|`<>]|\$\(/.test(cmd);
+
+// cargo-mutants (AF5, owner 2026-10-24): one crate and one slice of its mutants per line, never the whole workspace. The slice is
+// --shard k/n or -f <file> (a plain path); -t/--timeout takes seconds. Anything else is refused: --workspace, --all, -o (the workflow
+// reads mutants.out in the checkout), --in-place, a bare word, a `--` for the test binary.
+const MUTANTS_FLAGS = new Set(["-p", "--package", "--shard", "-f", "--file", "-t", "--timeout"]);
+export const okMutants = (cmd) => {
+  const w = words(cmd);
+  if (w.length < 4 || w[0] !== "cargo" || w[1] !== "mutants") return false;
+  const pkgs = [];
+  let slices = 0;
+  for (let i = 2; i < w.length; i++) {
+    const eq = /^(--[a-z]+)=(.*)$/.exec(w[i]); // --shard=1/8 is --shard 1/8
+    const flag = eq ? eq[1] : w[i];
+    if (!MUTANTS_FLAGS.has(flag)) return false;
+    const val = eq ? eq[2] : w[++i];
+    if (val === undefined || val.startsWith("-")) return false;
+    if (flag === "-p" || flag === "--package") {
+      if (!/^[a-z][a-z0-9_-]*$/.test(val)) return false;
+      pkgs.push(val);
+    } else if (flag === "--shard") {
+      // cargo-mutants counts shards from 0: k/n with k < n (0/20 .. 19/20); 20/20 is its own error
+      const s = /^(\d+)\/([1-9]\d*)$/.exec(val);
+      if (!s || Number(s[1]) >= Number(s[2]) || Number(s[2]) > 256) return false;
+      slices++;
+    } else if (flag === "-f" || flag === "--file") {
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(val) || val.split("/").includes("..")) return false;
+      slices++;
+    } else if (!/^[1-9]\d*$/.test(val)) return false;
+  }
+  return pkgs.length === 1 && slices > 0;
+};
+// A cargo-mutants line is heavy: it goes to a GitHub runner, never to this PC (not even as the fallback).
+export const isMutants = (cmd) => words(cmd)[0] === "cargo" && words(cmd)[1] === "mutants";
 
 // The words of a plain command line (a quoted run is one word, quotes removed).
 export const words = (s) => (String(s).match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((w) => w.replace(/^(["'])(.*)\1$/, "$2"));
@@ -69,14 +118,17 @@ export const DEFAULT_BUDGET_S = 100;
 // Printed by --help: every helper asks for the flags, so they are one command
 // away instead of a read of this file.
 export const USAGE = [
-  "gh-check: run ONE cargo check|test|clippy line on a GitHub runner (or this PC) against your working tree.",
+  "gh-check: run ONE cargo check|test|clippy line on a GitHub runner (or this PC) against your working tree, or one cargo mutants slice on GitHub.",
   "",
   "  node tools/gh-check.mjs [flags] cargo <check|test|clippy> <a cargo line>",
+  "  node tools/gh-check.mjs [flags] cargo mutants -p <crate> --shard <k/n> | -f <file>   (one slice of one crate's mutants: GitHub only)",
   "  node tools/gh-check.mjs --wait wip-xxxx [--budget <s>]   pick up a check that was still running",
   "",
   "Flags (all before the cargo word):",
   "  --budget <s>     how long one call waits (default 100, max 1740). A short call returns exit 3 and a --wait line.",
-  "  --only <paths>   build HEAD plus just these comma-separated paths; other writers' dirty files stay out",
+  "  --only <paths>   build HEAD plus just these comma-separated paths; other writers' dirty files stay out.",
+  "                   <path>#N takes only that hunk of a shared file (commit-mine --list numbers them): prove what you --pick",
+  "  --at <sha>       build that commit alone, no working-tree file: bisect a test that is red on master",
   "  --fresh          run again instead of returning the kept result",
   "  --remote-only    never fall back to this PC (exit 2 instead)",
   "  --local          run on this PC in the shared compile pool, no GitHub",
@@ -89,7 +141,7 @@ export const USAGE = [
 ].join("\n");
 // node tools/gh-check.mjs [--budget <s>] [--remote-only | --local] [--fresh] [--only <path,path>] cargo <check|test|clippy> ...   |   --wait <job> [--budget <s>]
 export const parseArgs = (argv, env = {}) => {
-  const out = { cmd: "", wait: null, mode: "auto", fresh: false, only: null, budget: Number(env.GH_CHECK_BUDGET) >= 1 ? Math.min(Number(env.GH_CHECK_BUDGET), 1740) : DEFAULT_BUDGET_S, error: null };
+  const out = { cmd: "", wait: null, mode: "auto", fresh: false, only: null, at: null, budget: Number(env.GH_CHECK_BUDGET) >= 1 ? Math.min(Number(env.GH_CHECK_BUDGET), 1740) : DEFAULT_BUDGET_S, error: null };
   let i = 0;
   for (; i < argv.length && argv[i].startsWith("-"); i++) {
     const a = argv[i];
@@ -98,13 +150,21 @@ export const parseArgs = (argv, env = {}) => {
     else if (a === "--remote-only") out.mode = "remote";
     else if (a === "--local") out.mode = "local";
     else if (a === "--fresh") out.fresh = true;
-    else if (a === "--only") { out.only = String(argv[++i] ?? "").split(",").map((x) => x.trim().split("\\").join("/")).filter(Boolean); if (!out.only.length) out.error = "--only needs paths, comma-separated"; }
+    else if (a === "--only") {
+      // Comma- or space-separated: every bare word up to `cargo` is a path (a space list was refused as the cargo line).
+      const words = [String(argv[++i] ?? "")];
+      while (i + 1 < argv.length && !argv[i + 1].startsWith("-") && argv[i + 1] !== "cargo") words.push(argv[++i]);
+      out.only = words.flatMap((w) => w.split(",")).map((x) => x.trim().split("\\").join("/")).filter(Boolean);
+      if (!out.only.length) out.error = "--only needs paths, comma-separated";
+    }
+    else if (a === "--at") { out.at = argv[++i] ?? ""; if (!/^[0-9a-f]{7,40}$/.test(out.at)) out.error = "--at needs a commit sha (7 to 40 hex)"; }
     else { out.error = `unknown flag ${a}`; break; }
   }
+  if (out.at && out.only && !out.error) out.error = "--at builds that commit alone; it takes no --only";
   out.cmd = argv.slice(i).join(" ").trim();
   // cargo has none of these, so one after the cargo line is ours put in the wrong place: cargo would only fail on it remotely
   const rest = argv.slice(i); const dash = rest.indexOf("--");
-  const late = (dash < 0 ? rest : rest.slice(0, dash)).find((a) => /^--(?:budget|fresh|only|wait|remote-only)$/.test(a));
+  const late = (dash < 0 ? rest : rest.slice(0, dash)).find((a) => /^--(?:at|budget|fresh|only|wait|remote-only)$/.test(a));
   if (late && !out.error) out.error = `${late} is a gh-check flag: put it before the cargo line (node tools/gh-check.mjs ${late} ... cargo ...)`;
   return out;
 };
@@ -195,6 +255,36 @@ export const testsRan = (log) => {
   return n;
 };
 
+// The source files a cargo error tail points at (`--> path:line`), slash-normalized, in order.
+export const errorFiles = (text) => [...new Set([...String(text).matchAll(/-->\s+([^\s:]+\.rs):\d+/g)].map((m) => m[1].split("\\").join("/")))];
+// Those of them that are dirty (uncommitted) in this tree: the likely cause when someone
+// else's half-done edit broke the build of everyone's line (owner 2026-10-24: most runs that
+// day failed on other agents' work in progress).
+export const dirtyErrorFiles = (text, root = ROOT) => {
+  const files = errorFiles(text);
+  if (!files.length) return [];
+  let status = "";
+  try { status = run("git", ["-C", root, "status", "--porcelain", "--", ...files]); } catch { return []; }
+  const dirty = new Set(status.split("\n").filter(Boolean).map((l) => l.slice(3).trim().split("\\").join("/")));
+  return files.filter((f) => dirty.has(f));
+};
+
+// Crates that keep their tests behind a feature (owner 2026-10-24: a "PASS, 0 tests ran" on these
+// crates was the usual trap). Kept small on purpose: `app` sends a line to the slower Windows
+// runner, so the feature is added only after a run without it proved nothing.
+export const TEST_FEATURES = { "engine-physfx": "rapier", "engine-game": "app", "engine-endpoint": "mcp" };
+// The same `cargo test` line with its crate's test feature added, or null when the line already
+// names features, is not a test of one of those crates, or has nothing to add.
+export const withTestFeatures = (cmd) => {
+  const w = words(cmd);
+  if (w[0] !== "cargo" || w[1] !== "test" || w.some((t) => /^(?:--features|-F|--all-features)(?:=|$)|^-F./.test(t))) return null;
+  const at = w.findIndex((t) => t === "-p" || t === "--package");
+  const feat = at >= 0 ? TEST_FEATURES[w[at + 1]] : undefined;
+  if (!feat) return null;
+  const dash = cmd.indexOf(" -- ");
+  return dash >= 0 ? `${cmd.slice(0, dash)} --features ${feat}${cmd.slice(dash)}` : `${cmd} --features ${feat}`;
+};
+
 // ---- the route: GitHub first, the PC second ----
 // remote(cmd, os) -> { code, retry?, why?, noTests? }; local(cmd) -> code. Pure over those two, so the tests fake them.
 export const route = async ({ cmd, mode = "auto", remote, local, say = console.log, root = ROOT }) => {
@@ -209,6 +299,13 @@ export const route = async ({ cmd, mode = "auto", remote, local, say = console.l
     if (res.code !== 2 || !res.retry) break;
     if (attempt < 2) say(`the check could not run${res.why ? ` (${res.why})` : ""}; trying once more`);
   }
+  // 0 tests ran on a crate whose tests sit behind a feature: run the line once more with it.
+  const featured = res.code === 0 && res.noTests ? withTestFeatures(cmd) : null;
+  if (featured) {
+    say(`0 tests ran: this crate keeps its tests behind a feature; running \`${featured}\``);
+    const again = await remote(featured, runnerOs(featured, root));
+    return afterRemote({ res: again, cmd: featured, mode, local, say });
+  }
   return afterRemote({ res, cmd, mode, local, say });
 };
 // A finished remote result into the exit code: a vacuous pass or a run that could not happen goes to the PC unless --remote-only.
@@ -218,13 +315,17 @@ export const afterRemote = async ({ res, cmd, mode, local, say }) => {
     if (mode === "remote") return 2;
     say("running it on the PC instead"); return local(cmd);
   }
-  if (res.code === 2 && mode !== "remote") { say("GitHub could not run it; running it on the PC instead"); return local(cmd); }
+  if (res.code === 2 && mode !== "remote") {
+    if (isMutants(cmd)) { say("GitHub could not run it; cargo mutants never runs on this PC"); return 2; }
+    say("GitHub could not run it; running it on the PC instead"); return local(cmd);
+  }
   return res.code;
 };
 
 // The same line on this PC: stdio straight through, cargo's own lock decides when it runs. Never workspace-wide.
 // A kept result of the same line on the same inputs answers at once; the same line already building here is waited for.
 export const runLocal = (cmd, say = console.log, { fresh = false, root = ROOT } = {}) => {
+  if (isMutants(cmd)) { say("refused: cargo mutants never runs on this PC (it is heavy): it goes to a GitHub runner, one -p crate and one --shard k/n per line"); return 2; }
   if (/\s--(?:workspace|all)(?=\s|$)/.test(cmd)) { say("refused: a workspace-wide cargo line never runs on this PC; give one crate (-p <crate>) or fix what stopped GitHub"); return 2; }
   const key = reuseKey(cmd, "pc", root);
   const lock = key && join(RESULTS, `${key}.lock`);
@@ -487,11 +588,24 @@ export const buildBase = async (head, full, ctx = ctxNow(), say = console.log) =
   } finally { rmSync(lock, { force: true }); }
 };
 
-// Dirty and untracked files of the working tree as index lines "mode sha<TAB>path" (mode 0 = removed); only: just these paths.
+// HEAD plus just the numbered hunks of one file, numbered as `commit-mine --list` numbers them: `--only <path>#N` proves exactly
+// what `commit-mine --pick <path>#N` commits, while other writers' hunks in the same file stay out.
+export const pickedText = (p, ns, cwd = ROOT) => {
+  const { hunks } = parseDiff(run("git", ["diff", "-U0", "--no-color", "--no-ext-diff", "HEAD", "--", p], { cwd }));
+  const chosen = ns.map((n) => hunks[n - 1]);
+  if (chosen.some((h) => !h)) throw new Error(`--only ${p}#N: the file has ${hunks.length} hunks (node tools/commit-mine.mjs --list ${p})`);
+  return applyHunks(run("git", ["show", `HEAD:${p}`], { cwd }), chosen);
+};
+
+// Dirty and untracked files of the working tree as index lines "mode sha<TAB>path" (mode 0 = removed); only: just these paths,
+// where an entry `<path>#N` takes that file as HEAD plus its picked hunks (pickedText).
 // All the blobs go through ONE git call (a process per file took 20 s for 270 files); a file with CRLF is hashed from an LF copy.
 const overlayLines = (only = null) => {
   const raw = run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: ROOT }).split("\0");
-  const want = (p) => !only || only.includes(p); const rm = (p) => `0 ${"0".repeat(40)}\t${p}`;
+  const picks = new Map();
+  for (const o of only ?? []) { const m = /^(.*)#(\d+)$/.exec(o); if (m) picks.set(m[1], [...(picks.get(m[1]) ?? []), Number(m[2])]); }
+  const paths = only?.map((o) => o.replace(/#\d+$/, ""));
+  const want = (p) => !paths || paths.includes(p); const rm = (p) => `0 ${"0".repeat(40)}\t${p}`;
   const lines = [], todo = []; const tmp = join(WORK, `ov-${process.pid}`);
   try {
     for (let i = 0; i < raw.length; i++) {
@@ -501,7 +615,8 @@ const overlayLines = (only = null) => {
       if (denied(p) || !want(p)) continue;
       const src = join(ROOT, p);
       if (x === "D" || y === "D" || !existsSync(src) || statSync(src).isDirectory()) { lines.push(rm(p)); continue; }
-      let buf = readFileSync(src), file = src;
+      let buf = picks.has(p) ? Buffer.from(pickedText(p, picks.get(p))) : readFileSync(src), file = src;
+      if (picks.has(p)) { mkdirSync(tmp, { recursive: true }); file = join(tmp, `pick-${todo.length}`); writeFileSync(file, buf); }
       if (!buf.includes(0) && buf.includes(13)) { mkdirSync(tmp, { recursive: true }); file = join(tmp, String(todo.length)); writeFileSync(file, buf.toString("utf8").replace(/\r\n/g, "\n")); }
       if (/[\n"]/.test(file)) { lines.push(`100644 ${g(["hash-object", "-w", "--stdin"], { input: readFileSync(file) })}\t${p}`); continue; } // --stdin-paths cannot spell this name
       lines.push({ p, at: todo.length }); todo.push(file.split("\\").join("/"));
@@ -560,6 +675,31 @@ const sweep = () => {
 };
 
 const lapOf = (job) => `${Math.round((Date.now() - job.startedAt) / 1000)}s`;
+// One status read serves every waiting call on this PC (13 calls each reading their own branch every 10 s ran the repo's Actions
+// API out of its hourly quota): the newest check.yml runs are kept in RUNS for POLL_MS and each call finds its branch there.
+// A run missing from that list two minutes after its dispatch (it fell past the newest 100) is read by its branch.
+const RUNS = join(WORK, "runs.json");
+export const runFromList = (runs, branch) => runs.find((r) => r.headBranch === branch) ?? null;
+const recentRuns = () => {
+  try { const kept = JSON.parse(readFileSync(RUNS, "utf8")); if (Date.now() - kept.at < POLL_MS) return kept.runs; } catch { /* nothing kept yet */ }
+  const runs = JSON.parse(run("gh", ["run", "list", "-R", PUBLIC_REPO, "--workflow", "check.yml", "--json", "databaseId,status,conclusion,headBranch", "-L", "100"]) || "[]");
+  try { mkdirSync(WORK, { recursive: true }); const tmp = `${RUNS}.${process.pid}`; writeFileSync(tmp, JSON.stringify({ at: Date.now(), runs })); renameSync(tmp, RUNS); } catch { /* another call wrote it first */ }
+  return runs;
+};
+const runOf = (job) => runFromList(recentRuns(), job.id)
+  ?? (Date.now() - job.startedAt > 120_000 ? JSON.parse(run("gh", ["run", "list", "-R", PUBLIC_REPO, "--workflow", "check.yml", "--branch", job.id, "--json", "databaseId,status,conclusion", "-L", "1"]) || "[]")[0] ?? null : null);
+// The log lines of check.yml's "run the command" step. 2026-10-24: GitHub served jobs with no steps, so
+// `gh run view --log` named every line "UNKNOWN STEP" and every run read as "no command output"; the step
+// is then found by its script's first line (`case "$CMD" in`) up to the next step or the job cleanup.
+export const commandLines = (log) => {
+  const lines = log.split("\n");
+  const named = lines.filter((l) => l.includes("\trun the command\t"));
+  if (named.length) return named;
+  const start = lines.findIndex((l) => l.includes('##[group]Run case "$CMD" in'));
+  if (start < 0) return [];
+  const end = lines.findIndex((l, i) => i > start && (l.includes("##[group]Run ") || /Z Post job cleanup\./.test(l)));
+  return lines.slice(start, end < 0 ? lines.length : end);
+};
 // Wait for the run of a job until it completes or the call's budget (counted from the start of this process) ends.
 // Returns { code, retry?, why?, noTests? }; code 3 = still running (the branch and job file stay).
 const settle = async (job, budgetMs) => {
@@ -572,21 +712,24 @@ const settle = async (job, budgetMs) => {
       console.log(`[${lapOf(job)}] STILL RUNNING on the runner, not a failure (${job.cmd}). Do other work, then run: node tools/gh-check.mjs --wait ${job.id}`);
       return { code: 3 };
     }
-    await sleep(10_000);
+    await sleep(POLL_MS);
     try {
-      const list = JSON.parse(run("gh", ["run", "list", "-R", PUBLIC_REPO, "--workflow", "check.yml", "--branch", job.id, "--json", "databaseId,status,conclusion", "-L", "1"]) || "[]");
-      lost = 0; last = list[0] ?? null; job.rid = last?.databaseId ?? job.rid;
+      last = runOf(job); lost = 0; job.rid = last?.databaseId ?? job.rid;
       if (last?.status === "completed") break;
-    } catch { lost++; }
+    } catch (e) { if (rateLimited(e)) await sleep(RATE_WAITS_MS[0]); else lost++; }
   }
   let log = ""; try { log = run("gh", ["run", "view", String(job.rid), "-R", PUBLIC_REPO, "--log"]); } catch (e) { log = String(e.stdout ?? ""); }
-  const mine = log.split("\n").filter((l) => l.includes("\trun the command\t")).map((l) => l.split("\t").slice(2).join("\t").replace(/^\S+Z\s/, "").replace(/\x1b\[[0-9;]*m/g, ""));
+  const mine = commandLines(log).map((l) => l.split("\t").slice(2).join("\t").replace(/^\S+Z\s/, "").replace(/\x1b\[[0-9;]*m/g, ""));
   const url = `https://github.com/${PUBLIC_REPO}/actions/runs/${job.rid}`;
   if (!mine.length || last.conclusion === "cancelled") { console.log(`[${lapOf(job)}] the runner gave no command output (${last.conclusion}; setup failed or the run was cancelled): ${url}`); return { code: 2, why: `run ${last.conclusion} with no command output`, retry: true }; }
   const tail = mine.slice(-70).join("\n");
   console.log(tail);
   const ok = last.conclusion === "success";
   console.log(`[${lapOf(job)}] ${ok ? "PASS" : "FAIL"} on the runner: ${job.cmd} (run ${url})`);
+  if (!ok && !job.only && !job.at) {
+    const dirty = dirtyErrorFiles(tail);
+    if (dirty.length) console.log(`note: the errors point at files that are uncommitted in the shared tree (${dirty.join(", ")}). If they are not yours, another AI is mid-edit: prove yours with node tools/gh-check.mjs --only <your,paths> ${job.cmd}`);
+  }
   const res = { code: ok ? 0 : 1, noTests: ok && /^cargo test /.test(job.cmd) && !/\s--no-run(?=\s|$)/.test(job.cmd) && testsRan(mine.join("\n")) === 0 };
   // Kept only when nothing the line builds changed while it ran (the key read again now).
   if (job.key && reuseKey(job.cmd, job.os ?? "ubuntu-latest") === job.key) keepResult(job.key, { ...res, where: job.os ?? "ubuntu-latest", cmd: job.cmd, url, tail: mine.slice(-30).join("\n") });
@@ -670,8 +813,9 @@ const pushWip = async (commit, id) => {
 // One fresh check: snapshot, push, dispatch, wait. A failure before the dispatch is { code: 2, retry: true }.
 // A kept result answers first; a live twin is joined instead of dispatched again.
 // only: build HEAD plus just these working-tree paths (others' unfinished files stay out); such a run is not kept.
-const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
-  const key = only ? null : reuseKey(cmd, os);
+// at: build that commit alone, no working-tree file (a bisect of a red test); such a run is not kept either.
+const startRemote = async (cmd, os, budgetMs, fresh = false, only = null, at = null) => {
+  const key = only || at ? null : reuseKey(cmd, os);
   if (key && !fresh) {
     const kept = keptResult(key);
     if (kept) { sayKept(kept, console.log); return { code: kept.code }; }
@@ -680,8 +824,8 @@ const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
   }
   if (!existsSync(gdir())) { console.log("no mirror clone yet: run node tools/farm.mjs once"); return { code: 2, why: "no mirror clone", retry: false }; }
   const rev = (...a) => run("git", ["rev-parse", ...a], { cwd: ROOT }).trim();
-  let full = rev("HEAD"), head = rev("--short", full);
-  const job = { id: newId(), cmd, os, key, head, startedAt: Date.now() };
+  let full = rev(at ? `${at}^{commit}` : "HEAD"), head = rev("--short", full);
+  const job = { id: newId(), cmd, os, key, head, startedAt: Date.now(), only: only ?? null, at: at ?? null };
   let pushed = false, res = { code: 2, retry: true };
   // Seconds per phase of the local half, printed once ([local 12s: fetch 3.0 base 4.1 ...]): where a slow call went.
   const laps = []; const lap = async (name, fn) => { const t0 = Date.now(); try { return await fn(); } finally { laps.push(`${name} ${((Date.now() - t0) / 1000).toFixed(1)}`); } };
@@ -695,11 +839,12 @@ const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
       tree = await lap("overlay", async () => withIndex(job.id, (env) => {
         const e = { ...process.env, ...env };
         run("git", ["--git-dir", gdir(), "read-tree", base], { env: e });
-        const lines = overlayLines(only);
+        const lines = at ? [] : overlayLines(only);
         if (only) console.log(`--only: HEAD ${head} plus ${lines.length} of your paths`);
         if (lines.length) run("git", ["--git-dir", gdir(), "update-index", "-z", "--add", "--replace", "--index-info"], { env: e, input: lines.map((l) => `${l}\0`).join("") });
         return run("git", ["--git-dir", gdir(), "write-tree"], { env: e }).trim();
       }));
+      if (at) break;
       const now = rev("HEAD"); if (now === full || again >= 2) break;
       console.log(`HEAD moved to ${now.slice(0, 9)} while the snapshot was built: again`); // the dirty files are judged against the new HEAD
       full = now; head = job.head = rev("--short", full);
@@ -708,9 +853,9 @@ const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
     const commit = await lap("commit", async () => { const parent = mirrorParent(); return run("git", ["--git-dir", gdir(), "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", `wip ${job.id} of ${head}: ${cmd}`], { env }).trim(); });
     await lap("push", () => pushWip(commit, job.id)); pushed = true;
     if (process.env.GH_CHECK_DRY) { lapLine(); console.log("GH_CHECK_DRY: pushed, not dispatched"); return { code: 2, why: "dry run", retry: false }; } // measures the local half without a GitHub run (use with --remote-only)
-    console.log(`[${lapOf(job)}] sent ${job.id} (HEAD ${head} + working tree) to the ${os} runner: ${cmd}`);
+    console.log(`[${lapOf(job)}] sent ${job.id} (${at ? `commit ${head} alone` : `HEAD ${head} + working tree`}) to the ${os} runner: ${cmd}`);
     // The os input only when it is not the default, so a mirror whose check.yml predates it still takes Linux lines.
-    try { await lap("dispatch", async () => run("gh", ["workflow", "run", "check.yml", "-R", PUBLIC_REPO, "--ref", job.id, "-f", `cmd=${cmd}`, ...(os === "ubuntu-latest" ? [] : ["-f", `os=${os}`])])); saveJob(job); lapLine(); }
+    try { await lap("dispatch", () => withRateRetry(async () => run("gh", ["workflow", "run", "check.yml", "-R", PUBLIC_REPO, "--ref", job.id, "-f", `cmd=${cmd}`, ...(os === "ubuntu-latest" ? [] : ["-f", `os=${os}`])]))); saveJob(job); lapLine(); }
     catch (e) { lapLine(); const why = whyLine(e); console.log(`dispatch failed (is check.yml on the mirror's main? run node tools/farm.mjs once): ${why}`); res = { code: 2, why: "dispatch failed", retry: true }; return res; }
     res = await settle(job, budgetMs);
     return res;
@@ -738,7 +883,8 @@ export const main = async (argv, env = process.env) => {
     const res = await waitRemote(a.wait, budgetMs);
     return job ? afterRemote({ res, cmd: job.cmd, mode: "auto", local: (c) => runLocal(c, console.log, { fresh: a.fresh }), say: console.log }) : res.code;
   }
-  if (!okCmd(a.cmd)) { console.log("refused: give one plain `cargo check|test|clippy ...` command, such as `node tools/gh-check.mjs cargo test -p engine-net --lib one_filter` (`node tools/gh-check.mjs --help` lists the flags)"); return 2; }
-  return route({ cmd: a.cmd, mode: a.only || env.GH_CHECK_DRY ? "remote" : a.mode, remote: (c, os) => startRemote(c, os, budgetMs, a.fresh, a.only), local: (c) => runLocal(c, console.log, { fresh: a.fresh }) });
+  if (!okCmd(a.cmd)) { console.log("refused: give one plain `cargo check|test|clippy ...` command, such as `node tools/gh-check.mjs cargo test -p engine-net --lib one_filter`, or one cargo mutants slice, such as `cargo mutants -p engine-core --shard 1/8` (`node tools/gh-check.mjs --help` lists the flags)"); return 2; }
+  if (isMutants(a.cmd) && a.mode === "local") { console.log("refused: cargo mutants never runs on this PC: drop --local (the slice goes to a GitHub runner)"); return 2; }
+  return route({ cmd: a.cmd, mode: a.only || a.at || env.GH_CHECK_DRY ? "remote" : a.mode, remote: (c, os) => startRemote(c, os, budgetMs, a.fresh, a.only, a.at), local: (c) => runLocal(c, console.log, { fresh: a.fresh }) });
 };
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main(process.argv.slice(2)).then((c) => process.exit(c));

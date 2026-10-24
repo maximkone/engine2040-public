@@ -16,7 +16,6 @@ static TEST_ALLOC: engine_core::alloc_probe::CountingAlloc =
 
 pub mod types;
 
-mod timing;
 
 pub mod window;
 
@@ -60,6 +59,18 @@ pub mod graph;
 /// Std-only; consumer is the TAA resolve through `post::TaaParams`.
 pub mod temporal;
 
+/// The arena's one armed LOD policy: a pixel-error table projected from the
+/// shipped distance bands, the live camera's field of view and frame height
+/// in the pick, and `E2040_LOD=bands` to switch back for comparison. Std-only.
+pub mod arena_lod;
+
+/// The planar ground-state map under the pit: blood and scuff stamps keep
+/// their mass through a 128-slot live pool and settle into a 1024 x 1024
+/// four-byte-per-texel map that outlives the pool. Std-only; consumer is the
+/// arena's gore and footfall stamps, and the forward floor pass uploads
+/// `GroundState::texels`.
+pub mod ground_state;
+
 /// The cooked height-grid terrain: integer millimetres in, one named mesh in
 /// meters out, posted as one draw-list node. Std-only.
 pub mod terrain;
@@ -72,6 +83,12 @@ pub mod quality;
 /// `shaders/forward.wgsl` `direct_light`. Consumers: `v1::MaterialUniform`,
 /// `Presenter::set_material_kind`, the game's per-part table.
 pub mod material_kind;
+
+/// RL51 sand and walls without a visible repeat: the CPU twin of the forward
+/// shader's hex-tiling grid, its PCG2D hash and its macro value noise, plus
+/// the `SurfaceDetail` word a stone mesh carries in its material uniform.
+/// Consumers: `Presenter::set_surface_detail`, the game's kit upload.
+pub mod hextile;
 
 /// LF8: the CPU twin of `forward.wgsl` `direct_light`'s per-kind branches,
 /// called by `v1::shade_pbr`. It imports `crate::v1`, so it rides the same
@@ -87,6 +104,7 @@ pub mod pipeline_warmup;
 /// and the fixed dither. The WGSL chunk is the source; this module is its
 /// Rust mirror, so the CPU oracle and the shader agree on the numbers.
 pub mod tonemap;
+pub mod display_grade;
 
 /// V1 forward-PBR receipt (R1): CPU rasterizer, behind the `v1` feature so
 /// the headless default stays std-only.
@@ -178,6 +196,11 @@ pub mod debug_draw;
 /// consumer is the RA2 executor, which feeds back `lod` into `prev_lod`.
 pub mod draw;
 
+/// Software Hi-Z occlusion for the tiers with no depth prepass (SW4): a
+/// 256x144 max-depth buffer, nine mips to one texel, AABB against the four
+/// parent texels. Std-only, no GPU call.
+pub mod occl_cpu;
+
 /// Draw-id target CPU contract: index to texel id plus readback tally.
 pub mod draw_id;
 
@@ -207,6 +230,19 @@ pub mod crowd_inst;
 /// the 4x4 Bayer keep rule with its WGSL mirror. Std-only; consumer is
 /// the `draw` LOD path, which binds `keep` per pixel next slice.
 pub mod lod_fade;
+
+/// Octahedral impostors, CPU half: direction <-> atlas UV, the 3 nearest
+/// baked views with weights, atlas layout under a byte budget and the
+/// screen-space LOD switch with hysteresis. Std-only; `shaders/impostor.wgsl`
+/// mirrors it, and the bake and draw passes under `present/` bind both.
+pub mod impostor;
+
+/// Octahedral impostor GPU half (RL64): bake a posed mesh into an albedo and
+/// normal atlas once, draw it as instanced camera-facing quads inside the
+/// forward pass. The CPU math is [`impostor`]; window build only.
+#[cfg(feature = "gpu")]
+#[path = "present/impostor_gpu.rs"]
+pub mod impostor_gpu;
 
 /// Wound paint budget queue: one paint list per character with a capped
 /// per-frame drain and oldest-map eviction. Std-only; the decal atlas bind
@@ -263,6 +299,12 @@ pub mod decals;
 #[cfg(feature = "gpu")]
 pub mod presenter_pick;
 
+/// The quarter-res screen-space flow field (SW41): one stable-fluids step on
+/// the CPU (curl, vorticity, divergence, 20 Jacobi pressure sweeps, gradient
+/// subtract, advect velocity then dye) that the WGSL pass must match. Std-only,
+/// view only.
+pub mod flow_field;
+
 /// Height fog + contact shadows live on the GPU (RL7): fog ramps from the
 /// bound RL4 day capture, contact pass for small details. Std-only;
 /// consumer is the WIN1 forward graph via `compile_fog_for_forward`.
@@ -272,6 +314,10 @@ pub mod fog;
 /// bind shape (RL3): bilateral upsample, CPU golden bytes, GPU submit
 /// refused until the RA1 bind groups land. Std-only.
 pub mod gtao;
+/// SW91: quarter-res sun shafts, the CPU parity oracle of `godray.wgsl`.
+pub mod godray;
+/// QA5: GTAO tier table (half on potato and web), half-res target sizing.
+pub mod gtao_half;
 /// PF2 capture manifest (RA8): adapter/driver/resolution+quality/scene
 /// digest, all four required. Std-only; consumer is PF2/Q1 captures.
 pub mod manifest;
@@ -478,6 +524,9 @@ pub mod twin_arena;
 /// GPU descriptors and the forward-pass sampling chunk behind `window`.
 /// Consumers: WIN1/ED1 material frame, Q1 chart.
 pub mod ibl;
+/// QL2: the white-furnace test of the rough-metal energy gain (test only).
+#[cfg(all(test, feature = "v1"))]
+mod metal_energy;
 
 /// The arena's own day sky as the live image-based light (replaces the photo
 /// studio HDRI the sand used to reflect: white softbox streaks, straight-edged
@@ -497,6 +546,14 @@ pub mod trail;
 #[cfg(feature = "gpu")]
 #[path = "present/trail_draw_gpu.rs"]
 pub mod trail_draw_gpu;
+
+/// Soft-depth seam of the blended sprite and ribbon passes: the depth bind group,
+/// the per-frame view-depth constants and the light the particle quads and the
+/// sword ribbon read, so neither slices through a body or the floor. Window
+/// build only.
+#[cfg(feature = "gpu")]
+#[path = "present/vfx_soft.rs"]
+pub mod vfx_soft;
 
 /// Ground-splat blood draw (FEEL5): the world-space splat field a fight leaves
 /// on the floor, staged and recorded by the window presenter. Window build
