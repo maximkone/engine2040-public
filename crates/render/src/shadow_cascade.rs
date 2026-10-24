@@ -606,6 +606,76 @@ pub fn cascade_map_size(cascade: usize) -> Result<u32, CascadeError> {
         })
 }
 
+/// Sun depth cadence: which cascades re-render on a frame, and the light
+/// matrix each cascade's map was last drawn with.
+///
+/// A cascade is due when its period divides the frame or its light matrix
+/// differs from the one its map was drawn with. A skipped cascade keeps the
+/// matrix stored by its last render, so the stored matrix and the depth layer
+/// on the GPU never disagree: the forward pass transforms with the matrix the
+/// map was built from, never with a newer one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CascadeCadence {
+    /// Frame period per cascade, near to far; `0` reads as `1` so a bad row
+    /// never freezes a map.
+    pub period: [u8; 3],
+    /// Light matrix per cascade at its last render; `None` before the first.
+    last: [Option<[[f32; 4]; 4]>; 3],
+}
+
+impl CascadeCadence {
+    /// Cadence over `period` with nothing drawn yet.
+    #[must_use]
+    pub const fn new(period: [u8; 3]) -> Self {
+        Self {
+            period,
+            last: [None; 3],
+        }
+    }
+
+    /// Cadence for a quality row: the tier's [`cascade_periods`] knob.
+    ///
+    /// [`cascade_periods`]: crate::quality::cascade_periods
+    #[must_use]
+    pub const fn from_knobs(k: &crate::quality::Knobs) -> Self {
+        Self::new(crate::quality::cascade_periods(k))
+    }
+
+    /// True when `cascade` must re-render this frame, either because the frame
+    /// is on its period or because `light_view_proj` moved since its last
+    /// render. A due cascade records `light_view_proj`; a skipped one keeps
+    /// the matrix its map was drawn with. Out-of-range cascades read false.
+    pub fn due(&mut self, frame: u64, cascade: usize, light_view_proj: &[[f32; 4]; 4]) -> bool {
+        let (Some(slot), Some(&raw_period)) =
+            (self.last.get_mut(cascade), self.period.get(cascade))
+        else {
+            return false;
+        };
+        let period = u64::from(raw_period.max(1));
+        let moved = slot.as_ref() != Some(light_view_proj);
+        if frame.is_multiple_of(period) || moved {
+            *slot = Some(*light_view_proj);
+            return true;
+        }
+        false
+    }
+
+    /// Force every cascade on its next [`due`] (sun move, resize, quality
+    /// change): the maps no longer match what was drawn.
+    ///
+    /// [`due`]: CascadeCadence::due
+    pub fn force_all(&mut self) {
+        self.last = [None; 3];
+    }
+
+    /// Matrix `cascade`'s map was last drawn with; `None` before its first
+    /// render. The forward pass must shade with exactly this matrix.
+    #[must_use]
+    pub fn drawn_with(&self, cascade: usize) -> Option<&[[f32; 4]; 4]> {
+        self.last.get(cascade).and_then(Option::as_ref)
+    }
+}
+
 /// Day-sweep probe input: one sun elevation over the arena range.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DayProbe {
@@ -750,6 +820,88 @@ mod tests {
         // Pinned blend values for near 0.5 far 120 lambda 0.5.
         assert!((splits[0] - 21.72).abs() < 0.05, "near split {}", splits[0]);
         assert!((splits[1] - 49.73).abs() < 0.05, "mid split {}", splits[1]);
+    }
+
+    /// A steady sun matrix: nothing moves, so only the period decides.
+    fn steady_vp() -> [[f32; 4]; 4] {
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.5, 0.0],
+            [0.0, 0.0, 0.5, 1.0],
+        ]
+    }
+
+    #[test]
+    fn cascade_cadence_skips_a_steady_far_cascade() {
+        // Potato row: near every frame, mid every second, far every fourth.
+        let mut cadence = CascadeCadence::new([1, 2, 4]);
+        let vp = steady_vp();
+        let mut draws = [0u32; 3];
+        for frame in 0..4u64 {
+            for (cascade, drawn) in draws.iter_mut().enumerate() {
+                if cadence.due(frame, cascade, &vp) {
+                    *drawn += 1;
+                }
+            }
+        }
+        assert_eq!(draws, [4, 2, 1], "periods [1,2,4] over frames 0..4");
+        // The skipped cascades still hold the matrix their maps were drawn with.
+        for cascade in 0..3 {
+            assert_eq!(cadence.drawn_with(cascade), Some(&vp));
+        }
+    }
+
+    #[test]
+    fn cascade_cadence_renders_when_the_matrix_moves() {
+        let mut cadence = CascadeCadence::new([1, 2, 4]);
+        let still = steady_vp();
+        let mut moved = still;
+        moved[3][0] = 1.0;
+        // First draw always happens (no history yet), even off period.
+        assert!(cadence.due(1, 2, &still), "first draw of cascade 2");
+        // Same matrix on an off period is skipped.
+        assert!(!cadence.due(2, 2, &still), "cascade 2 is not due at 2");
+        // A moved light matrix renders even though the period does not divide.
+        assert!(cadence.due(3, 2, &moved), "a moved matrix renders at 3");
+        assert_eq!(cadence.drawn_with(2), Some(&moved));
+        // And the stored matrix stays the moved one while it is skipped again.
+        assert!(
+            !cadence.due(3, 2, &moved),
+            "same moved matrix stays skipped"
+        );
+        assert_eq!(cadence.drawn_with(2), Some(&moved), "map and matrix agree");
+    }
+
+    #[test]
+    fn cascade_cadence_high_tier_renders_every_frame() {
+        use crate::quality::{cascade_periods, knobs, Quality};
+        let high = knobs(Quality::High);
+        assert_eq!(
+            high.shadow_update_period,
+            [1, 1, 1],
+            "high row is every frame"
+        );
+        assert_eq!(cascade_periods(&high), [1, 1, 1], "the knob reads back");
+        assert_eq!(
+            cascade_periods(&knobs(Quality::Potato)),
+            [1, 2, 4],
+            "the potato row pays the far cascades less often"
+        );
+        let mut cadence = CascadeCadence::from_knobs(&high);
+        assert_eq!(cadence.period, [1, 1, 1]);
+        let vp = steady_vp();
+        for frame in 0..3u64 {
+            for cascade in 0..3 {
+                assert!(cadence.due(frame, cascade, &vp), "frame {frame}");
+            }
+        }
+        // force_all drops the history: the next frame re-renders every cascade.
+        cadence.force_all();
+        for cascade in 0..3 {
+            assert_eq!(cadence.drawn_with(cascade), None);
+            assert!(cadence.due(7, cascade, &vp), "forced cascade {cascade}");
+        }
     }
 
     #[test]
@@ -967,6 +1119,67 @@ mod tests {
         assert!(w[0] > 0.0 && w[1] > 0.0, "seam {w:?}");
         let deep = cascade_blend_weight(500.0, ranges);
         assert_eq!(deep, [0.0, 0.0, 1.0]);
+    }
+
+    /// QA4: the arena camera's sun split table, printed so a look check reads
+    /// it (`cargo test -p engine-render --lib shadow_cascade -- --nocapture`).
+    /// The arena day rig runs the practical split at [`CASCADE_LAMBDA`] 0.5
+    /// over the camera's own near/far, three overlap-aware intervals by
+    /// [`SUN_CASCADES`]; every row prints and pins, so a drifted split shows in
+    /// the log as a diff instead of a swim on the sand.
+    #[test]
+    fn the_arena_camera_prints_its_practical_split_table() {
+        use crate::arena_day::{
+            arena_day_cascades, ARENA_DAY_CASCADE_FAR_M, ARENA_DAY_CASCADE_NEAR_M,
+        };
+        let (near, far) = (ARENA_DAY_CASCADE_NEAR_M, ARENA_DAY_CASCADE_FAR_M);
+        let splits = checked_splits(near, far).expect("the arena range passes");
+        eprintln!(
+            "arena sun: cascades={SUN_CASCADES} lambda={CASCADE_LAMBDA} near={near} m far={far} m"
+        );
+        eprintln!(
+            "practical thirds: {:.3} m, {:.3} m, {:.3} m (first far {} m, then x{:.4})",
+            splits[0],
+            splits[1],
+            splits[2],
+            FIRST_CASCADE_FAR_M,
+            (far / FIRST_CASCADE_FAR_M).powf(0.5)
+        );
+        let (ranges, maps) = arena_day_cascades().expect("the arena rig's range passes");
+        for (index, (range, map)) in ranges.iter().zip(maps).enumerate() {
+            eprintln!(
+                "  cascade {index}: near {:.3} m far {:.3} m overlap {:.3} m map {map} px",
+                range.near_m,
+                range.far_m,
+                range.far_m - range.near_m
+            );
+        }
+        // Pinned practical values (the same two `splits_pinned_as_data` holds).
+        assert!((splits[0] - 21.72).abs() < 0.05, "near split {}", splits[0]);
+        assert!((splits[1] - 49.73).abs() < 0.05, "mid split {}", splits[1]);
+        assert_eq!(splits[2], far, "the last split is the camera far");
+        // The intervals the frame actually samples: geometric far edges from
+        // the first far, each later cascade opening 20 percent inside.
+        assert_eq!(ranges.len(), SUN_CASCADES);
+        assert!((ranges[0].far_m - 10.0).abs() < 0.05, "{}", ranges[0].far_m);
+        assert!(
+            (ranges[1].far_m - 34.641).abs() < 0.05,
+            "{}",
+            ranges[1].far_m
+        );
+        assert_eq!(ranges[2].far_m, far);
+        assert_eq!(ranges[0].near_m, near);
+        assert!(
+            (ranges[1].near_m - 8.0).abs() < 0.05,
+            "{}",
+            ranges[1].near_m
+        );
+        assert!(
+            (ranges[2].near_m - 27.713).abs() < 0.05,
+            "{}",
+            ranges[2].near_m
+        );
+        assert_eq!(maps, [512, 256, 128], "one map edge per cascade");
     }
 
     #[test]

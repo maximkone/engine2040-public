@@ -870,6 +870,11 @@ pub fn build_uniforms_with_view_proj(
 
 /// Build only the material uniform; camera plus light come from the
 /// once-per-frame pack, so per-draw work skips view math and light checks.
+///
+/// Window lane only: every caller is the per-draw pack in
+/// `present/gpu_present/{live,submit}.rs`, so a `v1`-without-`gpu` build has
+/// no user and must not carry it (LF8 uniform seam).
+#[cfg(feature = "window")]
 pub(crate) fn build_material(material: &PbrMaterial) -> Result<MaterialUniform, UniformError> {
     material.validate().map_err(UniformError::Material)?;
     Ok(MaterialUniform {
