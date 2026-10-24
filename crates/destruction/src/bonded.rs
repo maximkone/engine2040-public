@@ -13,9 +13,13 @@ use engine_core::Fnv64;
 
 pub use crate::bake3d::Chunk3;
 pub use blast::MAX_BLAST_RADIUS_MM;
+pub use sag::{SagRules, MAX_OVERLOAD_RATE, MAX_SAG_TICKS, SAG_Q16_ONE};
 
 /// An authority explosion applied as impacts through the same bond rule.
 mod blast;
+/// Staged collapse: links sag under overload and unsupported clusters hang
+/// a few ticks before they fall. Opt-in; off by default.
+mod sag;
 /// Canonical snapshot bytes and restore of the moving state (rollback resim).
 mod snapshot;
 
@@ -196,6 +200,8 @@ pub enum BreakError {
     BadImpulse,
     /// Blast radius zero or past `MAX_BLAST_RADIUS_MM`, or a center outside the world.
     BadBlast,
+    /// Sag rules with a stage past `MAX_SAG_TICKS`, or the link rule on with no stress ticks.
+    BadSag,
     /// Snapshot bytes are truncated, versioned wrong, of another shape,
     /// non-finite or trailing.
     BadSnapshot,
@@ -213,6 +219,7 @@ impl core::fmt::Display for BreakError {
             BreakError::BadStrain => write!(f, "strain amount is out of bounds"),
             BreakError::BadImpulse => write!(f, "impact impulse is out of bounds"),
             BreakError::BadBlast => write!(f, "blast radius or center is out of bounds"),
+            BreakError::BadSag => write!(f, "sag rules are out of bounds"),
             BreakError::BadSnapshot => write!(f, "bonded snapshot bytes are not valid"),
         }
     }
@@ -267,6 +274,8 @@ pub struct BondedCollection {
     capacity_q16: u64,
     /// Chunks failing in the current wave; pre-sized scratch.
     wave_scratch: Vec<usize>,
+    /// Staged-collapse state; `None` (the default) keeps the plain step.
+    sag: Option<Box<sag::SagState>>,
 }
 
 impl BondedCollection {
@@ -306,6 +315,7 @@ impl BondedCollection {
             layer: vec![NO_LAYER; n],
             capacity_q16: 0,
             wave_scratch: Vec::with_capacity(n),
+            sag: None,
         };
         field.flood_loads();
         Ok(field)
@@ -464,6 +474,9 @@ impl BondedCollection {
         self.refresh_support(self.tick);
         if self.capacity_q16 != 0 {
             self.fail_overloaded(self.tick);
+        }
+        if self.sag.is_some() {
+            self.advance_sag(self.tick);
         }
         let (chunks, vel) = (&mut self.chunks, &mut self.vel);
         for i in 0..chunks.len() {
@@ -707,6 +720,8 @@ impl BondedCollection {
             return Err(BreakError::BadChunk(chunk));
         }
         let mut copy = self.clone();
+        // The forecast is the eventual outcome: no hang delay, no link stress.
+        copy.sag = None;
         copy.sever_chunk(chunk, self.tick)?;
         // Each wave fails at least one chunk, so the waves end within n.
         for _ in 0..copy.chunks.len() {
@@ -824,8 +839,9 @@ impl BondedCollection {
     /// [`Self::work_scratch`] list, so steady refreshes allocate nothing.
     fn refresh_support(&mut self, tick: u32) {
         self.flood_loads();
+        let defer = self.defers_free();
         for i in 0..self.chunks.len() {
-            if !self.support_scratch[i] && !self.freed[i] {
+            if !self.support_scratch[i] && !self.freed[i] && !defer {
                 self.freed[i] = true;
                 self.dynamic[i] = true;
                 self.log.push(BreakEvent::ChunkFreed {
