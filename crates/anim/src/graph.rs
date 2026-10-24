@@ -17,6 +17,21 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct NodeId(pub u32);
 
+/// Largest input count of one [`NodeKind::IndexBlend`].
+pub const MAX_INDEX_INPUTS: usize = 4;
+
+/// One input of an index-selected blend: the value that selects it and the
+/// weight it takes when live.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IndexedInput {
+    /// Selection value this input answers to.
+    pub index: u8,
+    /// Pose source, evaluated before the blend.
+    pub node: NodeId,
+    /// Mix weight, unitless `0..=1`.
+    pub weight: f32,
+}
+
 /// Graph node kinds as data. Weights are unitless `0..=1` blends.
 #[derive(Clone, Debug)]
 pub enum NodeKind {
@@ -32,23 +47,35 @@ pub enum NodeKind {
     },
     /// Pass `source` through, firing track `track` events on the eval tick.
     Emit { source: NodeId, track: u32 },
+    /// Mix the inputs whose `index` equals `selector` by their own weights.
+    /// A selector no input answers keeps the first input, so a stale index
+    /// never blanks a frame.
+    IndexBlend {
+        inputs: [IndexedInput; MAX_INDEX_INPUTS],
+        selector: u8,
+    },
 }
 
 impl NodeKind {
     /// Direct dependencies; eval reads these before the node itself.
-    fn deps(&self) -> [Option<NodeId>; 2] {
+    fn deps(&self) -> [Option<NodeId>; MAX_INDEX_INPUTS] {
         match *self {
-            NodeKind::Clip { .. } => [None, None],
-            NodeKind::Blend { a, b, .. } => [Some(a), Some(b)],
-            NodeKind::Layer { base, over, .. } => [Some(base), Some(over)],
-            NodeKind::Emit { source, .. } => [Some(source), None],
+            NodeKind::Clip { .. } => [None; MAX_INDEX_INPUTS],
+            NodeKind::Blend { a, b, .. } => [Some(a), Some(b), None, None],
+            NodeKind::Layer { base, over, .. } => [Some(base), Some(over), None, None],
+            NodeKind::Emit { source, .. } => [Some(source), None, None, None],
+            NodeKind::IndexBlend { inputs, .. } => inputs.map(|input| Some(input.node)),
         }
     }
 
-    /// Blend/layer weight, if the kind carries one.
+    /// Blend/layer weight, or the first non-finite indexed input weight.
     fn weight(&self) -> Option<f32> {
         match *self {
             NodeKind::Blend { weight, .. } | NodeKind::Layer { weight, .. } => Some(weight),
+            NodeKind::IndexBlend { inputs, .. } => inputs
+                .iter()
+                .map(|input| input.weight)
+                .find(|w| !w.is_finite()),
             NodeKind::Clip { .. } | NodeKind::Emit { .. } => None,
         }
     }
@@ -498,6 +525,16 @@ fn kinds_equal(left: &NodeKind, right: &NodeKind) -> bool {
                 track: t1,
             },
         ) => s0 == s1 && t0 == t1,
+        (
+            NodeKind::IndexBlend {
+                inputs: i0,
+                selector: s0,
+            },
+            NodeKind::IndexBlend {
+                inputs: i1,
+                selector: s1,
+            },
+        ) => s0 == s1 && i0 == i1,
         _ => false,
     }
 }
@@ -754,6 +791,9 @@ impl Evaluator {
                 NodeKind::Emit { source, track } => {
                     self.eval_emit(slot, source, track, events, tick, fired)?;
                 }
+                NodeKind::IndexBlend { inputs, selector } => {
+                    self.eval_index_blend(slot, &inputs, selector)?;
+                }
             }
         }
         let Some(root) = self.root else {
@@ -764,6 +804,59 @@ impl Evaluator {
             .copy_from_slice(&self.slots[root_slot].positions);
         out.rotations
             .copy_from_slice(&self.slots[root_slot].rotations);
+        Ok(())
+    }
+
+    /// Mix the live indexed inputs into `slot`: those whose `index` matches
+    /// `selector`, each by its own weight, in authored order so two runs pick
+    /// the same poses. No match keeps the first input.
+    fn eval_index_blend(
+        &mut self,
+        slot: usize,
+        inputs: &[IndexedInput; MAX_INDEX_INPUTS],
+        selector: u8,
+    ) -> Result<(), GraphError> {
+        let mut live = [(0usize, 0.0f32); MAX_INDEX_INPUTS];
+        let mut live_count = 0;
+        let mut first = 0;
+        for (which, input) in inputs.iter().enumerate() {
+            let source = self.slot_of(input.node)?;
+            if source >= slot {
+                return Err(GraphError::UnknownRef {
+                    node: self.plan[slot].name.clone(),
+                    missing: input.node,
+                });
+            }
+            if which == 0 {
+                first = source;
+            }
+            if input.index == selector {
+                live[live_count] = (source, clamp01(input.weight));
+                live_count += 1;
+            }
+        }
+        let (head, tail) = self.slots.split_at_mut(slot);
+        let dest = &mut tail[0];
+        if live_count == 0 {
+            dest.positions.copy_from_slice(&head[first].positions);
+            dest.rotations.copy_from_slice(&head[first].rotations);
+            return Ok(());
+        }
+        let (start, mut total) = live[0];
+        dest.positions.copy_from_slice(&head[start].positions);
+        dest.rotations.copy_from_slice(&head[start].rotations);
+        for &(source, weight) in live.iter().take(live_count).skip(1) {
+            total += weight;
+            let share = if total > 0.0 { weight / total } else { 0.0 };
+            let over = &head[source];
+            for joint in 0..dest.positions.len() {
+                for lane in 0..3 {
+                    dest.positions[joint][lane] +=
+                        (over.positions[joint][lane] - dest.positions[joint][lane]) * share;
+                }
+                dest.rotations[joint] = nlerp(dest.rotations[joint], over.rotations[joint], share);
+            }
+        }
         Ok(())
     }
 }
@@ -2047,5 +2140,121 @@ mod tests {
             heap.calls, 0,
             "eval path must not allocate per tick after warmup"
         );
+    }
+
+    /// Three clips ten units apart on the sand lane, so a mix is readable.
+    fn bank_three() -> ClipBank {
+        let mut bank = bank_two();
+        bank.insert(12, pose([8.0, 0.0, 0.0], [10.0, 0.0, 0.0]))
+            .unwrap();
+        bank
+    }
+
+    /// One index-blend node over clips 10/11/12 at the authored inputs, rooted
+    /// at the blend; returns the pose it produced.
+    fn indexed_out(selector: u8, inputs: [IndexedInput; MAX_INDEX_INPUTS]) -> Pose {
+        let mut graph = AnimGraph::new();
+        graph.add(1, "front", NodeKind::Clip { clip: 10 });
+        graph.add(2, "heavy", NodeKind::Clip { clip: 11 });
+        graph.add(3, "down", NodeKind::Clip { clip: 12 });
+        graph.add(4, "pick", NodeKind::IndexBlend { inputs, selector });
+        let compiled = graph.compile(NodeId(4)).unwrap();
+        let mut eval = Evaluator::new();
+        eval.prepare(&graph, &compiled, 2).unwrap();
+        let mut out = Pose::zero(2);
+        let mut fired = Vec::new();
+        eval.eval(
+            &bank_three(),
+            &EventBank::new(),
+            0,
+            16,
+            &mut out,
+            &mut fired,
+        )
+        .unwrap();
+        out
+    }
+
+    fn input(index: u8, node: u32, weight: f32) -> IndexedInput {
+        IndexedInput {
+            index,
+            node: NodeId(node),
+            weight,
+        }
+    }
+
+    #[test]
+    fn index_blend_selects_the_matching_input() {
+        let inputs = [
+            input(1, 1, 1.0),
+            input(2, 2, 1.0),
+            input(3, 3, 1.0),
+            input(1, 2, 1.0),
+        ];
+        // Selector 2 answers only clip 11, selector 3 only clip 12: the pose
+        // is that clip exactly, never a mix with its neighbours.
+        assert_eq!(indexed_out(2, inputs).positions[0], [4.0, 0.0, 0.0]);
+        assert_eq!(indexed_out(3, inputs).positions[1], [10.0, 0.0, 0.0]);
+        assert_eq!(indexed_out(2, inputs).rotations, vec![IDENTITY, IDENTITY]);
+    }
+
+    #[test]
+    fn index_blend_weights_two_inputs_of_one_index() {
+        // Two inputs answer selector 1 at a quarter and three quarters: the
+        // pose is that mix, hand-rolled on the sand lane.
+        let inputs = [
+            input(1, 1, 0.25),
+            input(1, 3, 0.75),
+            input(2, 2, 1.0),
+            input(0, 1, 1.0),
+        ];
+        let out = indexed_out(1, inputs);
+        assert!(
+            (out.positions[0][0] - 6.0).abs() < 1e-5,
+            "{:?}",
+            out.positions[0]
+        );
+        assert!(
+            (out.positions[1][0] - 8.0).abs() < 1e-5,
+            "{:?}",
+            out.positions[1]
+        );
+    }
+
+    #[test]
+    fn index_blend_keeps_the_first_input_when_no_index_matches() {
+        let inputs = [
+            input(7, 3, 1.0),
+            input(8, 2, 1.0),
+            input(9, 1, 1.0),
+            input(9, 1, 1.0),
+        ];
+        let out = indexed_out(4, inputs);
+        let again = indexed_out(4, inputs);
+        assert_eq!(out.positions[0], [8.0, 0.0, 0.0], "the first input stands");
+        assert_eq!(out.positions, again.positions, "x2 equal");
+    }
+
+    #[test]
+    fn index_blend_refuses_a_non_finite_input_weight() {
+        let mut graph = AnimGraph::new();
+        graph.add(1, "a", NodeKind::Clip { clip: 10 });
+        graph.add(
+            2,
+            "pick",
+            NodeKind::IndexBlend {
+                inputs: [
+                    input(1, 1, 1.0),
+                    input(1, 1, f32::NAN),
+                    input(0, 1, 1.0),
+                    input(0, 1, 1.0),
+                ],
+                selector: 1,
+            },
+        );
+        assert!(matches!(
+            graph.compile(NodeId(2)).unwrap_err(),
+            GraphError::BadWeight { .. }
+        ));
     }
 }
