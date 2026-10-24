@@ -16,7 +16,7 @@
 //! output, written once per tick from that authority, so a column never
 //! feeds the step back.
 //!
-//! Checkpoints: [`hash_state_with_sim`](crate::hash_state_with_sim) over the
+//! Checkpoints: `hash_state_with_sim` over the
 //! legacy shapes (the "translate back" rule), so the legacy golden path is
 //! untouched and the spine path compares against it tick for tick. The
 //! rules, spear and height folds follow the legacy chain, and a non-empty

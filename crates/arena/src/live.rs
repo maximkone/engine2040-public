@@ -124,7 +124,7 @@ pub struct LiveTick<'a> {
 /// One fighter's combat-depth poise, read from the meter: the points left,
 /// the meter's cap and whether it is holding a stagger trip.
 ///
-/// Data owner: this crate's [`DepthSet`]. Units: poise points against the
+/// Data owner: this crate's [`DepthSet`](engine_combat::depth::DepthSet). Units: poise points against the
 /// meter's own cap (100 under the shipped v2 rows). Presentation only; the
 /// digest path never reads this, so the hash cannot move. Determinism
 /// scope: same-machine read of tick output, never hashed here.
@@ -496,7 +496,7 @@ impl LiveMatch {
 
     /// Arm one weapon row per fighter, in slot order, before the first tick
     /// (FEEL1b): [`Sim::arm_weapons`] over the shipped rows. The rows ride
-    /// [`MatchSpec`](crate::MatchSpec), so every peer of one spec arms the
+    /// [`MatchSpec`], so every peer of one spec arms the
     /// same list.
     ///
     /// # Errors
@@ -624,14 +624,14 @@ impl LiveMatch {
     /// Read-only combat-depth poise for `slot`: the meter's points, its cap
     /// and whether it is holding a stagger trip. `None` for a bad slot.
     /// Forwards to [`Sim::poise`](crate::Sim::poise), which owns the
-    /// per-slot [`DepthSet`]. No copy, no lock.
+    /// per-slot [`DepthSet`](engine_combat::depth::DepthSet). No copy, no lock.
     /// Presentation only; the digest path never reads this, so the hash
     /// cannot move. V1 meters stay full (never stagger); V2 meters drain on
     /// hits and chips and trip a stagger at zero.
     ///
     /// Consumer: the browser page (`crates/web/src/fight.rs`) paints the
     /// poise pips and names a poise break. Data owner: this crate's
-    /// [`DepthSet`]. Units: poise points against the meter's own cap.
+    /// [`DepthSet`](engine_combat::depth::DepthSet). Units: poise points against the meter's own cap.
     /// Determinism scope: same-machine read of tick output, never hashed here.
     #[must_use]
     pub fn poise(&self, slot: u8) -> Option<PoiseReading> {
@@ -860,7 +860,7 @@ impl LiveMatch {
     ///
     /// Std-only track: the `sim` leg cannot copy its live controllers out of
     /// a running match (they are not `Clone`), so it keeps the single-use
-    /// [`run_prefix`]/[`resume`] path. Snapshots carry no obstacle world, so
+    /// [`run_prefix`](crate::run_prefix)/[`resume`](crate::resume) path. Snapshots carry no obstacle world, so
     /// the resume runs the legacy open arena, exactly like
     /// [`resume`](crate::resume).
     #[cfg(not(feature = "sim"))]

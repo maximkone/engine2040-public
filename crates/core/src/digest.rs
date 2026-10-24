@@ -52,7 +52,7 @@ pub struct MerkleDigest {
 }
 
 impl MerkleDigest {
-    /// A tree over `leaves`, padded with [`EMPTY_LEAF`] up to a power of two
+    /// A tree over `leaves`, padded with `EMPTY_LEAF` up to a power of two
     /// wide: O(n), one allocation, here.
     pub fn from_leaves(leaves: &[u64]) -> Self {
         let width = leaves.len().max(1).next_power_of_two();

@@ -86,7 +86,7 @@ impl GymPhase {
 /// observation DTO. Data owner: the caller owns the returned values (fresh
 /// `Vec`). Units: meters for position, radians for yaw, permille for health,
 /// stamina points (`0..=100`), reward `0..=1`, meters per second for
-/// velocity. Observed only: nothing here feeds [`run`] checkpoints.
+/// velocity. Observed only: nothing here feeds [`run`](crate::run) checkpoints.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct GymFighterState {
     /// Fighter slot, `0..config.fighters`.
@@ -136,9 +136,9 @@ pub fn legal_mask_of(fight: &CombatFighter) -> [bool; GYM_NUM_ACTIONS] {
 
 /// Post-step snapshot for gym observers: tick count, digest and fighters.
 ///
-/// The digest equals the [`run`] final hash for the same config plus tape,
+/// The digest equals the [`run`](crate::run) final hash for the same config plus tape,
 /// so gym replays and `play.run` receipts agree. Observed only: nothing
-/// here feeds [`run`] checkpoints.
+/// here feeds [`run`](crate::run) checkpoints.
 #[derive(Clone, PartialEq, Debug)]
 pub struct GymSnapshot {
     /// Ticks simulated: the 1-indexed count `config.ticks`.

@@ -13,7 +13,7 @@
 //! tape inputs at that tick, never a bare hash.
 //!
 //! The authority hash is untouched: the five subsystem hashes below are
-//! diagnostic only and never feed [`Checkpoint`](super::Checkpoint). Byte
+//! diagnostic only and never feed [`Checkpoint`]. Byte
 //! layout mirrors the authority sections so a diverging system points at the
 //! real field family.
 //!
@@ -113,7 +113,7 @@ impl std::error::Error for SyncError {}
 
 /// One digest per fighter slot over that slot's own bytes, for the report
 /// that has to name the fighter. Diagnostics only: never folded into
-/// [`Checkpoint`](super::Checkpoint).
+/// [`Checkpoint`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SlotHashes {
     /// One digest per slot in fighter order; `None` past the fighter count.

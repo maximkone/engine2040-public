@@ -11,7 +11,7 @@
 //! module never touches a render camera, so replays stay camera-independent.
 //! Determinism: every query is a pure function over fixed [`BoundAction::ALL`]
 //! order; `pressed` slice order never affects the output. Errors reuse
-//! [`FighterError`](super::fighter::FighterError); invalid wishes/facing fail
+//! [`FighterError`]; invalid wishes/facing fail
 //! instead of clamping so bad callers are loud.
 
 use super::fighter::{Buttons, FighterError, FighterId, FighterInput, ATTACK, BLOCK, DODGE};
@@ -453,7 +453,7 @@ pub mod conditions {
         Chord,
     }
 
-    /// V2-only gesture bitset; never enters [`FighterInput`](super::fighter::FighterInput) bytes.
+    /// V2-only gesture bitset; never enters [`FighterInput`](crate::fighter::FighterInput) bytes.
     ///
     /// The tape keeps the v1 button bits only, so v1 bytes stay equal.
     /// Units: bit per [`GestureKind`] (see [`gesture_bit`]). Determinism:

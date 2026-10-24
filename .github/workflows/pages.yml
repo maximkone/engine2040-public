@@ -146,6 +146,17 @@ jobs:
       # engine-combat 48, engine-assets 43, engine-arena 21, engine-physfx 4, engine-core 2, engine-input 2.
       # Re-measure the total with this exact step and the `rustdoc warnings:` line it prints; turn the flag on the
       # day that line reads 0.
+      # TG10 (2026-10-24): four of those crates are now clean, each measured with `cargo doc -p <crate> --no-deps
+      # --locked` (physfx with `--features rapier`): engine-core 2 -> 0, engine-input 2 -> 0, engine-physfx 4 -> 0,
+      # engine-arena 21 -> 0. The total above is therefore 752 over the remaining 8 crates. The next step gates
+      # those four: it fails on any new warning, so a clean crate cannot regress while the rest burn down.
+      - name: rustdoc gate - the crates that are clean
+        shell: bash
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          set -euo pipefail
+          cargo doc --no-deps --lib --locked -p engine-core -p engine-input -p engine-arena -p engine-physfx --features engine-physfx/rapier
       - name: rustdoc for the crates a game author touches
         shell: bash
         env:

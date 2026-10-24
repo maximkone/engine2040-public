@@ -16,8 +16,8 @@ const MAX_IMPACT_RADIUS_MM: u32 = 5_000;
 const MAX_IMPACT_NS: u32 = 1_000;
 /// The body a blast impulse is quoted for, kilograms.
 pub(crate) const BLAST_REFERENCE_KG: f32 = 70.0;
-/// Largest blast momentum accepted, newton-seconds: [`MAX_SPEED`] on the
-/// [`BLAST_REFERENCE_KG`] reference body. The picture's loudest blast cue is
+/// Largest blast momentum accepted, newton-seconds: `MAX_SPEED` on the
+/// `BLAST_REFERENCE_KG` reference body. The picture's loudest blast cue is
 /// this same ceiling, so the two never drift.
 pub const MAX_BLAST_NS: u32 = 7_000;
 /// Longest flight accepted, ticks (20 s at 60 Hz): staying up longer needs a launch speed past

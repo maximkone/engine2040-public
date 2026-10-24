@@ -6,11 +6,11 @@
 //! beside the glTF kit. Data owner: this module owns the placement parse;
 //! [`MatchWorld`] owns collision. Units: meters, radians (yaw about +Y).
 //! Determinism: same bytes give the same sorted world and spawns; nothing
-//! here feeds the sim hash. Errors: typed [`KitError`], never panics.
+//! here feeds the sim hash. Errors: typed [`KitError`](crate::world::kit::KitError), never panics.
 //! Budget: one box per physical actor (6 on the shipped placement) parsed
 //! once at init; zero per-tick work.
 //!
-//! The armatura's drill post ([`PALUS_POST`]) is staged here too: a fixed
+//! The armatura's drill post ([`PALUS_POST`](crate::world::kit::PALUS_POST)) is staged here too: a fixed
 //! post with three marked targets. The game scores the drill against these
 //! mark heights, so the post and the scoring cannot drift.
 

@@ -2,12 +2,12 @@
 //! and a blow on plate deflects instead of cutting.
 //!
 //! [`Sim::wear_armour`] sets [`FighterState::worn`] per slot before the first
-//! tick, under rules v2 only. Resolving a landed blow ([`crate::authority`])
+//! tick, under rules v2 only. Resolving a landed blow (`crate::authority`)
 //! hands the victim's worn bits to the cut resolver: a blade whose edge
 //! reaches a plated joint (the lorica segmentata) is stopped there, and the
 //! match records one [`DeflectCue`] for it (presentation only, never hashed);
 //! every other blow resolves as before, with the worn bits as the joint's
-//! guard. Unworn matches never read a worn bit, and [`fold`] writes no bytes
+//! guard. Unworn matches never read a worn bit, and `fold` writes no bytes
 //! for them, so rules v1 and unarmoured v2 bouts keep every byte.
 
 use crate::{authority, FighterState, Sim, FIGHT_RULES_V2};

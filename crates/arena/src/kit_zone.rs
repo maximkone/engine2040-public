@@ -9,12 +9,12 @@
 //! Determinism: footprints are built once with `+ - * /`, `sqrt` and comparisons,
 //! colliders keep their cooked order, and the zone digest is cached at build, so the same
 //! cooked bytes always give the same footprints, pushes and digest. Errors:
-//! [`KitZoneError`], never a panic. Budget: build once at load; a resolve touches one
+//! [`KitZoneError`](crate::world::kit_zone::KitZoneError), never a panic. Budget: build once at load; a resolve touches one
 //! bounding-box test per footprint and allocates nothing.
 //!
 //! The fighter is a vertical capsule on the floor plane. A collider only matters where it
 //! meets the capsule's body, so each shape is cut to the band between the step height
-//! ([`STEP_M`]; the controller walks over anything lower) and the fighter's height
+//! ([`STEP_M`](crate::world::kit_zone::STEP_M); the controller walks over anything lower) and the fighter's height
 //! ([`crate::FIGHTER_HEIGHT_M`]; anything higher is walked under), then flattened to the
 //! floor plane. A convex hull becomes one solid convex footprint. A triangle mesh becomes
 //! one footprint per triangle: a roof or deck slice is a solid polygon, a wall face is a

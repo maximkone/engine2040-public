@@ -75,7 +75,7 @@ impl Fixed {
         Self(self.0.wrapping_sub(o.0))
     }
     /// Product rounded to the nearest 1/65536, ties away from zero, wrapping on overflow
-    /// (the `*` operator). See [`round_q16`].
+    /// (the `*` operator). See `round_q16`.
     pub fn wrapping_mul(self, o: Self) -> Self {
         Self(wrap_i128_to_i64(round_q16(
             i128::from(self.0) * i128::from(o.0),

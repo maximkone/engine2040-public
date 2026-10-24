@@ -290,7 +290,7 @@ impl MatchWorld {
 
     /// Move a circle from `from` (a valid, non-overlapping position) to `to`
     /// and resolve it against the obstacles: push out in canonical order for
-    /// [`PASSES`] passes, re-clamp to `+-limit`, and fall back to `from`
+    /// `PASSES` passes, re-clamp to `+-limit`, and fall back to `from`
     /// when a pinch cannot be solved. The result never overlaps.
     pub fn resolve(&self, from: [f32; 2], to: [f32; 2], radius: f32, limit: f32) -> [f32; 2] {
         let mut p = to;

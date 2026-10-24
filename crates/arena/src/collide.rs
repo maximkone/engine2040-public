@@ -12,7 +12,7 @@
 //! takes in a tick feeds that fighter's balance an impulse scaled by the
 //! push ([`PUSH_SHOVE_TABLE`]): a light blow holds the stance, a packed
 //! crowd staggers, and a hard shove drops the fighter. The shove lands only
-//! under rules v2 ([`ArenaRules::balance`]); rules v1 never runs the pass.
+//! under rules v2 ([`ArenaRules::balance`](crate::ArenaRules::balance)); rules v1 never runs the pass.
 //!
 //! Consumer: `Sim::step_with` under [`ArenaRules::collision`]
 //! (rules v2 turns it on; v1 never runs it). Data owner: the caller owns the
