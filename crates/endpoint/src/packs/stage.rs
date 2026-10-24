@@ -26,6 +26,13 @@ pub fn pack() -> Result<PackDef, PackError> {
         false,
     );
     add_stage_surface(&mut pack)?;
+    // SW145: one rendered still through the host renderer, idempotent per
+    // (tick, pose); a headless door refuses it by name.
+    pack.add(VerbSpec::of::<crate::photo_verb::PhotoShootTool>(
+        crate::photo_verb::VERB_PHOTO_SHOOT,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
     Ok(pack)
 }
 

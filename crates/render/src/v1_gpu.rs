@@ -28,11 +28,12 @@ use std::fmt;
 // `fs` into a linear HDR target and tone-maps in its blit pass.
 // ---------------------------------------------------------------------------
 
-/// The forward shader source: tonemap library plus `forward.wgsl`. Entry
-/// points: `vs`, `vs_skinned`, `vs_depth`, `vs_sky`, `fs`, `fs_sky`,
-/// `fs_display`, `fs_skinned`.
+/// The forward shader source: tonemap library, the dual-quaternion skin helpers (AM30, off until
+/// a frame sets `skin_params.dq`) and `forward.wgsl`. Entry points: `vs`, `vs_skinned`,
+/// `vs_depth`, `vs_sky`, `fs`, `fs_sky`, `fs_display`, `fs_skinned`.
 pub const FORWARD_PBR_WGSL: &str = concat!(
     include_str!("shaders/tonemap.wgsl"),
+    include_str!("shaders/skin_dual_quat.wgsl"),
     include_str!("shaders/forward.wgsl")
 );
 

@@ -20,8 +20,9 @@ use super::{MatchWorld, Obstacle, WorldError};
 
 /// Embedded placement table (`content/arena/placement.json`).
 pub const KIT_JSON: &str = include_str!("../../../content/arena/placement.json");
-/// Actors in the placement table.
-pub const KIT_ACTOR_COUNT: usize = 11;
+/// Actors in the placement table: the 11 arena actors plus the three SHOW4
+/// machines, which are `"physical": false`, so the world's boxes do not change.
+pub const KIT_ACTOR_COUNT: usize = 14;
 /// FPS duel spawns in the template map.
 pub const FPS_SPAWN_COUNT: usize = 2;
 /// Clamp half-extent for settling FPS spawns, meters.
@@ -302,7 +303,7 @@ mod tests {
         text
     }
 
-    /// The embedded placement stages 11 actors and parses 6 physical boxes
+    /// The embedded placement stages 14 actors and parses 6 physical boxes
     /// (the name counts the staged actors, the world holds the physical set).
     #[test]
     fn kit_parses_11_physical_obstacles() {
