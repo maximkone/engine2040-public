@@ -1304,6 +1304,25 @@ impl InspectorPanel {
     }
 }
 
+/// Feel knobs the tuning panel draws through the derived `Inspector`: a new
+/// knob is one field and its range, no panel code.
+#[cfg(feature = "inspector")]
+#[derive(engine_editor_derive::Inspector)]
+pub struct FeelTuning {
+    /// Camera-shake multiplier over the shipped pose.
+    #[inspector(min = 0.0, max = 2.0, step = 0.05, group = "feel")]
+    pub shake_scale: f32,
+    /// Hit-flash lift; 1.0 is the shipped look.
+    #[inspector(min = 0.0, max = 3.0, step = 0.05, group = "feel")]
+    pub flash_lift: f32,
+    /// Detune in cents; the audio mix owns it, so the panel never edits it.
+    #[inspector(group = "feel", readonly)]
+    pub pitch_variation: f32,
+    /// Not a knob: the panel skips it.
+    #[inspector(skip)]
+    pub revision: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
