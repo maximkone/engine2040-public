@@ -272,6 +272,42 @@ impl GpuTimer {
         }
     }
 
+    /// The newest resolved frame's device ms (forward, blit, sky, GTAO and particles summed) and
+    /// the count of frames resolved so far, which moves once per new sample; `None` before the
+    /// first. A few frames late by construction: the read never waits.
+    pub(crate) fn latest_total(&self) -> Option<(usize, f32)> {
+        let len = self.total.samples.len();
+        if len == 0 {
+            return None;
+        }
+        let at = if len < SAMPLE_CAP {
+            len - 1
+        } else {
+            self.total.next.wrapping_add(SAMPLE_CAP - 1) % SAMPLE_CAP
+        };
+        Some((self.total.next, *self.total.samples.get(at)?))
+    }
+
+    /// Start of the blit span only: the blit pass writes it and the upscale chain's last pass
+    /// closes the span with [`Self::blit_end_writes`], so the blit column then covers the whole
+    /// display chain (tone map, upscale, sharpen).
+    pub(crate) fn blit_begin_writes(&self) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.queries,
+            beginning_of_pass_write_index: Some(2),
+            end_of_pass_write_index: None,
+        }
+    }
+
+    /// End of the blit span only (see [`Self::blit_begin_writes`]).
+    pub(crate) fn blit_end_writes(&self) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.queries,
+            beginning_of_pass_write_index: None,
+            end_of_pass_write_index: Some(3),
+        }
+    }
+
     /// Timestamp writes for the own-pass sky.
     pub(crate) fn sky_writes(&self) -> wgpu::RenderPassTimestampWrites<'_> {
         wgpu::RenderPassTimestampWrites {

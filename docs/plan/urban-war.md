@@ -188,6 +188,10 @@ Donors: `steals.md`; porting policy is AGENTS rule 4.
 - One new package only: `games/urban` (second game proves public APIs).
 - Rome consumers: UW2–UW4 archers/pila, UW10 gates, UW12/UW20
   multi-storey insulae, UW15 gladiator surrender.
+- Insula floor plan (UW12/UW20, MJ2): authored as
+  `content/maps/rewrite/insula_block.rules` and baked by the `world.rewrite`
+  door, not hand-dressed. It is one 2D floor; 3D rules wait until a
+  multi-storey insula needs a second layer.
 - RoN-style first: hand-dressed maps + random rosters; UW21 houses double
   as "new house every run".
 - Not in Tier B: vehicles, large terrain, campaign, mirror-gun view,
