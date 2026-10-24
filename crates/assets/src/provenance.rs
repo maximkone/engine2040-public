@@ -4,7 +4,7 @@
 //! and the bundle release check. Data owner: `engine-assets`. Units: chars
 //! for field bounds. Determinism: slice order decides which gap is named;
 //! row encoding uses fixed key order, so the same records encode the same
-//! bytes twice. Errors: typed [`ProvenanceError`] with stable codes.
+//! bytes twice. Errors: typed [`ProvenanceError`](crate::provenance::ProvenanceError) with stable codes.
 //! Offline cook only, never the tick.
 
 #[cfg(test)]
