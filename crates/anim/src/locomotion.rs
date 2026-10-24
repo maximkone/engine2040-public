@@ -26,6 +26,7 @@
 use super::clip::{clamp01, TICK_DT};
 use super::contract::{Contact, ContactTable, Joint, LocalPose, RootDelta, Skeleton};
 use super::pose::blend_poses;
+use super::velocity_blend::{VelocityBlend, DEFAULT_HALF_LIFE_S};
 
 /// Idle below this wish speed (m/s).
 pub const IDLE_EPS: f32 = 0.05;
@@ -180,6 +181,8 @@ pub struct Locomotion {
     airborne: bool,
     interrupt_left: u32,
     interrupt_dur: u32,
+    /// Damped body-frame movement axes the presentation lean and roll read.
+    blend: VelocityBlend,
 }
 
 /// Fixed presentation skeleton: root, spine, head, leg_l, leg_r, arm_l,
@@ -372,6 +375,7 @@ impl Locomotion {
             airborne: false,
             interrupt_left: 0,
             interrupt_dur: 0,
+            blend: VelocityBlend::new(),
         }
     }
 
@@ -444,7 +448,7 @@ impl Locomotion {
     ) -> Result<LocoOutput, LocoError> {
         let wish = check_wish(wish_speed, wish_dir)?;
         let (root, emit) = self.advance(wish, tick, interrupt);
-        let (pose, contacts) = self.present(emit, &wish, tick);
+        let (pose, contacts) = self.present(emit, tick);
         Ok(LocoOutput {
             root,
             pose,
@@ -508,6 +512,14 @@ impl Locomotion {
         tick: u32,
         interrupt: Option<CombatInterrupt>,
     ) -> (RootDelta, TickEmit) {
+        // Presentation only: the lean and roll follow the damped axes of the
+        // previous tick's motion, which is a tick behind and invisible at
+        // 60 Hz. `RootDelta` never reads it.
+        self.blend.step(
+            VelocityBlend::target(self.body_velocity(&wish)),
+            DEFAULT_HALF_LIFE_S,
+            TICK_DT,
+        );
         if let Some(kind) = interrupt {
             self.interrupt_left = kind.duration_ticks();
             self.interrupt_dur = kind.duration_ticks();
@@ -563,22 +575,16 @@ impl Locomotion {
     /// (`state`, `phase`, `speed`, `facing`) plus the captured `emit`
     /// pre-decrement values, so outputs match the old per-branch emitters
     /// exactly. Allocates 3 vectors (positions, rotations, contacts).
-    fn present(&self, emit: TickEmit, wish: &Wish, tick: u32) -> (LocalPose, ContactTable) {
+    fn present(&self, emit: TickEmit, tick: u32) -> (LocalPose, ContactTable) {
         match emit {
             TickEmit::Interrupt { elapsed, dur } => {
                 let w = envelope_weight(elapsed, dur);
-                let base = self.base_pose(
-                    &Wish {
-                        speed: 0.0,
-                        dir: self.facing,
-                    },
-                    0.0,
-                );
+                let base = self.base_pose(0.0);
                 let pose = blend_poses(&base, &hit_pose(), w);
                 (pose, contacts_for_phase(self.phase, tick))
             }
             TickEmit::Air => {
-                let mut pose = self.base_pose(wish, self.speed);
+                let mut pose = self.base_pose(self.speed);
                 // Tuck: legs trail back, arms out. Pure offsets, no trig.
                 pose.positions[3] = [0.11, -0.88, -0.12];
                 pose.positions[4] = [-0.11, -0.88, -0.12];
@@ -587,18 +593,12 @@ impl Locomotion {
                 (pose, contacts_airborne(tick))
             }
             TickEmit::Land { dip } => {
-                let mut pose = self.base_pose(
-                    &Wish {
-                        speed: 0.0,
-                        dir: self.facing,
-                    },
-                    0.0,
-                );
+                let mut pose = self.base_pose(0.0);
                 pose.positions[0][1] -= dip;
                 (pose, contacts_planted(tick))
             }
             TickEmit::Ground => (
-                self.base_pose(wish, self.speed),
+                self.base_pose(self.speed),
                 contacts_for_phase(self.phase, tick),
             ),
         }
@@ -871,11 +871,20 @@ impl Locomotion {
         }
     }
 
+    /// Body-frame `[right, forward]` velocity (m/s) for the lean: the last
+    /// applied speed along the wish, split on the facing axes.
+    fn body_velocity(&self, wish: &Wish) -> [f32; 2] {
+        let f = self.facing;
+        let right = [f[1], -f[0]];
+        let v = [wish.dir[0] * self.speed, wish.dir[1] * self.speed];
+        [v[0] * right[0] + v[1] * right[1], v[0] * f[0] + v[1] * f[1]]
+    }
+
     /// Presentation pose for the current state/phase/speed on
     /// [`loco_skeleton`]. Triangle-wave limb swing, speed-scaled bob and
     /// lean, strafe roll, land/pivot crouch. Positions carry the motion;
     /// rotations stay near identity (small-angle lean/roll, normalized).
-    fn base_pose(&self, wish: &Wish, speed: f32) -> LocalPose {
+    fn base_pose(&self, speed: f32) -> LocalPose {
         let amp = (speed / RUN_MAX).clamp(0.0, 1.0);
         let swing = 0.26 * amp;
         let bob = match self.state {
@@ -903,10 +912,11 @@ impl Locomotion {
             LocoState::Pivot => 0.06,
             _ => 0.0,
         };
-        let lean = (speed * 0.022).clamp(0.0, 0.15);
-        let cross = self.facing[0] * wish.dir[1] - self.facing[1] * wish.dir[0];
+        // Lean into the damped forward speed and roll into the damped
+        // sideways one, so a stop or a turn eases instead of snapping.
+        let lean = (self.blend.forward() * RUN_MAX * 0.022).clamp(0.0, 0.15);
         let roll = if self.state == LocoState::Strafe {
-            (-cross * 0.12).clamp(-0.12, 0.12)
+            ((self.blend.right() - self.blend.left()) * 0.12).clamp(-0.12, 0.12)
         } else {
             0.0
         };
@@ -1766,5 +1776,48 @@ mod tests {
                 assert_eq!(peak_dyaw, 0.0, "{label} must not turn");
             }
         }
+    }
+
+    #[test]
+    fn locomotion_wire_loco_lean_and_roll_follow_the_damped_blend() {
+        // The live path: the look calls `update` once per presented tick.
+        let mut loco = Locomotion::new();
+        let mut running = None;
+        for tick in 0..90u32 {
+            running = Some(loco.update(RUN_MAX, [0.0, 1.0], tick, None).unwrap());
+        }
+        let leaning = running.unwrap().pose.rotations[1];
+        assert!(
+            leaning[0] > 0.05,
+            "a straight run leans the spine: {leaning:?}"
+        );
+
+        // Stopping eases the lean out over the half-life, never snapping.
+        let first = loco.update(0.0, [0.0, 1.0], 90, None).unwrap();
+        assert!(
+            first.pose.rotations[1][0] > 0.04,
+            "the tick after a stop still leans: {:?}",
+            first.pose.rotations[1]
+        );
+        let mut settled = first;
+        for tick in 91..150u32 {
+            settled = loco.update(0.0, [0.0, 1.0], tick, None).unwrap();
+        }
+        assert!(
+            settled.pose.rotations[1][0].abs() < 0.01,
+            "a second later the lean is gone: {:?}",
+            settled.pose.rotations[1]
+        );
+
+        // A pure sideways wish strafes: the spine rolls, it does not lean.
+        let mut strafing = Locomotion::new();
+        let mut rolled = None;
+        for tick in 0..90u32 {
+            rolled = Some(strafing.update(3.0, [1.0, 0.0], tick, None).unwrap());
+        }
+        let roll = rolled.unwrap().pose.rotations[1];
+        assert_eq!(strafing.state, LocoState::Strafe);
+        assert!(roll[2] > 0.05, "a right strafe rolls the spine: {roll:?}");
+        assert!(roll[0].abs() < 0.01, "a strafe does not lean: {roll:?}");
     }
 }
