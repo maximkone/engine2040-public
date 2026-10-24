@@ -37,8 +37,18 @@ export function checkSources(dir = SOURCES_DIR) {
     else if (!/\bCC0\b/.test(row.cells[2])) problems.push(`${id}: PROVENANCE licence cell has no CC0`);
     const files = readdirSync(join(dir, id));
     const images = files.filter((f) => IMAGE_RE.test(f));
-    for (const kind of ["Color", "Normal", "Roughness"]) {
-      if (!images.some((f) => f.toLowerCase().includes(kind.toLowerCase()))) problems.push(`${id}: no ${kind} image`);
+    // Each required lane accepts the Poly Haven name as well: `diff` is the
+    // colour map, `nor_gl` the OpenGL normal and `rough` the roughness map,
+    // so a set fetched under either convention passes (SW124 dense_sand).
+    const LANES = [
+      ["Color", ["color", "_diff_", "_diff.", "diff_"]],
+      ["Normal", ["normal", "nor_gl"]],
+      ["Roughness", ["roughness", "rough"]],
+    ];
+    for (const [kind, words] of LANES) {
+      if (!images.some((f) => words.some((w) => f.toLowerCase().includes(w)))) {
+        problems.push(`${id}: no ${kind} image`);
+      }
     }
     const lic = join(dir, id, "LICENCE.txt");
     if (!existsSync(lic) || !/\bCC0\b/.test(readFileSync(lic, "utf8"))) problems.push(`${id}: LICENCE.txt missing or no CC0`);
