@@ -52,6 +52,472 @@ pub fn pick_spawn(budget: &mut Budget, table: &[SpawnRow]) -> Option<String> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// PressureGauge (SW130): live pacing as integer permille, not a static ladder.
+//
+// PORT (ideas reimplemented, zero bytes vendored): zeljkovranjes
+// sbox-two-brain-director `Core/PressureDirector.cs` (Tick steps 4-6: gauge
+// fill/decrease, Normal->Aggressive, sweep end), `Core/PressureState.cs`
+// (FillSeconds 0.5..=600, DecreaseDelaySeconds 0..=600,
+// AggressiveThresholdProgression (0,1], MaxOpportunities 1..=100) and
+// `tests/.../GaugeFormulaTests.cs` (fill, delay, freeze, cooldown). MIT.
+//
+// Units: permille progression 0..=1000, milliseconds for every duration.
+// Determinism: integers only, no clock, no float, no allocation per tick, so
+// the same (latch, dt) tape replays the same mode, progression and reasons on
+// every machine. No shipped call site yet: a bout's director drives it (SW131).
+// ---------------------------------------------------------------------------
+
+/// Full progression, permille.
+pub const GAUGE_MAX: u32 = 1000;
+
+/// Most reasons the gauge remembers; older ones fall off the ring.
+pub const REASON_RING: usize = 8;
+
+/// Longest single step the gauge accepts, ms: a stalled frame never jumps the
+/// whole fill curve in one tick.
+pub const MAX_STEP_MS: u32 = 250;
+
+/// Where the gauge is in one bout, as a four-mode cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// No viable target and the gauge is at rest.
+    Relax,
+    /// A target is latched and the gauge is filling.
+    Build,
+    /// The aggressive threshold was reached: the gauge holds.
+    Peak,
+    /// The peak is over and the gauge decays through its cooldown.
+    Fade,
+}
+
+impl Mode {
+    /// Short name for reasons, logs and digests.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Relax => "relax",
+            Self::Build => "build",
+            Self::Peak => "peak",
+            Self::Fade => "fade",
+        }
+    }
+}
+
+/// Gauge knobs, clamped to the donor's ranges at construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GaugeConfig {
+    /// Time to approach full progression while latched, ms (500..=600_000).
+    pub fill_ms: u32,
+    /// Time to drain the whole gauge once past the grace, ms (1..=600_000).
+    pub decrease_ms: u32,
+    /// Grace after the latch is lost before any decay, ms (0..=600_000).
+    pub decrease_delay_ms: u32,
+    /// Progression that turns Build into Peak, permille (1..=1000).
+    pub aggressive_threshold: u32,
+    /// Most peaks one bout may have (1..=100).
+    pub max_peaks: u32,
+    /// Time after a peak during which the gauge never fills, ms (0..=600_000).
+    pub cooldown_ms: u32,
+    /// True when a peak holds the gauge instead of letting it keep filling.
+    pub freeze_during_peak: bool,
+}
+
+impl Default for GaugeConfig {
+    fn default() -> Self {
+        Self {
+            fill_ms: 2_000,
+            decrease_ms: 8_000,
+            decrease_delay_ms: 750,
+            aggressive_threshold: 700,
+            max_peaks: 3,
+            cooldown_ms: 4_000,
+            freeze_during_peak: true,
+        }
+    }
+}
+
+impl GaugeConfig {
+    /// The same knobs with every field inside the donor's range, so a caller
+    /// cannot ask for a zero-length fill or a hundred peaks.
+    pub fn clamped(self) -> Self {
+        Self {
+            fill_ms: self.fill_ms.clamp(500, 600_000),
+            decrease_ms: self.decrease_ms.clamp(1, 600_000),
+            decrease_delay_ms: self.decrease_delay_ms.clamp(0, 600_000),
+            aggressive_threshold: self.aggressive_threshold.clamp(1, GAUGE_MAX),
+            max_peaks: self.max_peaks.clamp(1, 100),
+            cooldown_ms: self.cooldown_ms.clamp(0, 600_000),
+            freeze_during_peak: self.freeze_during_peak,
+        }
+    }
+}
+
+/// Bounded ring of the gauge's own reason codes, oldest first.
+#[derive(Clone, Debug)]
+pub struct ReasonRing {
+    slots: [&'static str; REASON_RING],
+    len: usize,
+    next: usize,
+}
+
+impl Default for ReasonRing {
+    fn default() -> Self {
+        Self {
+            slots: [""; REASON_RING],
+            len: 0,
+            next: 0,
+        }
+    }
+}
+
+impl ReasonRing {
+    /// Every reason the ring still holds, oldest first.
+    pub fn iter(&self) -> impl Iterator<Item = &'static str> + '_ {
+        let len = self.len;
+        let start = if len == REASON_RING { self.next } else { 0 };
+        (0..len).map(move |offset| self.slots[(start + offset) % REASON_RING])
+    }
+
+    /// Newest reason, when the ring holds one.
+    pub fn newest(&self) -> Option<&'static str> {
+        if self.len == 0 {
+            return None;
+        }
+        Some(self.slots[(self.next + REASON_RING - 1) % REASON_RING])
+    }
+
+    /// True when the ring still holds this reason.
+    pub fn contains(&self, reason: &str) -> bool {
+        self.iter().any(|held| held == reason)
+    }
+
+    /// Reasons held, at most [`REASON_RING`].
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True when nothing was noted yet.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn push(&mut self, reason: &'static str) {
+        // A repeated reason adds no line twice in a row: a stuck latch must
+        // not flush a quota refusal out of the ring.
+        if self.newest() == Some(reason) {
+            return;
+        }
+        self.slots[self.next] = reason;
+        self.next = (self.next + 1) % REASON_RING;
+        self.len = (self.len + 1).min(REASON_RING);
+    }
+}
+
+/// Live pacing: integer permille progression that fills while a viable target
+/// is latched, holds through its grace, decays afterwards, freezes during a
+/// peak and caps how many peaks one bout may have.
+#[derive(Clone, Debug)]
+pub struct PressureGauge {
+    cfg: GaugeConfig,
+    progression: u32,
+    mode: Mode,
+    /// Ms since the latch was lost; 0 while latched.
+    since_lost_ms: u32,
+    peaks: u32,
+    cooldown_left_ms: u32,
+    reasons: ReasonRing,
+}
+
+impl PressureGauge {
+    /// Fresh gauge at rest under these knobs (clamped to their ranges).
+    pub fn new(cfg: GaugeConfig) -> Self {
+        Self {
+            cfg: cfg.clamped(),
+            progression: 0,
+            mode: Mode::Relax,
+            since_lost_ms: 0,
+            peaks: 0,
+            cooldown_left_ms: 0,
+            reasons: ReasonRing::default(),
+        }
+    }
+
+    /// Progression now, permille `0..=1000`.
+    pub fn progression(&self) -> u32 {
+        self.progression
+    }
+
+    /// Mode now.
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Peaks this bout has spent from its quota.
+    pub fn peaks(&self) -> u32 {
+        self.peaks
+    }
+
+    /// Peaks the quota allows.
+    pub fn max_peaks(&self) -> u32 {
+        self.cfg.max_peaks
+    }
+
+    /// The bounded reason ring, oldest first.
+    pub fn reasons(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.reasons.iter()
+    }
+
+    /// Advance one step: `latched` says a viable target is in play now, `dt_ms`
+    /// is the step length. Integer permille only.
+    pub fn tick(&mut self, latched: bool, dt_ms: u32) {
+        let dt = dt_ms.min(MAX_STEP_MS);
+        if latched {
+            self.since_lost_ms = 0;
+        } else if self.since_lost_ms == 0 {
+            self.reasons.push("latch_lost");
+            self.since_lost_ms = self.since_lost_ms.saturating_add(dt);
+        } else {
+            self.since_lost_ms = self.since_lost_ms.saturating_add(dt);
+        }
+        match self.mode {
+            Mode::Peak => self.tick_peak(latched, dt),
+            Mode::Fade => self.tick_fade(latched, dt),
+            Mode::Relax | Mode::Build => self.tick_build(latched, dt),
+        }
+    }
+
+    /// Peak: hold (or keep filling when the freeze is off) until the target is
+    /// lost, then hand over to the cooldown.
+    fn tick_peak(&mut self, latched: bool, dt: u32) {
+        if self.cfg.freeze_during_peak {
+            self.reasons.push("peak_frozen");
+        } else {
+            self.fill(dt);
+        }
+        if !latched {
+            self.mode = Mode::Fade;
+            self.cooldown_left_ms = self.cfg.cooldown_ms;
+            self.reasons.push("peak_end");
+        }
+    }
+
+    /// Fade: never fills while the cooldown runs; decays once past the grace.
+    fn tick_fade(&mut self, latched: bool, dt: u32) {
+        self.cooldown_left_ms = self.cooldown_left_ms.saturating_sub(dt);
+        self.hold_or_decay(dt);
+        if self.cooldown_left_ms > 0 {
+            self.reasons.push("cooldown");
+            return;
+        }
+        if latched {
+            self.mode = Mode::Build;
+            self.reasons.push("latched");
+            self.fill(dt);
+            self.maybe_peak();
+        } else if self.progression == 0 {
+            self.mode = Mode::Relax;
+            self.reasons.push("relaxed");
+        }
+    }
+
+    /// Relax/Build: fill while latched, hold through the grace, decay after it.
+    fn tick_build(&mut self, latched: bool, dt: u32) {
+        if latched {
+            if self.mode == Mode::Relax {
+                self.mode = Mode::Build;
+                self.reasons.push("latched");
+            }
+            self.fill(dt);
+            self.maybe_peak();
+            return;
+        }
+        self.hold_or_decay(dt);
+        if self.mode == Mode::Build && self.progression < self.cfg.aggressive_threshold {
+            self.mode = Mode::Fade;
+        }
+        if self.progression == 0 {
+            self.mode = Mode::Relax;
+            self.reasons.push("relaxed");
+        }
+    }
+
+    /// Fill curve: `p + (1000 - p) * dt / fill_ms`, asymptotic, never past
+    /// [`GAUGE_MAX`].
+    fn fill(&mut self, dt: u32) {
+        let room = GAUGE_MAX - self.progression;
+        let step = u64::from(room) * u64::from(dt) / u64::from(self.cfg.fill_ms);
+        let step = u32::try_from(step).unwrap_or(room);
+        self.progression = (self.progression + step).min(GAUGE_MAX);
+    }
+
+    /// Grace then decay: the gauge holds for [`GaugeConfig::decrease_delay_ms`]
+    /// and drains `1000 * dt / decrease_ms` permille a step after it, never
+    /// below zero.
+    fn hold_or_decay(&mut self, dt: u32) {
+        if self.since_lost_ms <= self.cfg.decrease_delay_ms {
+            self.reasons.push("grace");
+            return;
+        }
+        let step = 1000u64 * u64::from(dt) / u64::from(self.cfg.decrease_ms);
+        let step = u32::try_from(step).unwrap_or(GAUGE_MAX);
+        self.progression = self.progression.saturating_sub(step);
+        self.reasons.push("decay");
+    }
+
+    /// Build -> Peak once the threshold is reached, while the quota allows it;
+    /// a spent quota notes `quota_blocked` and leaves the gauge in Build.
+    fn maybe_peak(&mut self) {
+        if self.mode != Mode::Build || self.progression < self.cfg.aggressive_threshold {
+            return;
+        }
+        if self.peaks >= self.cfg.max_peaks {
+            self.reasons.push("quota_blocked");
+            return;
+        }
+        self.peaks += 1;
+        self.mode = Mode::Peak;
+        self.reasons.push("peak");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OffstageWindow (SW132): the crowd's lull as pure decision data.
+//
+// PORT (ideas reimplemented, zero bytes vendored): zeljkovranjes
+// sbox-two-brain-director `Core/OffstageModule.cs` (`Evaluate` picks an exit
+// gate, holds `sweep_ticks`, refuses the same `OffstageBlockOpportunityId`
+// twice, picks the least-recently-visited node) and `Core/PressureState.cs`
+// (`SweepSecondsRemaining`, `IngressBanRemaining`). MIT.
+//
+// Units: ticks at 60 Hz, millimetres of gate distance, dense ordinal gate ids.
+// Determinism: integers only, no clock, no RNG, no allocation; the same gates,
+// mode and opportunity give the same window twice. No spawn call site yet:
+// pure decision data, so the golden holds.
+// ---------------------------------------------------------------------------
+
+/// Most gates an arena can hold; extra gates are dropped at construction.
+pub const MAX_GATES: usize = 4;
+
+/// One gate the opponent leaves through or re-enters by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gate {
+    /// Distance from the pit centre, millimetres; nearest re-enters first.
+    pub dist_mm: u32,
+    /// Last tick the gate was used; the lowest stamp leaves next.
+    pub visit_stamp: u32,
+}
+
+impl Gate {
+    /// One gate at a distance, never visited yet.
+    pub const fn new(dist_mm: u32) -> Self {
+        Self {
+            dist_mm,
+            visit_stamp: 0,
+        }
+    }
+}
+
+/// A fixed offstage sweep: the opponent leaves the pit through one gate, stays
+/// away for a fixed number of ticks, and re-enters through the nearest gate.
+/// The decision (opportunity) that took it offstage cannot take it out again
+/// while it is still the current one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OffstageWindow {
+    /// Ticks left before the opponent is back in the pit; 0 = in the pit.
+    pub sweep_ticks_remaining: u32,
+    /// Gate the opponent re-enters through, once a sweep started.
+    pub entry_gate: Option<usize>,
+    /// The decision that took it offstage; a repeat is refused.
+    pub block_opportunity: Option<u32>,
+    gates: [Gate; MAX_GATES],
+    count: usize,
+    /// Monotone stamp source, so the leave gate is the least recently used.
+    clock: u32,
+}
+
+impl OffstageWindow {
+    /// A window over these gates, in the pit, with nothing banned yet.
+    pub fn new(gates: &[Gate]) -> Self {
+        let mut table = [Gate::new(0); MAX_GATES];
+        let count = gates.len().min(MAX_GATES);
+        table[..count].copy_from_slice(&gates[..count]);
+        Self {
+            sweep_ticks_remaining: 0,
+            entry_gate: None,
+            block_opportunity: None,
+            gates: table,
+            count,
+            clock: 0,
+        }
+    }
+
+    /// True while the opponent is away from the pit.
+    pub fn is_offstage(&self) -> bool {
+        self.sweep_ticks_remaining > 0
+    }
+
+    /// The gates this window knows, in ordinal order.
+    pub fn gates(&self) -> &[Gate] {
+        &self.gates[..self.count]
+    }
+
+    /// Enter the sweep: only in [`Mode::Peak`], only for a decision that has
+    /// not already sent the opponent out, and only with a positive window.
+    /// Picks the least recently used gate to leave through and stamps it, so
+    /// the next sweep leaves by a different gate, and records the nearest gate
+    /// to re-enter by. Answers true when the opponent is now offstage.
+    pub fn enter(&mut self, mode: Mode, opportunity: u32, sweep_ticks: u32) -> bool {
+        if mode != Mode::Peak || self.is_offstage() || sweep_ticks == 0 {
+            return false;
+        }
+        if self.block_opportunity == Some(opportunity) {
+            return false;
+        }
+        let (Some(leave), Some(entry)) = (
+            least_recently_used(&self.gates[..self.count]),
+            nearest(&self.gates[..self.count]),
+        ) else {
+            return false;
+        };
+        self.sweep_ticks_remaining = sweep_ticks;
+        self.entry_gate = Some(entry);
+        self.block_opportunity = Some(opportunity);
+        self.clock = self.clock.wrapping_add(1);
+        self.gates[leave].visit_stamp = self.clock;
+        true
+    }
+
+    /// Advance the sweep by `dt` ticks; the window ends at zero and the
+    /// opponent is back in the pit through [`Self::entry_gate`].
+    pub fn tick(&mut self, dt: u32) {
+        self.sweep_ticks_remaining = self.sweep_ticks_remaining.saturating_sub(dt);
+    }
+}
+
+/// Gate to leave through: the least recently visited, lowest ordinal on a tie.
+fn least_recently_used(gates: &[Gate]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (index, gate) in gates.iter().enumerate() {
+        match best {
+            Some(seen) if gates[seen].visit_stamp <= gate.visit_stamp => {}
+            _ => best = Some(index),
+        }
+    }
+    best
+}
+
+/// Gate to re-enter through: the nearest to the pit, lowest ordinal on a tie.
+fn nearest(gates: &[Gate]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (index, gate) in gates.iter().enumerate() {
+        match best {
+            Some(seen) if gates[seen].dist_mm <= gate.dist_mm => {}
+            _ => best = Some(index),
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +563,257 @@ mod tests {
             (b.tension(), b.spend(20.0), b.tension())
         };
         assert_eq!(format!("{:?}", run()), format!("{:?}", run()));
+    }
+
+    /// Config for the two Accept cases: a clean fill, a grace, a quota.
+    fn gauge_config() -> GaugeConfig {
+        GaugeConfig {
+            fill_ms: 2_000,
+            decrease_ms: 2_000,
+            decrease_delay_ms: 500,
+            aggressive_threshold: GAUGE_MAX,
+            max_peaks: 2,
+            cooldown_ms: 400,
+            freeze_during_peak: true,
+        }
+    }
+
+    /// SW130 Accept 1: the fill is asymptotic (monotone, always under 1000),
+    /// a lost latch holds through its grace, then decays to 0 and never below.
+    #[test]
+    fn pressure_gauge_fills_asymptotically_clamps_and_decays_after_grace() {
+        let mut gauge = PressureGauge::new(gauge_config());
+        let mut last = 0;
+        for _ in 0..120 {
+            gauge.tick(true, 16);
+            let now = gauge.progression();
+            assert!(now > last, "the fill is monotone: {last} -> {now}");
+            assert!(
+                now < GAUGE_MAX,
+                "the fill approaches 1000, never reaches it"
+            );
+            last = now;
+        }
+        let filled = gauge.progression();
+        assert!(
+            filled > 400,
+            "120 ticks of a 2 s fill build real pressure: {filled}"
+        );
+        assert_eq!(gauge.mode(), Mode::Build);
+        assert_eq!(gauge.peaks(), 0, "the threshold is 1000, so no peak yet");
+
+        // Grace: the gauge holds while the latch is recently lost (500 ms).
+        gauge.tick(false, 16);
+        assert_eq!(gauge.progression(), filled, "the first grace step holds");
+        for _ in 0..30 {
+            gauge.tick(false, 16);
+            assert_eq!(
+                gauge.progression(),
+                filled,
+                "the whole grace delay holds the gauge"
+            );
+        }
+        // Past the grace the gauge drains, and never below zero.
+        let mut seen = filled;
+        for _ in 0..200 {
+            gauge.tick(false, 16);
+            assert!(gauge.progression() <= seen, "the decay never rises");
+            seen = gauge.progression();
+        }
+        assert_eq!(gauge.progression(), 0, "the gauge reaches zero");
+        assert_eq!(gauge.mode(), Mode::Relax);
+        assert!(
+            gauge.reasons().any(|reason| reason == "decay"),
+            "the ring names the decay"
+        );
+        assert!(
+            gauge.reasons().count() <= REASON_RING,
+            "the ring is bounded"
+        );
+    }
+
+    /// SW130 Accept 2: a peak freezes the gauge, the quota stops the third
+    /// peak, and the reason ring names `quota_blocked`.
+    #[test]
+    fn peak_freezes_gauge_and_quota_caps_cycles() {
+        let cfg = GaugeConfig {
+            aggressive_threshold: 200,
+            fill_ms: 500,
+            decrease_ms: 200,
+            decrease_delay_ms: 0,
+            ..gauge_config()
+        };
+        let mut gauge = PressureGauge::new(cfg);
+        // Latch until the first peak: the gauge reaches the threshold and stops.
+        let mut guard = 0;
+        while gauge.mode() != Mode::Peak {
+            gauge.tick(true, 16);
+            guard += 1;
+            assert!(guard < 200, "the first peak arrives");
+        }
+        assert_eq!(gauge.peaks(), 1);
+        let at_peak = gauge.progression();
+        for _ in 0..20 {
+            gauge.tick(true, 16);
+            assert_eq!(gauge.progression(), at_peak, "a peak freezes the gauge");
+        }
+        // Peak over: cooldown holds the gauge down even while latched.
+        gauge.tick(false, 16);
+        assert_eq!(gauge.mode(), Mode::Fade);
+        let cooled = gauge.progression();
+        for _ in 0..10 {
+            gauge.tick(true, 16);
+            assert!(
+                gauge.progression() <= cooled,
+                "the cooldown never fills the gauge"
+            );
+        }
+        // Second cycle: latch through the cooldown into the second peak.
+        let mut guard = 0;
+        while gauge.peaks() < 2 {
+            gauge.tick(true, 16);
+            guard += 1;
+            assert!(guard < 400, "the second peak arrives");
+        }
+        assert_eq!(gauge.mode(), Mode::Peak);
+        gauge.tick(false, 16);
+        for _ in 0..40 {
+            gauge.tick(false, 16);
+        }
+        // Third cycle: the quota is spent, so the gauge builds but never peaks.
+        let mut guard = 0;
+        while gauge.progression() < cfg.aggressive_threshold && guard < 200 {
+            gauge.tick(true, 16);
+            guard += 1;
+        }
+        assert_eq!(gauge.mode(), Mode::Build, "no third peak past the quota");
+        assert_eq!(gauge.peaks(), 2);
+        assert!(
+            gauge.reasons().any(|reason| reason == "quota_blocked"),
+            "the ring names the quota refusal: {:?}",
+            gauge.reasons().collect::<Vec<_>>()
+        );
+    }
+
+    /// The gauge is integer-only, bounded and clamps hostile knobs: no float,
+    /// no unbounded history, no zero-length fill.
+    #[test]
+    fn pressure_gauge_knobs_clamp_and_the_ring_stays_bounded() {
+        let wild = GaugeConfig {
+            fill_ms: 0,
+            decrease_ms: 0,
+            decrease_delay_ms: u32::MAX,
+            aggressive_threshold: 0,
+            max_peaks: 0,
+            cooldown_ms: u32::MAX,
+            freeze_during_peak: true,
+        }
+        .clamped();
+        assert_eq!(wild.fill_ms, 500, "a zero fill clamps up");
+        assert_eq!(wild.decrease_ms, 1);
+        assert_eq!(wild.decrease_delay_ms, 600_000);
+        assert_eq!(wild.aggressive_threshold, 1, "(0, 1] keeps one permille");
+        assert_eq!(wild.max_peaks, 1, "a bout always allows one peak");
+
+        let mut gauge = PressureGauge::new(GaugeConfig::default());
+        for step in 0..40 {
+            gauge.tick(step % 3 != 0, 16);
+        }
+        assert_eq!(gauge.reasons().count(), REASON_RING, "the ring is bounded");
+        assert!(gauge.progression() <= GAUGE_MAX);
+        // Same tape twice: same progression, mode and reasons.
+        let tape = || {
+            let mut gauge = PressureGauge::new(GaugeConfig::default());
+            for step in 0..40 {
+                gauge.tick(step % 3 != 0, 16);
+            }
+            (
+                gauge.progression(),
+                gauge.mode(),
+                gauge.reasons().collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(tape(), tape(), "a replay without a model drifts");
+    }
+
+    /// Two gates, the near one and the far one, both never visited.
+    fn gates() -> [Gate; 2] {
+        [Gate::new(900), Gate::new(200)]
+    }
+
+    #[test]
+    fn sweep_window_expires_and_the_entry_gate_is_banned() {
+        let mut window = OffstageWindow::new(&gates());
+        assert!(!window.is_offstage(), "a bout opens in the pit");
+        // Only a peak takes the opponent offstage.
+        assert!(!window.enter(Mode::Build, 7, 30), "build never sweeps");
+        assert!(!window.enter(Mode::Relax, 7, 30), "relax never sweeps");
+        assert!(!window.enter(Mode::Peak, 7, 0), "a zero window is no sweep");
+        assert!(window.enter(Mode::Peak, 7, 30), "a peak sweeps");
+        assert!(window.is_offstage());
+        assert_eq!(window.sweep_ticks_remaining, 30, "the sweep holds 30 ticks");
+        assert_eq!(
+            window.entry_gate,
+            Some(1),
+            "re-entry is through the nearest gate"
+        );
+        assert!(
+            !window.enter(Mode::Peak, 8, 30),
+            "a sweep already running refuses another"
+        );
+        // Held for exactly N ticks, then the window expires exactly once.
+        window.tick(29);
+        assert_eq!(window.sweep_ticks_remaining, 1);
+        assert!(window.is_offstage(), "one tick left is still offstage");
+        window.tick(1);
+        assert_eq!(window.sweep_ticks_remaining, 0);
+        assert!(!window.is_offstage(), "the opponent is back in the pit");
+        // The decision that took it out cannot take it out again...
+        assert!(
+            !window.enter(Mode::Peak, 7, 30),
+            "the same opportunity is banned"
+        );
+        // ...but a new decision on a peak may sweep again.
+        assert!(window.enter(Mode::Peak, 8, 12));
+        assert_eq!(window.sweep_ticks_remaining, 12);
+        // A tick past the end never underflows.
+        window.tick(99);
+        assert_eq!(window.sweep_ticks_remaining, 0);
+    }
+
+    #[test]
+    fn gate_pick_is_least_recently_used_with_ordinal_tie_break() {
+        // Two equal distances: the entry gate is the lower ordinal, so gate 0.
+        let mut window = OffstageWindow::new(&[Gate::new(400), Gate::new(400)]);
+        assert!(window.enter(Mode::Peak, 1, 20));
+        assert_eq!(window.entry_gate, Some(0), "id order wins a distance tie");
+        window.tick(20);
+        // Gate 0 was just used to leave, so the next sweep leaves by gate 1:
+        // the least recently visited. The entry gate stays the lower ordinal.
+        assert!(window.enter(Mode::Peak, 2, 20));
+        assert_eq!(window.gates()[1].visit_stamp, 2, "gate 1 was stamped");
+        assert_eq!(window.gates()[0].visit_stamp, 1, "gate 0 keeps its stamp");
+        assert_eq!(window.entry_gate, Some(0));
+        // A stale stamp on the higher ordinal still loses to the lower one.
+        let window = OffstageWindow::new(&[Gate::new(700), Gate::new(100)]);
+        assert_eq!(least_recently_used(window.gates()), Some(0));
+        assert_eq!(nearest(window.gates()), Some(1));
+        let mut stamped = OffstageWindow::new(&[Gate::new(700), Gate::new(100)]);
+        stamped.gates[0].visit_stamp = 9;
+        stamped.gates[1].visit_stamp = 3;
+        assert_eq!(
+            least_recently_used(stamped.gates()),
+            Some(1),
+            "the older visit leaves next"
+        );
+        // Ordinal tie on equal stamps: the first gate.
+        let tie = OffstageWindow::new(&[Gate::new(5), Gate::new(5)]);
+        assert_eq!(least_recently_used(tie.gates()), Some(0));
+        // No gates: no sweep.
+        let mut empty = OffstageWindow::new(&[]);
+        assert!(!empty.enter(Mode::Peak, 1, 20));
+        assert!(empty.entry_gate.is_none());
+        // Allocation-free and the same inputs twice.
+        assert_eq!(format!("{:?}", window), format!("{:?}", window));
     }
 }

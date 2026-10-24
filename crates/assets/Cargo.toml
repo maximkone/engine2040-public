@@ -57,4 +57,7 @@ required-features = ["import", "registry"]
 [dev-dependencies]
 # The zero-allocation allocator the decode proof installs (feature `test-util`).
 engine-core = { workspace = true, features = ["test-util"] }
+# VR2: the KTX2 size test measures the cook against PNG of the same texels, so
+# the codec rides the test target and never the headless default build.
+image = { workspace = true, default-features = false, features = ["png"] }
 
