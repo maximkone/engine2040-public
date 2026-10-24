@@ -14,7 +14,7 @@
 //! reaches the cut instead of dying at `wear_q16: 0`.
 
 use crate::Sim;
-use engine_combat::fight::{FightState, FIGHT_RULES_V2};
+use engine_combat::fight::{geometry_rules, FightState};
 use engine_combat::heft::{Heft, HeftError};
 
 /// The shipped weapons table: the designer rows the live duel arms.
@@ -77,7 +77,7 @@ impl Sim {
     ///
     /// As [`Sim::arm_weapons`].
     pub fn arm_weapon_rows(&mut self, rows: &str, ids: &[&str]) -> Result<(), ArmError> {
-        if self.tick != 0 || self.rules.version != FIGHT_RULES_V2 {
+        if self.tick != 0 || !geometry_rules(self.rules.version) {
             return Err(ArmError::Closed);
         }
         if ids.len() != self.fighters {
@@ -163,7 +163,7 @@ pub(crate) fn fold(hash: u64, fight: &FightState, fighters: usize) -> u64 {
 mod tests {
     use super::*;
     use crate::world::MatchWorld;
-    use crate::{ArenaConfig, FighterInput, FighterTape};
+    use crate::{ArenaConfig, FighterInput, FighterTape, FIGHT_RULES_V2, FIGHT_RULES_V3};
     use engine_combat::fight::FightEvent;
     use engine_combat::tables::{TABLES_VERSION_V1, TABLES_VERSION_V2};
     use engine_input::fighter::ATTACK;
@@ -279,7 +279,7 @@ mod tests {
 
     /// The gladius numbers under another id: the victim swings the table.
     fn bare_row() -> &'static str {
-        "mass_g=1000 damage_permille=120 speed_ticks=15 recovery_ticks=8 stagger_permille=400"
+        "mass_g=1000 damage_permille=120 speed_ticks=30 recovery_ticks=6 stagger_permille=400"
     }
 
     #[test]
@@ -400,7 +400,9 @@ mod tests {
     fn bg15_a_five_round_headless_duel_prints_a_non_zero_mean_edge_wear() {
         use engine_combat::{effective_q16, BladeSwing, MAX_ENERGY_Q16, MAX_SHARPNESS_Q16};
         let round = config(TABLES_VERSION_V2);
-        let tape = assault_tape(&round, 20);
+        // One press per swing: the 30-tick tell and 6-tick recovery fit inside 40
+        // (a press every 20 ticks lands inside the feint window and restarts it).
+        let tape = assault_tape(&round, 40);
         let gladius = Heft::from_rows(WEAPONS_ROWS, "gladius").expect("the shipped row");
         // The energy the arena hands the resolver: its full-force blade, the
         // kit row's wear. Geometry is irrelevant to `effective_q16`.
@@ -497,6 +499,187 @@ mod tests {
             sim.edge_wear_q16(9),
             0,
             "a slot out of the match carries none"
+        );
+    }
+
+    /// The duel tape with an extra attack tap from slot 0 on each tick of
+    /// `presses`: the button is down that tick only, so it is a fresh press and
+    /// not a hold. Slot 1 never presses, and slot 0 carries a row on every tick
+    /// so a brain never decides a slot the test presses.
+    fn tap_tape(config: &ArenaConfig, presses: &[u32]) -> FighterTape {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            for fighter in 0..config.fighters {
+                let down = tick == 0 || presses.contains(&tick);
+                inputs.push(FighterInput {
+                    tick,
+                    fighter: FighterId::new(fighter).expect("slots 0..2 are legal"),
+                    mx: 0,
+                    mz: 0,
+                    facing: 0,
+                    buttons: if down && fighter == 0 {
+                        Buttons(ATTACK)
+                    } else {
+                        Buttons::NONE
+                    },
+                });
+            }
+        }
+        FighterTape(inputs)
+    }
+
+    /// What one duel did: one line per tick from `from` on (the hit-stop left,
+    /// the swinger's swing, its intake queue, the victim's react) and the tick a
+    /// second swing started on, past `after`.
+    /// The duel trace with the fight rules pinned before tick 0. SW20's
+    /// hit-stop intake queue is a rules v3 rule, so v2 traces stay frozen.
+    fn duel_trace(
+        config: &ArenaConfig,
+        rules_version: u32,
+        presses: &[u32],
+        from: u32,
+        after: u32,
+    ) -> (Vec<String>, Option<u32>) {
+        let tape = tap_tape(config, presses);
+        let mut sim = with_rules(duel(&tape), rules_version);
+        sim.arm_weapons(&["gladius", "gladius"])
+            .expect("the kit gladii arm");
+        let mut trace = Vec::new();
+        let mut second = None;
+        let mut prev_age = 0;
+        for _ in 0..config.ticks {
+            let tick = sim.tick;
+            sim.step(&tape).expect("the duel steps");
+            let (swinger, victim) = (sim.fight.fighters[0], sim.fight.fighters[1]);
+            // A restart is the swing clock dropping back: a continuing swing only
+            // ever ages up, so a lower age past `after` is a fresh start.
+            if second.is_none()
+                && tick > after
+                && swinger.is_attacking
+                && swinger.attack_age < prev_age
+            {
+                second = Some(tick);
+            }
+            prev_age = swinger.attack_age;
+            if tick >= from {
+                trace.push(format!(
+                    "tick {tick} hitstop={} age={} attacking={} buffer={} react={}",
+                    sim.fight.hitstop,
+                    swinger.attack_age,
+                    swinger.is_attacking,
+                    swinger.attack_buffer.len(),
+                    victim.react
+                ));
+            }
+        }
+        (trace, second)
+    }
+
+    /// Pin `version` on a built duel before tick 0.
+    fn with_rules(mut sim: Sim, version: u32) -> Sim {
+        let mut rules = crate::ArenaRules::v2_free_for_all();
+        rules.version = version;
+        assert!(sim.set_rules(rules), "the rules pin before tick 0");
+        sim
+    }
+
+    /// The first tick whose step runs with the clock frozen. The blow lands on
+    /// the tick before, so `sim.tick` after that step names the freeze's first
+    /// tick.
+    fn first_frozen_tick(config: &ArenaConfig, rules_version: u32) -> u32 {
+        let tape = tap_tape(config, &[]);
+        let mut sim = with_rules(duel(&tape), rules_version);
+        sim.arm_weapons(&["gladius", "gladius"])
+            .expect("the kit gladii arm");
+        for _ in 0..config.ticks {
+            sim.step(&tape).expect("the duel steps");
+            if sim.fight.hitstop > 0 {
+                return sim.tick;
+            }
+        }
+        panic!("the gladius never landed inside {} ticks", config.ticks);
+    }
+
+    /// SW20: a press made on a tick the hit-stop freezes is kept under rules
+    /// v3. `core_step_into` queues the mid-swing fighter's fresh press before
+    /// it counts the freeze down, so on the first ready tick after the freeze
+    /// the swing restarts. The earlier rules drop it: the same tap on the same
+    /// frozen tick leaves a v2 duel tick-for-tick identical, which their tapes
+    /// pin.
+    #[test]
+    fn a_press_inside_hitstop_is_kept_and_fires_after_the_freeze() {
+        let config = config(TABLES_VERSION_V2);
+        let frozen = first_frozen_tick(&config, FIGHT_RULES_V3);
+        let from = frozen.saturating_sub(2);
+        // v3: the frozen tick's tap is queued and fires; the same tap one tick
+        // earlier is the control.
+        let baseline = duel_trace(&config, FIGHT_RULES_V3, &[], from, frozen);
+        let inside = duel_trace(&config, FIGHT_RULES_V3, &[frozen], from, frozen);
+        let before = duel_trace(&config, FIGHT_RULES_V3, &[frozen - 1], from, frozen);
+        // v2 keeps the frozen bytes: the tap is dropped and nothing moves.
+        let v2_baseline = duel_trace(&config, FIGHT_RULES_V2, &[], from, frozen);
+        let v2_inside = duel_trace(&config, FIGHT_RULES_V2, &[frozen], from, frozen);
+        for (name, (trace, second)) in [
+            ("v3 baseline    press=none", &baseline),
+            ("v3 frozen tap  press=freeze tick", &inside),
+            ("v3 earlier tap press=freeze tick -1", &before),
+            ("v2 frozen tap  press=freeze tick", &v2_inside),
+        ] {
+            println!("--- {name} second_swing={second:?}");
+            for line in trace.iter() {
+                println!("{line}");
+            }
+        }
+        let frozen_line = |trace: &(Vec<String>, Option<u32>)| {
+            trace
+                .0
+                .iter()
+                .find(|line| line.starts_with(&format!("tick {frozen} hitstop=")))
+                .expect("the freeze tick is in the trace")
+                .clone()
+        };
+        let line = frozen_line(&inside);
+        assert!(
+            !line.contains("hitstop=0 "),
+            "tick {frozen} must step with the clock frozen: {line}"
+        );
+        assert!(
+            line.contains("buffer=1"),
+            "a tap on frozen tick {frozen} must sit in the intake queue: {line}"
+        );
+        assert_eq!(
+            inside.1,
+            Some(frozen + 5),
+            "the kept press must start a second swing 5 ticks after the freeze begins"
+        );
+        assert!(
+            before
+                .1
+                .is_some_and(|tick| tick > frozen && tick <= frozen + 8),
+            "the control tap one tick earlier must still fire inside the window: {:?}",
+            before.1
+        );
+        assert_eq!(
+            baseline.1, None,
+            "no press, no second swing: the queue holds nothing on its own"
+        );
+        assert_ne!(
+            baseline.0, inside.0,
+            "the kept press must change the duel, or nothing was buffered"
+        );
+        // Frozen v2: the same tap is dropped, so its trace equals its baseline.
+        assert!(
+            frozen_line(&v2_inside).contains("buffer=0"),
+            "v2 drops a tap on frozen tick {frozen}: {}",
+            frozen_line(&v2_inside)
+        );
+        assert_eq!(
+            v2_baseline.0, v2_inside.0,
+            "v2 must stay tick-for-tick identical: the press was dropped"
+        );
+        assert_eq!(
+            v2_inside.1, None,
+            "v2 must start no second swing from a frozen tap"
         );
     }
 }
