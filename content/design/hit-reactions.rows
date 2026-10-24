@@ -1,0 +1,32 @@
+# hit reaction design rows: how the struck body answers a blow, picked by where the blow came from and how hard.
+# Designers change numbers here without a Rust edit; the game test in crates/game/src/hit_reaction.rs checks them.
+# Whole numbers only, `#` comments, no floats. Presentation only: the flinch is an additive pose on the victim
+# (the sim's balance, hit-stop and hash never read it). This is the "chooser table" of Unreal's Ultimate Hit
+# Reaction System, (direction x intensity) -> reaction, with parameters in place of mocap clips
+# (docs/research/plugins-2026-10-24/05-unreal-deep.md #9).
+#
+# sector   where the blow came from, relative to the way the victim faces: front, back, left, right
+#          (front and back take 90 degrees each, a side takes the 90 degrees between)
+# weight   light (a light blow), heavy (a heavy blow, the sim holds it 6 ticks) or down (the blow that floors)
+# push_pct   pelvis shove along the blow, percent of the reference flinch (100 = 5 cm)
+# dip_pct    pelvis dip, percent of the reference (100 = 1.5 cm)
+# lean_pct   torso and head lean along the blow, percent of the reference (100 = 11.5 degrees)
+# twist_mrad torso turn about the vertical, milliradians; positive turns toward the victim's right, so a blow
+#            from the left twists the body away from it
+# window_ticks   how long the flinch reads, ticks at 60 Hz (the reference is 27)
+#
+# The light front row is the reference flinch the look always had: nothing a duel plays today moves until a
+# heavier blow, a flank or a back hit lands.
+table hit-reaction version 1
+front light  push_pct=100 dip_pct=100 lean_pct=100 twist_mrad=0    window_ticks=27
+front heavy  push_pct=170 dip_pct=160 lean_pct=150 twist_mrad=0    window_ticks=33
+front down   push_pct=240 dip_pct=220 lean_pct=190 twist_mrad=0    window_ticks=40
+back  light  push_pct=85  dip_pct=100 lean_pct=130 twist_mrad=0    window_ticks=27
+back  heavy  push_pct=150 dip_pct=150 lean_pct=190 twist_mrad=0    window_ticks=33
+back  down   push_pct=210 dip_pct=210 lean_pct=240 twist_mrad=0    window_ticks=40
+left  light  push_pct=90  dip_pct=90  lean_pct=90  twist_mrad=120  window_ticks=27
+left  heavy  push_pct=150 dip_pct=140 lean_pct=140 twist_mrad=200  window_ticks=33
+left  down   push_pct=210 dip_pct=200 lean_pct=180 twist_mrad=280  window_ticks=40
+right light  push_pct=90  dip_pct=90  lean_pct=90  twist_mrad=-120 window_ticks=27
+right heavy  push_pct=150 dip_pct=140 lean_pct=140 twist_mrad=-200 window_ticks=33
+right down   push_pct=210 dip_pct=200 lean_pct=180 twist_mrad=-280 window_ticks=40
