@@ -29,6 +29,7 @@
 //! [`run_loco_poses`]: crate::run_loco_poses
 //! [`run_presentation`]: crate::run_presentation
 
+use engine_ai::director::{GaugeConfig, Mode, PressureGauge};
 use engine_ai::legion::Formation;
 use engine_ai::orders::SquadOrder;
 use engine_anim::contract::{LocalPose, RootDelta, RootTable};
@@ -341,7 +342,7 @@ impl Sim {
     pub fn set_steering(&mut self) -> bool {
         if cfg!(feature = "sim")
             || self.tick != 0
-            || self.rules.version != crate::FIGHT_RULES_V2
+            || !crate::geometry_rules(self.rules.version)
             || self.steer.is_some()
         {
             return false;
@@ -374,6 +375,14 @@ fn mm_pair(meters: [f32; 2]) -> [i32; 2] {
     [mm[0], mm[2]]
 }
 
+/// Distance within which two fighters count as a live clash, metres: the
+/// pressure gauge's latch (SW130). Wider than any weapon's reach, so a bout
+/// that closes in builds pressure before the first blow.
+pub const PRESSURE_MEASURE_M: f32 = 3.0;
+
+/// One accepted tick in ms, the gauge's step: 60 Hz fixed step.
+pub const PRESSURE_STEP_MS: u32 = 16;
+
 /// Incremental live match: one cold authority `Sim` stepped exactly once per
 /// [`LiveMatch::step`] call (see the module docs). The tick log stays one row
 /// deep, so memory is flat over any match length.
@@ -405,6 +414,12 @@ pub struct LiveMatch {
     /// comrades in the Roman line. `None` until
     /// [`LiveMatch::arm_contubernium`] arms it; the frozen v1 match never
     /// arms it, so its checkpoints stay byte for byte.
+    /// The live match's pressure gauge (SW130): the director's pacing scalar,
+    /// one integer step per accepted tick. Latched while two standing fighters
+    /// are within [`PRESSURE_MEASURE_M`], so a bout builds to a peak, holds it
+    /// and fades between clashes instead of reading a static ladder. It is
+    /// pacing, never sim state: no checkpoint, snapshot or hash carries it.
+    pressure: PressureGauge,
     contubernium: Option<Contubernium>,
 }
 
@@ -469,6 +484,7 @@ impl LiveMatch {
             steps: 0,
             poisoned: false,
             fallbacks: Vec::new(),
+            pressure: PressureGauge::new(GaugeConfig::default()),
             contubernium: None,
         })
     }
@@ -480,6 +496,9 @@ impl LiveMatch {
     pub fn from_spec(spec: &MatchSpec) -> Option<Self> {
         let mut live = Self::with_rules_world(&spec.config, spec.rules, spec.world.clone())?;
         if spec.spear && !live.sim.set_spear() {
+            return None;
+        }
+        if spec.noose && !live.sim.set_noose() {
             return None;
         }
         if spec.height && !live.sim.set_height() {
@@ -536,7 +555,7 @@ impl LiveMatch {
     /// the fall-in seats them by the slot nearest to where they stand.
     /// False when the rules or the body count refuse.
     pub fn arm_contubernium(&mut self, anchor_mm: (i64, i64), facing: Facing) -> bool {
-        if self.sim.rules.version != crate::FIGHT_RULES_V2 || self.sim.fighters < CONTUBERNIUM {
+        if !crate::geometry_rules(self.sim.rules.version) || self.sim.fighters < CONTUBERNIUM {
             return false;
         }
         let Ok(line) = Line::shipped() else {
@@ -753,6 +772,11 @@ impl LiveMatch {
             return None;
         }
         self.step_contubernium();
+        // SW130: the match is its own director - one gauge step per accepted
+        // tick, latched while the fight is in measure, and the window reads
+        // the mode. Pacing only: never a checkpoint, snapshot or hash field.
+        let latched = self.pressure_latched();
+        self.pressure.tick(latched, PRESSURE_STEP_MS);
         Some(LiveTick {
             checkpoint: self.checkpoint,
             events: &self.events,
@@ -897,7 +921,34 @@ impl LiveMatch {
             steps: 0,
             poisoned: false,
             fallbacks: Vec::new(),
+            pressure: PressureGauge::new(GaugeConfig::default()),
             contubernium: None,
+        })
+    }
+
+    /// Live pressure: progression in permille and the gauge's mode (SW130).
+    /// The window paints it; nothing in the sim reads it back.
+    pub fn pressure(&self) -> (u32, Mode) {
+        (self.pressure.progression(), self.pressure.mode())
+    }
+
+    /// Peaks this bout's quota has allowed so far (SW130).
+    pub fn pressure_peaks(&self) -> u32 {
+        self.pressure.peaks()
+    }
+
+    /// True while a pair of fighters is within [`PRESSURE_MEASURE_M`]: the
+    /// gauge fills on a live clash and fades once they break apart.
+    fn pressure_latched(&self) -> bool {
+        let live = self.sim.fighters.min(self.sim.states.len());
+        let measure = PRESSURE_MEASURE_M * PRESSURE_MEASURE_M;
+        (0..live).any(|i| {
+            (i + 1..live).any(|j| {
+                let a = self.sim.states[i].pos;
+                let b = self.sim.states[j].pos;
+                let (dx, dz) = (a[0] - b[0], a[2] - b[2]);
+                dx * dx + dz * dz <= measure
+            })
         })
     }
 
@@ -1043,7 +1094,7 @@ impl LivePresentation {
     #[must_use]
     pub fn from_spec(spec: &MatchSpec) -> Option<Self> {
         let mut live = Self::with_rules_world(&spec.config, spec.rules, spec.world.clone())?;
-        let armed = !spec.spear || live.sim.set_spear();
+        let armed = (!spec.spear || live.sim.set_spear()) && (!spec.noose || live.sim.set_noose());
         armed.then_some(live)
     }
 
@@ -1221,8 +1272,8 @@ mod tests {
             .expect("duel");
         assert!(duel.weapon(0).is_none(), "bare until armed");
         duel.arm_weapons(&["pugio", "clava"]).expect("the rows arm");
-        assert_eq!(duel.weapon(0).map(|w| w.startup_ticks), Some(12));
-        assert_eq!(duel.weapon(1).map(|w| w.startup_ticks), Some(21));
+        assert_eq!(duel.weapon(0).map(|w| w.startup_ticks), Some(24));
+        assert_eq!(duel.weapon(1).map(|w| w.startup_ticks), Some(42));
         assert_eq!(duel.weapon(2), None, "off the match is bare");
         duel.step(&[]).expect("the duel steps");
         assert!(
@@ -1245,10 +1296,10 @@ mod tests {
     }
 
     /// FEEL1b: the same two armed slots swing their own startup. The pugio
-    /// hits on tick 12, the clava on tick 21; each bout presses once so the
+    /// hits on tick 24, the clava on tick 42; each bout presses once so the
     /// first blow does not interrupt the other's swing.
     #[test]
-    fn an_armed_duel_lands_the_clava_nine_ticks_after_the_pugio() {
+    fn an_armed_duel_lands_the_clava_eighteen_ticks_after_the_pugio() {
         let config = ArenaConfig::try_new(7, 60, 2, 20.0).expect("valid config");
         let mut first = [0u32; 2];
         for (attacker, slot) in [(0u8, 0usize), (1, 1)] {
@@ -1263,7 +1314,7 @@ mod tests {
             live.sim.states[swinger].pos = [0.0, 0.0, 0.0];
             live.sim.states[victim].pos = [0.0, 0.0, 1.0];
             let mut hit = None;
-            for tick in 0..40 {
+            for tick in 0..config.ticks {
                 let inputs: Vec<FighterInput> = (0..2u8)
                     .map(|fighter| FighterInput {
                         tick,
@@ -1291,9 +1342,13 @@ mod tests {
             }
             first[slot] = hit.expect("the armed blow lands");
         }
-        assert_eq!(first[0], 12, "the pugio lands on its startup");
-        assert_eq!(first[1], 21, "the clava lands on its startup");
-        assert_eq!(first[1] - first[0], 9, "the club lands nine ticks later");
+        assert_eq!(first[0], 24, "the pugio lands on its startup");
+        assert_eq!(first[1], 42, "the clava lands on its startup");
+        assert_eq!(
+            first[1] - first[0],
+            18,
+            "the club lands eighteen ticks later"
+        );
     }
 
     #[test]
@@ -1545,7 +1600,7 @@ mod tests {
         let one_team = whole_v2(&config, &tape, ArenaRules::v2_teams([0; MAX_SLOTS]));
         assert_eq!(hits(&one_team.events), 0, "one team, no hits");
         let mut bad = ArenaRules::v2_free_for_all();
-        bad.version = 3;
+        bad.version = crate::FIGHT_RULES_V3 + 1;
         assert!(LiveMatch::with_rules(&config, bad).is_none());
     }
     /// Winner of a v2 brain duel from the sim's spawns: the slot still up on
@@ -2573,5 +2628,205 @@ mod spear_tests {
         let mut late = LiveMatch::with_rules(&config, rules).expect("live match");
         late.step(&[]).expect("first tick");
         assert!(!late.arm_steering(), "arming is before the first tick");
+    }
+}
+
+/// The laquearius noose through the live match: determinism, replay and the
+/// inert-when-off promise. Scenario tests live in `crate::spear::noose`.
+#[cfg(test)]
+mod noose_tests {
+    use super::*;
+    use engine_core::fixed::Fixed;
+    use engine_input::fighter::{BLOCK, THROW_NOOSE};
+    use engine_input::{Buttons, FighterId};
+
+    const TICKS: u32 = 600;
+
+    fn spec(noose: bool) -> MatchSpec {
+        let config = ArenaConfig {
+            seed: 0x5EA2,
+            ticks: TICKS,
+            fighters: 2,
+            half_extent_m: 12.0,
+            table_version: 2,
+        };
+        let spec = MatchSpec::duel(config, MatchWorld::empty()).with_spear();
+        if noose {
+            spec.with_noose()
+        } else {
+            spec
+        }
+    }
+
+    /// Facing in centidegrees (0 is +z, 9000 is +x) toward `(dx, dz)`, through
+    /// the integer `Fixed::atan2` (no platform trig).
+    fn facing_toward(dx: f32, dz: f32) -> i16 {
+        let q16 = |v: f32| Fixed::from_bits((v * 65_536.0) as i64);
+        let angle = Fixed::atan2(q16(dx), q16(dz));
+        i16::try_from(angle.to_bits() * 18_000 / Fixed::PI.to_bits()).unwrap_or(0)
+    }
+
+    /// Slot 0 walks up to 4.5 m of slot 1 and throws a loop every 50 ticks;
+    /// slot 1 stands, runs at the thrower and guards on a cycle. Aimed from
+    /// the live poses; returns the hashes, the recorded tape and every event.
+    fn duel(spec: &MatchSpec, press: u8) -> (Vec<u64>, FighterTape, Vec<crate::SpearEvent>) {
+        let mut live = spec.live().expect("spec builds");
+        let (mut hashes, mut seen) = (Vec::new(), Vec::new());
+        for tick in 0..TICKS {
+            let at = [live.sim.states[0].pos, live.sim.states[1].pos];
+            let (dx, dz) = (at[1][0] - at[0][0], at[1][2] - at[0][2]);
+            let dist = (dx * dx + dz * dz).sqrt().max(0.001);
+            let toward = |d: f32| i8::try_from((d / dist * 100.0).round() as i32).unwrap_or(0);
+            let inputs: Vec<FighterInput> = (0..2u8)
+                .map(|slot| {
+                    let mut buttons = 0;
+                    let (mx, mz, facing) = if slot == 0 {
+                        let walks = dist > 4.5;
+                        if tick % 50 == 49 {
+                            buttons |= press;
+                        }
+                        (
+                            if walks { toward(dx) } else { 0 },
+                            if walks { toward(dz) } else { 0 },
+                            facing_toward(dx, dz),
+                        )
+                    } else {
+                        let phase = (tick / 40) % 4;
+                        if phase == 3 {
+                            buttons |= BLOCK;
+                        }
+                        let runs = phase == 1;
+                        (
+                            if runs { toward(-dx) } else { 0 },
+                            if runs { toward(-dz) } else { 0 },
+                            facing_toward(-dx, -dz),
+                        )
+                    };
+                    FighterInput {
+                        tick,
+                        fighter: FighterId(slot),
+                        mx,
+                        mz,
+                        facing,
+                        buttons: Buttons(buttons),
+                    }
+                })
+                .collect();
+            hashes.push(live.step(&inputs).expect("step").checkpoint.hash);
+            seen.extend_from_slice(live.spear_events());
+        }
+        (hashes, live.recorded_tape(), seen)
+    }
+
+    #[test]
+    fn noose_duel_600_ticks_digest_identical_twice_and_across_tape_replay() {
+        let spec = spec(true);
+        let (first, tape, events) = duel(&spec, THROW_NOOSE);
+        let (second, ..) = duel(&spec, THROW_NOOSE);
+        assert_eq!(first, second, "x2 identical");
+        let thrown = events
+            .iter()
+            .filter(|e| matches!(e, crate::SpearEvent::Thrown { .. }))
+            .count();
+        let catches = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    crate::SpearEvent::Hit {
+                        victim: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(thrown >= 4, "loops flew: {thrown}");
+        assert!(catches >= 1, "the noose was in play: {catches} catches");
+        let mut replay = spec.live().expect("replay");
+        let mut again = Vec::new();
+        for tick in 0..TICKS {
+            let row: Vec<FighterInput> =
+                tape.0.iter().filter(|i| i.tick == tick).copied().collect();
+            again.push(replay.step(&row).expect("replay step").checkpoint.hash);
+        }
+        assert_eq!(first, again, "tape replay reproduces the digest");
+    }
+
+    #[test]
+    fn noose_off_ignores_the_button_and_keeps_the_old_digest() {
+        let off = spec(false);
+        let (pressed, ..) = duel(&off, THROW_NOOSE);
+        let (quiet, ..) = duel(&off, 0);
+        assert_eq!(
+            pressed, quiet,
+            "the bit changes nothing when the noose is off"
+        );
+        let (armed, ..) = duel(&spec(true), THROW_NOOSE);
+        assert_ne!(pressed, armed, "switching it on plays another match");
+        // Armed but never pressed: the match differs from the spear-only one by
+        // the noose block of the fold, and is as steady twice over.
+        let (idle_a, ..) = duel(&spec(true), 0);
+        let (idle_b, ..) = duel(&spec(true), 0);
+        assert_eq!(idle_a, idle_b);
+        assert_ne!(idle_a, quiet);
+    }
+
+    #[test]
+    fn noose_matches_have_no_snapshot_and_report_their_view() {
+        let mut live = spec(true).live().expect("builds");
+        assert!(live.snapshot().is_none(), "rollback rebuilds from the spec");
+        assert_eq!(live.spear_view().len(), 2);
+        live.step(&[]).expect("step");
+        assert!(live.spear_events().is_empty());
+        // A noose-only spec builds too, and shows the same view.
+        let only = MatchSpec::duel(spec(false).config, MatchWorld::empty()).with_noose();
+        let live = only.live().expect("noose-only builds");
+        assert_eq!(live.spear_view().len(), 2);
+        assert!(live.snapshot().is_none());
+    }
+
+    /// SW130 wire: the live match is its own director. Every accepted tick
+    /// steps the pressure gauge and the window reads its mode; a bout in
+    /// measure builds past its aggressive threshold and peaks.
+    #[test]
+    fn pressure_director_steps_once_per_live_tick_and_the_mode_moves() {
+        let config = ArenaConfig::try_new(7, 600, 2, 20.0).expect("valid config");
+        let mut live = MatchSpec::duel(config, MatchWorld::empty())
+            .live()
+            .expect("a duel builds");
+        // Both fighters in measure: the clash is the gauge's latch.
+        live.sim.states[0].pos = [0.0, 0.0, 0.0];
+        live.sim.states[1].pos = [0.0, 0.0, 1.0];
+        let start = live.pressure();
+        assert_eq!(start, (0, Mode::Relax), "a fresh match is at rest");
+        let mut saw_peak = false;
+        let mut last = 0;
+        for tick in 0..400 {
+            live.step(&[]).expect("the duel steps");
+            let (progression, mode) = live.pressure();
+            assert!(
+                progression >= last,
+                "tick {tick}: the gauge never loses progress while the clash holds"
+            );
+            last = progression;
+            if mode == Mode::Peak {
+                saw_peak = true;
+            }
+            if progression > 0 {
+                assert_ne!(mode, Mode::Relax, "a filling gauge is never at rest");
+            }
+        }
+        assert!(last > 0, "the caller steps the gauge: {last} permille");
+        assert!(
+            saw_peak,
+            "400 ticks in measure reach the aggressive peak (last {last} permille)"
+        );
+        assert!(
+            live.pressure_peaks() > 0,
+            "the peak came from the bout's own quota"
+        );
+        // The pacing rides the match, never the checkpoint: the reading is
+        // still there after the last step, and no hash carries it.
+        assert!(live.pressure().0 > 0, "the reading survives the step");
     }
 }
