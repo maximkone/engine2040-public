@@ -53,6 +53,34 @@ pub fn split_view_brief(raw: &[String]) -> Result<(Option<PathBuf>, Vec<String>)
     Ok((Some(PathBuf::from(path)), rest))
 }
 
+/// `--sun-elev <DEG>`: the day rig's sun at this elevation in degrees (0.5 to
+/// 89) instead of its own afternoon. The skybox, the fog, the baked ambient
+/// and the direct sun all follow (RL40). A look flag; the simulation never
+/// reads it.
+pub const SUN_ELEV_FLAG: &str = "--sun-elev";
+
+/// Pull `--sun-elev <DEG>` out of the argument list: the elevation and the
+/// rest in order. A missing or unparsable value, or one outside 0.5..=89,
+/// fails loudly.
+pub fn split_sun_elev(raw: &[String]) -> Result<(Option<f32>, Vec<String>), String> {
+    let Some(at) = raw.iter().position(|arg| arg == SUN_ELEV_FLAG) else {
+        return Ok((None, raw.to_vec()));
+    };
+    let value = raw
+        .get(at + 1)
+        .filter(|value| !value.starts_with("--"))
+        .ok_or_else(|| format!("{SUN_ELEV_FLAG} needs degrees, for example 12"))?;
+    let degrees: f32 = value
+        .parse()
+        .map_err(|_| format!("{SUN_ELEV_FLAG} {value}"))?;
+    if !(0.5..=89.0).contains(&degrees) {
+        return Err(format!("{SUN_ELEV_FLAG} {value} is outside 0.5..=89"));
+    }
+    let mut rest = raw.to_vec();
+    rest.drain(at..=at + 1);
+    Ok((Some(degrees), rest))
+}
+
 /// Pull `--hold <KEYS>` out of the argument list: the held buttons (a
 /// comma list of W A S D F Q SPACE SHIFT, any case) and the rest in order. A
 /// flag with no list, or a key it does not know, is an error.
@@ -208,4 +236,33 @@ pub fn split_view_line(raw: &[String]) -> Result<ViewLineSplit, String> {
         index += 4;
     }
     Ok((request, rest))
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn sun_elev_takes_degrees_in_range_and_leaves_the_rest_in_order() {
+        let (sun, rest) =
+            split_sun_elev(&strings(&["arena", "--sun-elev", "12.5", "--exit"])).expect("valid");
+        assert_eq!(sun, Some(12.5));
+        assert_eq!(rest, strings(&["arena", "--exit"]));
+        let (none, same) = split_sun_elev(&strings(&["arena", "--exit"])).expect("none");
+        assert_eq!((none, same.len()), (None, 2));
+        for bad in [
+            vec!["arena", "--sun-elev"],
+            vec!["arena", "--sun-elev", "--exit"],
+            vec!["arena", "--sun-elev", "noon"],
+            vec!["arena", "--sun-elev", "0"],
+            vec!["arena", "--sun-elev", "90"],
+            vec!["arena", "--sun-elev", "NaN"],
+        ] {
+            assert!(split_sun_elev(&strings(&bad)).is_err(), "{bad:?}");
+        }
+    }
 }
