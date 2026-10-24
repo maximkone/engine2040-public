@@ -102,6 +102,29 @@ Crate root `crates/render/src/lib.rs`. "Row" is the board row that owns the modu
 
 Shader sources: `crates/render/src/shaders/` (`forward.wgsl`, `blit.wgsl`, `tonemap.wgsl`, `bloom.wgsl`, `ssao.wgsl`, `cull.wgsl`, `cluster.wgsl`, `skin.wgsl`, `particle.wgsl`, `trail.wgsl`, `fog_vol.wgsl`, `lod_dither.wgsl`, `crowd_vat.wgsl`, `fluids_present.wgsl`, `forward_maps.wgsl`, `post/`). Compute WGSL is also embedded in `sky.rs`, `gtao.rs`, `fog.rs`, `decals.rs`, `material_layer.rs`, `particles_gpu.rs`, `shadow_cascade.rs`, `accel.rs`, `aa_scale.rs`, `baked_gi.rs`.
 
+### 1.5 Octahedral impostors (RL63)
+
+`crates/render/src/impostor.rs` is the CPU half only: the math that the baker and the runtime quad share. The idea is to bake a mesh from an N by N grid of view directions on an octahedral map. The runtime then draws the object far away as one camera-facing quad that blends the three nearest baked views (module doc). The code is pure `f32` arithmetic in a fixed order, with no allocation and no clock.
+
+- `octa_encode` and `octa_decode` (`impostor.rs:117`, `:133`) convert a direction to an atlas UV and back.
+- `frame_direction(n, i)` (`impostor.rs:163`) gives the view direction of frame `i` on the grid.
+- `bake_basis(to_camera)` (`impostor.rs:187`) gives the right and up axes that the baker and the quad both use.
+- `pick_frames(dir, n)` (`impostor.rs:220`) returns a `FrameBlend`: the three nearest frames with barycentric weights that sum to 1.
+- `AtlasLayout::fit` (`impostor.rs:272`) picks the largest power-of-two frame under a byte budget and an edge cap. `frame_rect` and `frame_uv_rect` (`impostor.rs:312`, `:322`) give each frame's tile.
+- `projected_diameter_px`, `switch_distance_m`, `default_switch_px` and `use_impostor` (`impostor.rs:347`, `:366`, `:382`, `:391`) make the screen-space switch with hysteresis. The default switch is one texel per pixel.
+- Constants: `MAX_FRAMES_SIDE` 32, `MIN_FRAME_PX` 16, `MAX_FRAME_PX` 256 (`impostor.rs:35-39`).
+- The WGSL mirror is `crates/render/src/shaders/impostor.wgsl`.
+
+**Limits.**
+
+- Not built: the bake and the draw. That is RL64, under `present/`, and it is open on the board.
+- Nothing else calls this module. `crates/render/src/lib.rs:214` is its only reference.
+- The crowd far row still uses `crowd_impostor.rs`. RL64 replaces that select (RL64 row).
+- The `asset.impostor` door prices cards from the `engine_anim` tiers and does not use this module (module doc of `crates/endpoint/src/packs/asset/impostor.rs`).
+- `wgsl_mirror_holds_the_same_math` (below) checks only that the named functions appear in the shader. It does not run the shader.
+
+**Tests.** `node tools/gh-check.mjs cargo test -p engine-render --lib impostor` runs 15 tests. They include `octa_round_trips_every_direction`, `weights_sum_to_one_and_frames_are_in_range`, `blend_is_continuous_so_the_view_never_pops`, `atlas_fit_obeys_budget_and_edge_cap`, `switch_has_hysteresis_and_defaults_to_one_texel_per_pixel` and `wgsl_mirror_holds_the_same_math` (`impostor.rs:427-641`).
+
 ## 2. Live window frame
 
 The live frame is the window's path (`present_frame_live` in `present/gpu_present/live.rs`). Order as the code encodes it:

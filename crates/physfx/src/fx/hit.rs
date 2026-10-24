@@ -3,9 +3,11 @@
 //! A blow used to land whole on the root bone and travel up the joints, so a hit on the hand
 //! moved the pelvis first. Now its total impulse is split over the bones inside the reach, the
 //! nearer ones taking more, so the momentum added is exactly the blow. Every joint also holds the
-//! angle it had at the spawn with a PD motor whose strength starts at 1 and falls to 0 in
-//! [`HIT_FADE_S`]: the body braces against the blow, then goes limp. A ragdoll nobody hit has no
-//! motor and costs nothing extra.
+//! angle it had at the spawn with a PD motor whose strength jumps to the body's muscle on a hit and
+//! falls back in [`HIT_FADE_S`] to a resting tone, [`RAGDOLL_TONE`] of the muscle: the body
+//! braces against the blow, then its joints keep only friction (no pose), so it never whips
+//! like a sack yet still folds, settles and sleeps. The brace's damping is critical at every
+//! strength, so a joint never rings as it fades.
 
 use super::joints::quat;
 use super::{GroupId, PhysFx};
@@ -24,24 +26,43 @@ pub const HIT_FADE_S: f32 = 0.3;
 /// Motor stiffness at full strength, per second squared. Measured on a shove at the head with four
 /// solver iterations: 400 held back a fifth of the swing in five ticks, 10 000 holds back more
 /// than half of it, 50 000 gains nothing more per joint than the solver can deliver.
-const STIFFNESS: f32 = 10_000.0;
-/// Motor damping at full strength, per second: critical for [`STIFFNESS`] (twice its root).
-const DAMPING: f32 = 200.0;
+pub(super) const STIFFNESS: f32 = 10_000.0;
+/// Motor damping at full strength, per second: critical for [`STIFFNESS`] (twice its root). A
+/// motor at strength `s` gets `DAMPING * sqrt(s)`, critical for its `STIFFNESS * s`.
+pub(super) const DAMPING: f32 = 200.0;
+/// Resting muscle tone of a ragdoll as a share of its body's muscle: the strength the motors rest
+/// at when nothing hit it, and what a brace fades back to. At rest the motors pull toward no
+/// pose (a pose spring would fight the floor forever and never let the body sleep): they are
+/// joint friction, a velocity motor aimed at zero that soaks up swing. So a fallen or towed body
+/// stops whipping like a sack, folds slowly under its weight, settles and sleeps. Zero muscle
+/// keeps zero tone, so a body file can still ask for a limp one.
+pub const RAGDOLL_TONE: f32 = 0.2;
+/// Joint friction at the resting tone of a full muscle, per second: the velocity-motor factor
+/// each free turning axis gets at rest (scaled by the body's muscle).
+const TONE_DAMPING: f32 = 40.0;
 /// The turning axes of a joint, which a motor can drive when the joint leaves them free.
-const TURNS: [JointAxis; 3] = [JointAxis::AngX, JointAxis::AngY, JointAxis::AngZ];
+pub(super) const TURNS: [JointAxis; 3] = [JointAxis::AngX, JointAxis::AngY, JointAxis::AngZ];
 
 /// The motors of one ragdoll.
 pub(super) struct Drive {
     /// The joint of every bone that has a parent, in bone order, with the angle of each turning
     /// axis at the spawn: what the motor holds.
     pub joints: Vec<(ImpulseJointHandle, [f32; 3])>,
-    /// 1 right after a hit, falling to 0; the motors are off at 0.
+    /// The body's muscle right after a hit, falling to `tone`; the motors are off at 0.
     pub strength: f32,
+    /// The resting strength: [`RAGDOLL_TONE`] of the body's muscle.
+    pub tone: f32,
 }
 
-/// Points every free turning axis of `joints` at the angle it held at the spawn, with `strength`
-/// of the full gain, or switches the motors off at zero.
-fn drive(set: &mut ImpulseJointSet, joints: &[(ImpulseJointHandle, [f32; 3])], strength: f32) {
+/// Drives every free turning axis of `joints`: above the resting `tone`, a brace that points the
+/// axis at the angle it held at the spawn with `strength` of the full gain; at the tone, joint
+/// friction only (no pose); at zero, the motors are off.
+pub(super) fn drive(
+    set: &mut ImpulseJointSet,
+    joints: &[(ImpulseJointHandle, [f32; 3])],
+    strength: f32,
+    tone: f32,
+) {
     for (handle, hold) in joints {
         let Some(joint) = set.get_mut(*handle, false) else {
             continue;
@@ -50,14 +71,33 @@ fn drive(set: &mut ImpulseJointSet, joints: &[(ImpulseJointHandle, [f32; 3])], s
             joint.data.motor_axes = JointAxesMask::empty();
             continue;
         }
+        let braced = strength > tone;
+        let free = TURNS
+            .iter()
+            .filter(|axis| !joint.data.locked_axes.contains((**axis).into()))
+            .count();
+        if !braced && free < 2 {
+            // A hinge (knee, elbow) has one free axis and its limit holds it. Friction on it
+            // fought the limit in the solver and let an elbow fold past it, so a resting hinge
+            // keeps no motor; the ball joints carry the tone.
+            joint.data.motor_axes = JointAxesMask::empty();
+            continue;
+        }
         for (axis, angle) in TURNS.into_iter().zip(hold) {
-            if !joint.data.locked_axes.contains(axis.into()) {
+            if joint.data.locked_axes.contains(axis.into()) {
+                continue;
+            }
+            if braced {
                 joint.data.set_motor_position(
                     axis,
                     *angle,
                     STIFFNESS * strength,
-                    DAMPING * strength,
+                    DAMPING * strength.sqrt(),
                 );
+            } else {
+                joint
+                    .data
+                    .set_motor_velocity(axis, 0.0, TONE_DAMPING * strength / RAGDOLL_TONE);
             }
         }
     }
@@ -66,7 +106,7 @@ fn drive(set: &mut ImpulseJointSet, joints: &[(ImpulseJointHandle, [f32; 3])], s
 /// The angle on each turning axis of a ball joint between `parent` and `child` at the spawn, as
 /// Rapier's motor reads it: twice the arcsine of the relative rotation's vector part, in the
 /// parent's frame. The ball joints have no frame of their own, so this is not zero in general.
-fn spawn_angles(parent: &Transform, child: &Transform) -> [f32; 3] {
+pub(super) fn spawn_angles(parent: &Transform, child: &Transform) -> [f32; 3] {
     let mut turn = quat(parent).inverse() * quat(child);
     if turn.w < 0.0 {
         turn = -turn;
@@ -79,7 +119,8 @@ impl PhysFx {
     /// is split over the bones whose centers lie within `radius` meters of the point, weighted
     /// `1 - distance / radius`, and the bones' impulses add up to `impulse`. A point outside
     /// every bone's reach gives the whole blow to the nearest bone. Every joint then braces:
-    /// motor strength jumps to the body's muscle and falls to 0 over [`HIT_FADE_S`]. Returns how
+    /// motor strength jumps to the body's muscle and falls to the resting tone over
+    /// [`HIT_FADE_S`]. Returns how
     /// many bones took part; 0 when the slot has no ragdoll. A blow that would throw a bone past
     /// the speed cap, or a bad number, is refused and changes nothing.
     pub fn hit_ragdoll(
@@ -157,14 +198,49 @@ impl PhysFx {
         // the motors can.
         let muscle = f32::from(self.groups[at].muscle_permille) / 1000.0;
         if let Some(drive_of) = self.groups[at].drive.as_mut() {
-            drive_of.strength = muscle;
-            drive(&mut self.world.impulse_joints, &drive_of.joints, muscle);
+            drive_of.strength = muscle.max(drive_of.tone);
+            drive(
+                &mut self.world.impulse_joints,
+                &drive_of.joints,
+                drive_of.strength,
+                drive_of.tone,
+            );
         }
         Ok(pushed)
     }
 
+    /// Holds the ragdoll in `slot` braced at least at `strength` of the full gain this tick (the
+    /// PuppetMaster pin weight): a body that is still fighting, towed on a rope or thrown, keeps
+    /// its shape while the caller asks, then fades back to its tone over [`HIT_FADE_S`] once the
+    /// calls stop. Capped at the body's muscle, so a limp body file stays limp. Returns the
+    /// strength now, `None` when the slot has no ragdoll.
+    pub fn brace_ragdoll(&mut self, slot: u8, strength: f32) -> Option<f32> {
+        let at = self
+            .groups
+            .iter()
+            .position(|g| g.id == GroupId::Ragdoll(slot))?;
+        let muscle = f32::from(self.groups[at].muscle_permille) / 1000.0;
+        let motors = self.groups[at].drive.as_mut()?;
+        let want = if strength.is_finite() {
+            strength.clamp(0.0, 1.0).min(muscle)
+        } else {
+            0.0
+        };
+        if want > motors.strength {
+            motors.strength = want;
+            drive(
+                &mut self.world.impulse_joints,
+                &motors.joints,
+                motors.strength,
+                motors.tone,
+            );
+        }
+        Some(motors.strength)
+    }
+
     /// How hard the joints of the ragdoll in `slot` brace now: the body's muscle right after a
-    /// hit, falling to 0, 0 when the motors are off. `None` when the slot has no ragdoll.
+    /// hit, falling to the resting tone ([`RAGDOLL_TONE`] of the muscle), 0 when the motors are
+    /// off. `None` when the slot has no ragdoll.
     pub fn ragdoll_strength(&self, slot: u8) -> Option<f32> {
         self.groups
             .iter()
@@ -174,10 +250,11 @@ impl PhysFx {
             .map(|d| d.strength)
     }
 
-    /// The motors of a ragdoll just built: the joint that ties each bone with a parent to it, in
-    /// bone order, with the angles to hold. A hinge was framed to read zero at the spawn.
+    /// The motors of a ragdoll just built, switched on at the resting tone: the joint that ties
+    /// each bone with a parent to it, in bone order, with the angles to hold. A hinge was framed
+    /// to read zero at the spawn.
     pub(super) fn spawn_drive(
-        &self,
+        &mut self,
         rig: &Rig,
         placed: &[Transform],
         handles: &[RigidBodyHandle],
@@ -199,24 +276,29 @@ impl PhysFx {
                 Some((handle, hold))
             })
             .collect();
-        Drive {
+        let tone = f32::from(rig.muscle_permille()) / 1000.0 * RAGDOLL_TONE;
+        let motors = Drive {
             joints,
-            strength: 0.0,
-        }
+            strength: tone,
+            tone,
+        };
+        drive(&mut self.world.impulse_joints, &motors.joints, tone, tone);
+        motors
     }
 
     /// Takes one tick off every bracing ragdoll's strength; call it before the world steps.
     pub(super) fn fade_drives(&mut self) {
         let fall = FIXED_DT / HIT_FADE_S;
         for group in &mut self.groups {
-            let Some(motors) = group.drive.as_mut().filter(|d| d.strength > 0.0) else {
+            let Some(motors) = group.drive.as_mut().filter(|d| d.strength > d.tone) else {
                 continue;
             };
-            motors.strength = (motors.strength - fall).max(0.0);
+            motors.strength = (motors.strength - fall).max(motors.tone);
             drive(
                 &mut self.world.impulse_joints,
                 &motors.joints,
                 motors.strength,
+                motors.tone,
             );
         }
     }
