@@ -55,7 +55,7 @@
 //! Determinism: the same bytes give the same clip. Nothing here reads a
 //! clock, a random source, or the environment.
 //!
-//! Errors: [`PackClipError`] at every boundary; a pack that does not fit the
+//! Errors: [`PackClipError`](crate::pack_clip::PackClipError) at every boundary; a pack that does not fit the
 //! body fails loud, never plays wrong motion.
 
 use engine_anim::contract::Skeleton;
