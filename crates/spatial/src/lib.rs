@@ -29,6 +29,8 @@ pub mod isovist;
 pub mod kdtree;
 /// Light reach: is a point lit by any light, dark, or unknown (SP66).
 pub mod light;
+/// Distance detail policy: bands, cull radius and hysteresis for one scene.
+pub mod lod;
 /// Surface gap, push direction and pairwise measure (SPF4, SPX11).
 pub mod measure;
 pub mod navcheck;

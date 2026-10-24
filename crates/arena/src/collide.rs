@@ -334,8 +334,9 @@ fn collide_states_with(
     let radius_mm = crate::match_wire::pos_mm([limit, 0.0, 0.0])[0];
     let fighters = fighters.min(crate::MAX_SLOTS);
     // FEEL10: contact pushes back before the positional pass takes the overlap
-    // away. Gated above rules v2, so every shipped v2 bout keeps its bytes.
-    if rules.version > crate::FIGHT_RULES_V2 {
+    // away. Gated above rules v3, so every shipped v2 and v3 bout keeps its
+    // bytes.
+    if rules.version > crate::FIGHT_RULES_V3 {
         if let Some(carriers) = &mut knockback {
             exchange_contact_pushes(&walkers[..fighters], carriers, fighters);
         }
@@ -530,13 +531,13 @@ mod tests {
         states
     }
 
-    /// FEEL10: a knocked-back fighter runs into a resting one. Above rules v2 the
+    /// FEEL10: a knocked-back fighter runs into a resting one. Above rules v3 the
     /// speed it shares along the contact normal goes to the resting body; under
-    /// v2 the bytes are the same as before the push existed (no hand-over).
+    /// v2 and v3 the bytes are the same as before the push existed (no hand-over).
     #[test]
-    fn a_contact_push_hands_the_speed_over_past_v2_only() {
-        let rule_v3 = crate::ArenaRules {
-            version: crate::FIGHT_RULES_V2 + 1,
+    fn a_contact_push_hands_the_speed_over_past_v3_only() {
+        let rule_v4 = crate::ArenaRules {
+            version: crate::FIGHT_RULES_V3 + 1,
             ..crate::ArenaRules::v2_free_for_all()
         };
         let carriers = || {
@@ -557,23 +558,23 @@ mod tests {
         );
         assert!(carriers_v2[1].at_rest(), "v2 must not hand speed over");
 
-        let (mut states_v3, mut carriers_v3) = (touching_pair(), carriers());
+        let (mut states_v4, mut carriers_v4) = (touching_pair(), carriers());
         collide_states_with(
-            &mut states_v3,
+            &mut states_v4,
             None,
-            Some(&mut carriers_v3),
-            &rule_v3,
+            Some(&mut carriers_v4),
+            &rule_v4,
             20.0,
             2,
             resolve,
         );
         assert!(
-            carriers_v3[1].velocity()[0] > 0,
+            carriers_v4[1].velocity()[0] > 0,
             "the resting body takes the push: {:?}",
-            carriers_v3[1].velocity()
+            carriers_v4[1].velocity()
         );
         assert!(
-            carriers_v3[0].velocity()[0] < 40,
+            carriers_v4[0].velocity()[0] < 40,
             "the sliding body gives speed"
         );
     }
@@ -800,7 +801,7 @@ mod tests {
     /// A weapon row for the victim, which never swings: the gladius numbers
     /// under another name, so the row arms.
     const BARE_ROW: &str =
-        "mass_g=1000 damage_permille=120 speed_ticks=15 recovery_ticks=8 stagger_permille=400";
+        "mass_g=1000 damage_permille=120 speed_ticks=30 recovery_ticks=6 stagger_permille=400";
 
     /// The duel's tape: slot 0 swings on tick 0 and faces `facing`, every
     /// fighter holds still.
