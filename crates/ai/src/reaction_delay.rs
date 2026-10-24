@@ -44,6 +44,20 @@ impl<T: Copy, const N: usize> ObsRing<T, N> {
         self.count = self.count.wrapping_add(1);
     }
 
+    /// Samples retained, capped at `N`.
+    ///
+    /// Units: samples. Determinism: pure read. Errors: none.
+    pub fn len(&self) -> usize {
+        self.count.min(N)
+    }
+
+    /// True when no sample is held.
+    ///
+    /// Units: none. Determinism: pure read. Errors: none.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Return the observation from `delay` ticks back.
     ///
     /// Units: ticks. Determinism: integer index only, so the same call twice
