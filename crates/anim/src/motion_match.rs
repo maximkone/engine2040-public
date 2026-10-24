@@ -440,6 +440,238 @@ pub(crate) fn search_penalized(
     ))
 }
 
+/// Largest wall list one [`WorldQuery`] carries. Bounded, so the per-entry
+/// penalty scan stays heap-free and the same length every search.
+pub const WALL_MAX: usize = 8;
+/// Parameter scale of the segment clip: 16 fractional bits of `[0, 1]`.
+const T_SCALE: i64 = 1 << 16;
+
+/// One axis-aligned wall on the planar axes, Q10 steps per meter. The root
+/// plus the capsule radius must stay outside it; a capsule path that enters
+/// the inflated box costs one [`WorldQuery::hit_cost`] at that horizon.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Wall {
+    /// Lower corner `[x, z]` in Q10 steps.
+    pub min: [i32; 2],
+    /// Upper corner `[x, z]` in Q10 steps.
+    pub max: [i32; 2],
+}
+
+impl Wall {
+    /// Wall spanning two planar corners in meters; corners are ordered, so
+    /// the caller may pass them in any order.
+    pub fn from_meters(a: [f32; 2], b: [f32; 2]) -> Self {
+        let (ax, bx) = (q(a[0]), q(b[0]));
+        let (az, bz) = (q(a[1]), q(b[1]));
+        Self {
+            min: [ax.min(bx), az.min(bz)],
+            max: [ax.max(bx), az.max(bz)],
+        }
+    }
+
+    /// Ordered corners, both inside the quantize range.
+    fn validate(&self) -> bool {
+        self.min[0] <= self.max[0]
+            && self.min[1] <= self.max[1]
+            && self
+                .min
+                .iter()
+                .chain(self.max.iter())
+                .all(|v| v.saturating_abs() <= Q_MAX)
+    }
+}
+
+/// Bounded wall list for one search; the penalty scan never allocates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WallSet {
+    walls: [Wall; WALL_MAX],
+    len: usize,
+}
+
+impl Default for WallSet {
+    fn default() -> Self {
+        Self {
+            walls: [Wall {
+                min: [0; 2],
+                max: [0; 2],
+            }; WALL_MAX],
+            len: 0,
+        }
+    }
+}
+
+impl WallSet {
+    /// Empty set: an open floor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append one wall; refuses a ninth wall rather than dropping it.
+    pub fn push(&mut self, wall: Wall) -> Result<(), MatchError> {
+        if self.len >= WALL_MAX {
+            return Err(MatchError::BadQuery("world walls"));
+        }
+        self.walls[self.len] = wall;
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Walls in insertion order.
+    pub fn walls(&self) -> &[Wall] {
+        &self.walls[..self.len]
+    }
+
+    /// Wall count.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True when the floor is open.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// World geometry for one search: where the root stands, the capsule radius,
+/// the walls around it and the integer cost of one horizon that enters one.
+/// Empty walls (or a zero `hit_cost`) make [`search_in_world`] equal
+/// [`search`] exactly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct WorldQuery {
+    /// Root position `[x, z]` in Q10 steps: the origin of the entry's
+    /// root-relative trajectory lanes.
+    pub root: [i32; 2],
+    /// Capsule radius in Q10 steps; walls are inflated by it.
+    pub radius: i32,
+    /// Walls the capsule path must clear.
+    pub walls: WallSet,
+    /// Cost of one trajectory horizon that enters a wall, in the cost units
+    /// of [`cost_units`]. At most [`PENALTY_MAX`].
+    pub hit_cost: i64,
+}
+
+impl WorldQuery {
+    /// Open floor with no penalized horizons.
+    pub fn open_floor(root: [i32; 2]) -> Self {
+        Self {
+            root,
+            ..Self::default()
+        }
+    }
+
+    /// Geometry with walls and their per-horizon penalty.
+    pub fn new(root: [i32; 2], radius: i32, walls: WallSet, hit_cost: i64) -> Self {
+        Self {
+            root,
+            radius,
+            walls,
+            hit_cost,
+        }
+    }
+}
+
+/// Bounds [`search_in_world`] enforces; a hand-built world never panics.
+fn validate_world(world: &WorldQuery) -> Result<(), MatchError> {
+    if world.root.iter().any(|v| v.saturating_abs() > Q_MAX) {
+        return Err(MatchError::BadQuery("world root"));
+    }
+    if world.radius < 0 || world.radius > Q_MAX {
+        return Err(MatchError::BadQuery("world radius"));
+    }
+    if world.hit_cost < 0 || world.hit_cost > PENALTY_MAX {
+        return Err(MatchError::BadQuery("world penalty"));
+    }
+    if world.walls.walls().iter().any(|wall| !wall.validate()) {
+        return Err(MatchError::BadQuery("world wall"));
+    }
+    Ok(())
+}
+
+/// Clip a segment against one slab of an inflated box: `t` and `u` carry the
+/// running parameter interval in [`T_SCALE`] units. Integer only, so the
+/// penalty replays bit-identical.
+fn clip_slab(start: i64, delta: i64, lo: i64, hi: i64, t: &mut i64, u: &mut i64) -> bool {
+    if delta == 0 {
+        return start >= lo && start <= hi;
+    }
+    let near = (lo - start).saturating_mul(T_SCALE) / delta;
+    let far = (hi - start).saturating_mul(T_SCALE) / delta;
+    let (near, far) = if near <= far {
+        (near, far)
+    } else {
+        (far, near)
+    };
+    *t = (*t).max(near);
+    *u = (*u).min(far);
+    *t <= *u
+}
+
+/// True when the capsule path from `a` to `b` enters `wall` inflated by
+/// `pad`: the segment clipped against the padded box on both planar axes.
+fn path_enters(a: [i32; 2], b: [i32; 2], wall: &Wall, pad: i32) -> bool {
+    let pad = i64::from(pad);
+    let mut t = 0i64;
+    let mut u = T_SCALE;
+    let axes = [
+        (a[0], b[0], wall.min[0], wall.max[0]),
+        (a[1], b[1], wall.min[1], wall.max[1]),
+    ];
+    for (start, end, lo, hi) in axes {
+        let start = i64::from(start);
+        let delta = i64::from(end) - start;
+        if !clip_slab(
+            start,
+            delta,
+            i64::from(lo) - pad,
+            i64::from(hi) + pad,
+            &mut t,
+            &mut u,
+        ) {
+            return false;
+        }
+    }
+    t <= u
+}
+
+/// Integer world-geometry penalty for one candidate: one `hit_cost` per
+/// trajectory horizon whose capsule path from the root enters a wall, capped
+/// at [`PENALTY_MAX`]. Open floor reads zero, so a world-aware search over an
+/// open floor picks what [`search`] picks.
+pub fn world_penalty(feat: &[i32; FEAT_N], world: &WorldQuery) -> i64 {
+    if world.walls.is_empty() || world.hit_cost == 0 {
+        return 0;
+    }
+    let mut penalty = 0i64;
+    for k in 0..TRAJ_N {
+        let point = [
+            world.root[0].saturating_add(feat[POSE_LANES + k * 2]),
+            world.root[1].saturating_add(feat[POSE_LANES + k * 2 + 1]),
+        ];
+        if world
+            .walls
+            .walls()
+            .iter()
+            .any(|wall| path_enters(world.root, point, wall, world.radius))
+        {
+            penalty = penalty.saturating_add(world.hit_cost).min(PENALTY_MAX);
+        }
+    }
+    penalty
+}
+
+/// [`search`] that can see the world: every candidate pays
+/// [`world_penalty`] on top of its feature cost, so a clip whose future
+/// trajectory would enter geometry loses to a side-step or a stop. Same scan
+/// order, bound and ties as [`search`]; an open floor is `search` exactly.
+pub fn search_in_world(
+    db: &MotionDb,
+    query: &Query,
+    world: &WorldQuery,
+) -> Result<(MatchResult, SearchReceipt), MatchError> {
+    validate_world(world)?;
+    search_penalized(db, query, |entry| world_penalty(&entry.feat, world))
+}
+
 /// FNV-1a64 over entries (clip, tick, contact, fixed lanes).
 pub fn db_hash(db: &MotionDb) -> u64 {
     let mut h = Fnv64::new();
@@ -1558,3 +1790,7 @@ mod search_soak {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "motion_match_world_test.rs"]
+mod world_tests;

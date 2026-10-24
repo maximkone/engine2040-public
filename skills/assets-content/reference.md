@@ -1,0 +1,118 @@
+# Content reference — the lanes, the PBR sets, the budget and mesh tables
+
+Moved out of `SKILL.md`: the lanes that do not feed the arena, the Mixamo and Rocketbox detail, the ambientCG set procedure with its LFS pitfall, and the full `Caps` and mesh rules. `SKILL.md` keeps the arena path, licensing, cook and the headline rules.
+
+## Make a fighter body (MPFB lane)
+
+One command per lane. Each runs its steps in order and stops at the first failure, which names the step.
+
+- MPFB body: `node tools/asset-gen/character.mjs --from mpfb --name <id> --faction ashkin|wardens [--height 1.9] [--bulk 1.0] [--out target/chargen/<id>]`. It runs mpfb_body, proportion_pass, style_cook, the 30 m gate, rig22 and the page budget check (LOD0 tris, 256 px atlas cap, first-bundle and memory bytes). It writes `receipt.json` in the out dir and prints one `RECEIPT` line. Exit 3 means the gate or the budget said no; exit 1 means a step failed.
+- Concept image (the older lane): `node tools/asset-gen/character.mjs --concept <image> --name <id> --faction ashkin`. It runs sf3d, style_cook, the gate and rig22.
+- Tests: `node --test tools/asset-gen/character.test.mjs`.
+- Not wired yet: a cooked MPFB body does not reach `content/fighters` or `fighters.e2bundle`. The receipt's `next_step` says what is missing.
+
+## Realistic characters (Rocketbox), the look study
+
+This lane is for studying an avatar (LODs, the 30 m gate, the page budget). It does not reach the game; the arena path is in `SKILL.md`.
+
+Microsoft Rocketbox avatars (MIT, 115 rigged humans, 3ds Max Biped skeleton) are the realistic body. One command fetches one avatar and cooks it: `node tools/asset-gen/character.mjs --from rocketbox --avatar Adults/Male_Adult_08 --name rb_male08 [--home C:\forge-media\rocketbox] [--tris0 7400] [--out target/chargen/rb_male08]`. Groups are Adults, Children and Professions.
+
+- The fetch is `tools/asset-gen/rocketbox.mjs`: the FBX and textures go once into `--home` (never into the repo), resumable, one download at a time, 3 MB/s cap. `--dry-run` shows the plan and makes no network call once `textures.txt` is cached.
+- The cook is `tools/blender/rocketbox_cook.py`: bones renamed to the contract charset (`bip01_l_upperarm`, the names `crates/assets/src/rocketbox_map.rs` expects), colour and normal maps at 1024 px, LOD0 to LOD3 GLBs with the skin kept, `hero.png` at 80% of the frame, `cook.json` with the MIT licence and the source sha256.
+- Out dir: `cook/` (lod0..lod3.glb, textures/, hero.png, cook.json), `gate/silhouette_30m.png`, `receipt.json`, and one `RECEIPT` line. Exit 3 means the 30 m gate or the page budget said no; exit 1 means a step failed. Look at `cook/hero.png` before anything else.
+- Same gates as the other lanes: the 30 m fill band (0.40 to 0.70) and `budgetCheck`. As of 2026-10-22 both proven avatars stop there: Male_Adult_08 fills 0.30 at 30 m and its lane is 6.7 MB against the 2.04 MB first-bundle budget; Military_Male_01 fills 0.35 and its lane is 12.8 MB. A human with arms out fills less of its box than a blockout, so the band itself is the open question.
+- Not the game path: `fighter.mjs` is. The receipt's `next_step` says so.
+- Tests: `node --test tools/asset-gen/character.test.mjs` (no network, no Blender).
+
+## Mixamo packs
+
+Mixamo animation packs, fetched by `tools/asset-gen/mixamo.mjs` into `C:\forge-media\mixamo\<pack_slug>\` (outside the repo; never commit them). The owner signs in once; the tool reuses that browser profile (`C:\forge-media\mixamo-lane\profile2`, override with env `MIXAMO_PROFILE`).
+
+- Sign in once (owner, by hand; the tool never types credentials): `node tools/asset-gen/mixamo.mjs --login`
+- List packs with animation counts: `node tools/asset-gen/mixamo.mjs --list sword` (exit 4 means not signed in: run `--login` first)
+- Fetch one pack as FBX, T-pose with skin, no keyframe reduction: `node tools/asset-gen/mixamo.mjs --pack "Sword and Shield Pack" [--fps 60] [--out <dir>]`
+- Plan only, no browser: `node tools/asset-gen/mixamo.mjs --pack "<Pack Name>" --dry-run`
+- API trace for debugging: add `--trace` (method, path and status to stderr; never headers or bodies)
+- Each pack writes `PROVENANCE.json` (source "Adobe Mixamo", licence note: royalty-free for use in games; do not redistribute the raw files as a library). A pack with one FBX per animation plus one is skipped.
+- Tests: `node --test tools/asset-gen/mixamo.test.mjs`
+
+## PBR sets for the arena (ambientCG)
+
+Raw, uncooked sets live in `content/arena/sources/<AssetId>/`. Cooking to KTX2 (BC on desktop, ASTC where available) is the separate second half of row VR2 and reads from here.
+
+- Folder name is the ambientCG id, for example `Bricks097`. It holds only image files and `LICENCE.txt`.
+- Take the 1K JPG zip: `https://ambientcg.com/get?file=<AssetId>_1K-JPG.zip`. Take 2K only if a row needs it (size matters for the web bundle). Keep `Color`, `NormalGL`, `Roughness`, and `AmbientOcclusion`, `Metalness`, `Displacement` when the set has them. Drop the DirectX normal, `.blend`, `.usdc`, `.mtlx`, `.tres` and preview PNGs.
+- `NormalGL` only: OpenGL convention, +Y up. A DX normal is the GL one with the green channel inverted, so never flip a GL one again. Two normal conventions in one folder invite a flipped-green lighting bug.
+- `Color` is sRGB. The others are linear data. Say so in the cook.
+- `LICENCE.txt` holds the source URL, the licence line and URL, the download date, the normal convention and what was dropped. Copy a neighbour (for example `content/arena/sources/Planks039/LICENCE.txt`).
+
+The PROVENANCE row: `content/arena/sources/PROVENANCE.md` has one table row per folder, seven columns:
+
+`asset id | source URL | licence (must contain CC0) | downloaded date | files (bytes) | normal | arena material`
+
+- The files cell lists every file as `name size` separated by `;`, `LICENCE.txt` included. Sizes are exact from the disk (`(Get-Item f).Length`). Never type a size by hand. A set with no AO map says so in that cell.
+- Update the "Total on disk" line.
+
+Check: `node tools/arena-sources.mjs` prints `arena sources ok` (exit 0) or one problem per line (exit 1). Test: `node --test tools/arena-sources.test.mjs`. It reads only, no network. It fails when:
+
+- a folder has no row, or a row has no folder;
+- the licence cell lacks `CC0`;
+- a Color, Normal or Roughness image is missing;
+- `LICENCE.txt` is missing or lacks `CC0`;
+- a file other than an image (`jpg`, `jpeg`, `png`, `exr`) or `LICENCE.txt` is present (delete the zip, the `.blend` and the preview PNG);
+- a row's `name size` does not match the disk;
+- the folder total is over 60 MiB (`SIZE_BUDGET_BYTES`). Do not put 2K or 4K sets in git for a web target.
+
+`node tools/workspace-check.mjs` also fails a NEW tracked non-LFS blob over 5 MB.
+
+Order of work for a new set: ask the owner. Fetch (`tools/fetch-content.mjs`, or take the zip by hand). Unzip into a scratch folder and keep only the files above. Copy to `content/arena/sources/<AssetId>/`. Write `LICENCE.txt`. Add the PROVENANCE row. Run `node tools/arena-sources.mjs`. Commit by path. Update the row's progress note (skill `commit-and-board`).
+
+### The LFS pointer pitfall
+
+- `.gitattributes` sends `content/**/*.jpg`, `.png`, `.hdr`, `.exr`, `.ktx2`, `.glb` and more to Git LFS. The git blob is a tiny pointer (`version https://git-lfs.github.com/spec/v1`). The working tree holds the real bytes.
+- So `git show HEAD:<path>`, `git archive` and a runner checkout without LFS give pointers, and `arena-sources.mjs` then reports size mismatches. Sizes in `PROVENANCE.md` are real-file sizes. Run the check on the PC working tree.
+- `node tools/public-export.mjs` turns pointers into real bytes from the local LFS store (the public mirror has no LFS). If it reports `LFS object missing locally`, run `git lfs fetch` or `git lfs pull` for that path first. Never commit a pointer you wrote by hand.
+- Do not run `git lfs migrate` or rewrite history.
+
+## The full budget rules
+
+The cooker reports. The caller decides. Over-budget never lands silently. Source: Game Engine Gems 1 ch. 1.3.
+
+| # | Rule | Flag | Symbols |
+|---|---|---|---|
+| 1 | One caps table: POTATO and COMFORT live as one `Caps` struct. | magic 4000 or 1500 scattered in cooks | `crates/assets/src/budget.rs::Caps`, `POTATO`, `COMFORT` |
+| 2 | Stats first: `check` takes a plain `MeshStats` and returns `Vec<BudgetFinding>`. | reading GLB bytes inside the budget test | `budget.rs::check`, `mesh_cook.rs::tri_count` |
+| 3 | Each finding names the limit and the measured value. | a bare refusal with no counts | `import_repair.rs::CODE_BUDGET_TRIS` |
+| 4 | 75 bones per section, enforced before skinning. | a 76-bone section that cooks clean | `budget.rs::POTATO`, `import_repair.rs::BudgetSet` |
+| 5 | Skin weights clamp to 4 influences with renormalized sums. | a 5th weight dropped with no finding | `skin_import.rs::MAX_INFLUENCES`, `WEIGHT_SUM_EPS` |
+| 6 | One material and one shared atlas per skin. | two materials on a crowd member | `cooked.rs::validate_material`, `lib.rs::GATES` |
+| 7 | Texture pixels are capped. Potato base color is 1024x1024 (`Caps::max_tex_px` 1048576). The importer ceiling is separate: `MAX_TEXTURE_DIM` 4096, `MAX_TEXTURE_PIXELS` 16777216. | a 2k albedo on a potato fighter | `texture.rs` |
+| 8 | The budget module only reports. The caller allocates and refuses. | `new` inside the budget path with no owner | `lib.rs`, `bundle_cook.rs::cook_and_write` |
+| 9 | `check` is pure: x2 equal bytes, no clock, threads or hash order. | `Instant::now` or `HashMap` iteration in the budget path | `import.rs::gate_results`, `crates/perf/src/vram.rs` |
+
+Caps today (`crates/assets/src/budget.rs`):
+
+| Table | Tris | Bones | Influences | Materials per skin | Texture px |
+|---|---|---|---|---|---|
+| `POTATO` | 1500 | 75 | 4 | 1 | 1048576 |
+| `COMFORT` | 4000 | 75 | 4 | 1 | 1048576 |
+
+Do: keep one `Caps` table, report both numbers, refuse the file at the gate. Don't: sprinkle limits in cooks, clamp silently, or let the budget allocate from the main heap.
+
+## The full mesh rules
+
+PASS needs `tri_count` plus `validate_mesh` green and x2 equal, never a picture alone. Source: Lengyel Vol 1 ch. 3.1-3.2.
+
+| # | Rule | Flag |
+|---|---|---|
+| 1 | Tris are faces: `mesh_cook.rs::tri_count` returns indices / 3 from `cooked.rs::CookedMesh`, not verts. | a vert count passed as tris hides a 3x error |
+| 2 | Indices form triples: `cooked.rs::validate_mesh` refuses `index_len % 3 != 0` and out-of-range indices from `mesh_import.rs::import_gltf_bytes`. | stray indices that cook |
+| 3 | Winding stays CCW. `validate_mesh` keeps outward faces. Zero-area triangles are refused by `ZERO_AREA_M2` (1e-12) in `mesh_cook.rs`. | flipped faces with dark lighting |
+| 4 | Verts are shared: one box is 8 verts and 12 tris. `mesh_cook.rs::optimize_index_order` keeps sharing. | 36 verts for a box inflates budgets |
+| 5 | Closed hulls satisfy V-E+F=2 (`mesh_cook.rs::CollisionHull`). Open meshes are marked open, not forced shut. | an open cape counted as closed |
+| 6 | Face normals are `cross(edge1, edge2)`, unit length. A missing NORMAL is filled area-weighted in `mesh_import.rs`. | unnormalized normals that shade seams |
+| 7 | Each LOD in `mesh_cook.rs::LOD_RATIOS` (1.0, 0.5, 0.25, 0.125) holds fewer tris via `simplify` in `crates/assets/src/collapse.rs`. `lod_swap.rs` checks with `tri_count`. | LOD1 larger than LOD0 |
+| 8 | The budget check reads plain stats (tris, bones, influences, materials, tex_px) and reports both numbers. | GLB bytes read inside the budget test |
+| 9 | `tri_count` plus `cook_mesh` are pure: x2 equal bytes, no clock or hash order. | run-to-run tri drift |
+
+Do: count faces, keep winding, share verts, report both numbers at the gate. Don't: count verts as tris, flip winding, or split verts to pass a budget.
