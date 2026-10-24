@@ -64,9 +64,9 @@ conversions live in `speed_demo/num.rs`. Short of the rows as written, left open
 - [ ] SD8 ground colour: sand/grass/rock by slope (SD1). `MeshData` has no colour channel,
   so the terrain is one sand material; needs a vertex colour or a slope-blend material.
 - [ ] SD9 falling halves as physfx bodies (SD4). The cut top is a kinematic slide-then-tumble
-  (`cut::Slide`), not a physfx body; it does not hit the ground or other towers.
+  (`cut::Slide`), not a physfx body; it does not hit the ground or other towers. Progress 2026-10-25: Piece 1 landed 99e762856 (a cut top is a physfx stone body that lands and is stopped by towers). Left: scene.rs still draws Slide; Piece.half and SpeedDemo.falls.
 - [ ] SD10 demo HUD: the arena's 2D health bars still draw over the demo; hide them and show
-  the speed line on screen (SD7 asks for a HUD speed line).
+  the speed line on screen (SD7 asks for a HUD speed line). Progress 2026-10-24: Landed 8dd1b29bc: speed_demo/hud.rs stages the demo's two rows through push_text and clears on drop; 117 tests run 40127336988. Left: a frame of the HUD from a rebuilt arena.exe.
 - [ ] SD11 drive capture: the autopilot only flies; add a drive leg so a capture proves the
-  car (SD6 is proven by its tests only).
+  car (SD6 is proven by its tests only). Progress 2026-10-24: Landed 8dd1b29bc: dunes_autopilot drives one 7 s leg from 5 s, line() prints drove_s/drive_legs; 117 tests run 40127336988. Left: the 900-frame capture receipt.
 
