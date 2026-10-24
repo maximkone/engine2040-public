@@ -386,7 +386,7 @@ pub struct PlayReport {
     pub foot_slide_mm: u32,
     /// Farthest any joint moved from its bind-pose world position, millimeters.
     pub max_joint_travel_mm: u32,
-    /// Joints that moved more than [`MOVING_JOINT_MM`].
+    /// Joints that moved more than `MOVING_JOINT_MM`.
     pub moving_joints: u32,
 }
 
