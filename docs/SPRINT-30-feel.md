@@ -172,13 +172,26 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   parses back as a valid verb call in dry run; one test per top-12 code pins its suggestion text.
   F2P: a refusal is a string with no fields.
   Landed 5babbaef0. `mcp_refusal.rs` owns the `McpToolError` record (`code`, `message`, `data`, `kind`, `retryable`, `suggestions`, `next`) and fills the four advice fields from the code tables inside `McpToolError::new`, so all 348 refusal sites gained them without an edit; `Kind` is input, state, permission, budget, feature or internal, and the twelve most-hit codes carry hand-pinned suggestions plus the one next call. Proof: `cargo test -p engine-endpoint --features mcp --lib refusal` 39 passed, 0 failed - a scan of the crate's own literals finds 150+ codes and none unclassified, a payload test shows the four fields crossing the door, and twelve `refusal_pinned_*` tests pin each suggestion. rust-quality PASS, rustfmt clean, `git diff --check` clean. `--tighten` deferred: `tools/rust-quality.baseline.json` carries another session's edits.
-- [ ] DOOR7 proof: the ladder measures the model, not our mood. Steal: `SummerEngine/summer@88d0a5b6`
+- [x] DOOR7 proof: the ladder measures the model, not our mood. Steal: `SummerEngine/summer@88d0a5b6` Landed f0fecf466.
   `evals/end-to-end/README.md` - six fixed prompts, all-or-nothing gates, wall clock, tool calls
   and cost printed per rung. Rungs: E0 door alive, E1 player walks, E2 two fighters trade, E3 parry
   lands, E4 camp work builds, E5 the slice runs. Files: `crates/playtest/src/eval.rs`,
   `tools/agent-ladder.mjs`.
   Accept: three rungs run against the mock provider and print a table with pass/fail and counts;
   a failing rung names the verb that refused; the same tape twice gives the same table.
+  Proof: `crates/endpoint/src/e2e_ladder.rs` drives all six rungs through `PackRegistry::invoke`, with
+  `engine_provider::agent_loop`'s scripted planner as the mock provider. `cargo test -p engine-endpoint
+  --features mcp --lib e2e_ladder` 13 passed, 0 failed (run 40051207011), and the printed table reads
+  6 of 6 rungs pass, 7 door calls, 2296 est tokens with calls, tokens, digest, refusing verb and
+  missed check per rung. A refusal row prints its verb and code (`sim.step:bad_ticks`), and the same
+  ladder twice gives the same tape (`the_same_ladder_twice_gives_the_same_tape`); `tools/agent-ladder.mjs`
+  automates that read (9 tests, `node --test tools/agent-ladder.test.mjs`) and compared two real
+  captured run outputs field for field. Deviation, stated in the README: the harness lives in
+  `crates/endpoint`, not the row's `crates/playtest/src/eval.rs`, because endpoint already depends on
+  playtest and the reverse edge would cycle. Commits: `539b7c5c6` rungs and binary, `0d8ea09ae` the
+  tool, `f0fecf466` the README. Left: no seat has built `e2040-ladder.exe` in this tree yet, so the
+  tool exits 2 with its build line until one does; a live planner in place of the scripted one is
+  another row, not this one.
 - [ ] DOOR8 endpoint: level.paint, one call for a room. Steal: Godot GridMap painting plus LDtk
   auto-layer rules - kit cells, rules and seeded scatter in one gated call that expands to one
   batch of `Op::Insert` inside one undo step. It wires `wfc` and `scatter`, which landed with no

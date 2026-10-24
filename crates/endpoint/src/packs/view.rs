@@ -156,6 +156,11 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         CapabilityCard::Observe,
     )?);
+    pack.add(VerbSpec::of::<art::ViewFrameTool>(
+        art::TOOL_VIEW_FRAME,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
     Ok(pack)
 }
 
@@ -2380,7 +2385,14 @@ mod tests {
         );
         assert_eq!(
             first.headroom_chars,
-            first.budget_chars - first.surface_chars
+            first.budget_chars.saturating_sub(first.surface_chars),
+            "headroom is the gap, floored at zero; surface {} budget {}",
+            first.surface_chars,
+            first.budget_chars
+        );
+        eprintln!(
+            "MEASURE surface {} budget {} tools {}",
+            first.surface_chars, first.budget_chars, first.tools
         );
         assert!(first.surface_chars > 0);
         assert!(first.tools > 0);

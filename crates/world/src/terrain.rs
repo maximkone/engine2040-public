@@ -129,7 +129,7 @@ pub(crate) fn slope_of(h: &[u8], n: usize, x: usize, y: usize) -> u8 {
     m as u8
 }
 // sand=low, grass=mid, rock=high+steep; weights sum to exactly 255.
-fn splat_for(hi: u8, slope: u8) -> [u8; 3] {
+pub(crate) fn splat_for(hi: u8, slope: u8) -> [u8; 3] {
     let (h, s) = (i32::from(hi), i32::from(slope));
     let sc = [
         255 - h,

@@ -37,14 +37,16 @@ const MAX_SPEED_PERMILLE: u32 = 4000;
 /// Real-time scale, permille.
 const REAL_SPEED_PERMILLE: u32 = 1000;
 
-/// Dark panel that backs the console rows, 0..1 HUD space.
-#[cfg(any(feature = "app", test))]
+/// Dark panel that backs the console rows, 0..1 HUD space. Read only by the
+/// windowed staging in `console/overlay.rs`, so it rides `app` alone.
+#[cfg(feature = "app")]
 pub(crate) const OVERLAY_PANEL: [f32; 4] = [0.02, 0.62, 0.98, 0.96];
-/// Left edge of the console text, 0..1 HUD space.
-#[cfg(any(feature = "app", test))]
+/// Left edge of the console text, 0..1 HUD space. App leg only, like
+/// [`OVERLAY_PANEL`].
+#[cfg(feature = "app")]
 pub(crate) const OVERLAY_TEXT_X: f32 = 0.035;
-/// Glyph height, 0..1 HUD space.
-#[cfg(any(feature = "app", test))]
+/// Glyph height, 0..1 HUD space. App leg only, like [`OVERLAY_PANEL`].
+#[cfg(feature = "app")]
 pub(crate) const OVERLAY_TEXT_HEIGHT: f32 = 0.034;
 /// Vertical step between rows, 0..1 HUD space.
 #[cfg(any(feature = "app", test))]

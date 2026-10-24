@@ -901,7 +901,7 @@ pub struct App {
     /// Incremental presentation (EG1b): one recording sim step per accepted
     /// tick appends to [`App::present`]. `None` until the first extension
     /// and while the cursor is dropped; rebuilt from the tape when stale.
-    present_sim: Option<LivePresentation>,
+    present_sim: Option<Box<LivePresentation>>,
     /// Presentation sim steps spent by retired presentation sims.
     present_retired_steps: u64,
     /// Static obstacle world this session's match and pose cursor run over
@@ -1872,7 +1872,7 @@ impl App {
             )?;
         }
         self.retire_presentation();
-        self.present_sim = Some(sim);
+        self.present_sim = Some(Box::new(sim));
         self.present = fresh;
         self.present_ticks = ticks;
         self.present_latest.clear();
@@ -2193,8 +2193,8 @@ mod tests {
     /// brain inlined into the live match the shell was 39 KB, and the
     /// startup chain no longer fitted the stack the process had: the arena
     /// bin died at startup with a stack overflow (0xC00000FD, 2026-10-21).
-    /// The shell is 25 KB now; the budget keeps the big parts behind a
-    /// pointer.
+    /// It fits the budget now because the presentation sim stays behind a
+    /// pointer; the budget keeps any new big part out of the shell.
     #[test]
     fn the_app_shell_stays_small() {
         assert!(
@@ -3613,7 +3613,7 @@ mod tests {
     /// Presentation sim steps the session paid (EG1b cost proof).
     fn presentation_steps(app: &App) -> u64 {
         app.present_retired_steps
-            .saturating_add(app.present_sim.as_ref().map_or(0, LivePresentation::steps))
+            .saturating_add(app.present_sim.as_ref().map_or(0, |sim| sim.steps()))
     }
 
     #[test]

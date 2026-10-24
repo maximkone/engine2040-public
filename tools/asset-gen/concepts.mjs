@@ -14,9 +14,10 @@
 // Without --yes nothing is requested: the plan prints and the exit code is 2.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = "C:\\engine2040";
+const ROOT = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", ".."));
 const OUT = join(ROOT, "content", "generated", "concepts");
 const ENDPOINT = "https://stable-diffusion-xl.endpoints.kepler.ai.cloud.ovh.net/api/text2image";
 const NEGATIVE = "text, watermark, extra limbs, extra fingers, blurry, lowres, jpeg artifacts, photorealistic, multiple characters, scenery, background objects";

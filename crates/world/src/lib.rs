@@ -20,6 +20,9 @@ pub mod process;
 pub mod roster;
 pub mod scatter;
 pub mod terrain;
+/// Sidecar terrain layers over TVER v1: an ordered, weighted layer document
+/// that resolves to heights, then the crate's own splat rule.
+pub mod terrain_layers;
 /// Wave function collapse tile bake: kinds plus an adjacency table, bake-time only.
 pub mod wfc;
 /// Build jobs as data, worked by crews (LEG7): the camp perimeter's works.

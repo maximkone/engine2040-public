@@ -20,26 +20,26 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const LADDER_RS = join(ROOT, "crates", "endpoint", "src", "e2e_ladder.rs");
 
-/// One tape block, in the shape `e2040-ladder` prints: header, then one row
-/// per rung over the six rungs of the shipped ladder.
+/// One tape block in the shape `e2040-ladder` prints: header, then one row per
+/// rung, with the counts and digests of the run captured in `evals/end-to-end`.
 const row = (id, name, gate, calls, tokens, transcript, refused, check) =>
   [id, name, gate, calls, tokens, transcript, refused, check].join("\t");
 const TAPE = `${[
   `${MAGIC}\t1`,
-  row("E0", "door_alive", "pass", "1", "40", "d754e12fc924374a", "-", "-"),
-  row("E1", "player_walks", "pass", "2", "80", "abb4a11c34fa86db", "-", "-"),
-  row("E2", "two_fighters_trade", "pass", "1", "40", "54a59f59addebef0", "-", "-"),
-  row("E3", "parry_lands", "pass", "1", "40", "1febe92f8d6d6f3a", "-", "-"),
-  row("E4", "camp_work_builds", "pass", "1", "40", "8b32a202ec3fbe0b", "-", "-"),
-  row("E5", "slice_runs", "pass", "1", "40", "d823548459a4076d", "-", "-"),
+  row("E0", "door_alive", "pass", "1", "76", "d754e12fc924374a", "-", "-"),
+  row("E1", "player_walks", "pass", "2", "664", "abb4a11c34fa86db", "-", "-"),
+  row("E2", "two_fighters_trade", "pass", "1", "358", "54a59f59addebef0", "-", "-"),
+  row("E3", "parry_lands", "pass", "1", "518", "1febe92f8d6d6f3a", "-", "-"),
+  row("E4", "camp_work_builds", "pass", "1", "410", "8b32a202ec3fbe0b", "-", "-"),
+  row("E5", "slice_runs", "pass", "1", "270", "d823548459a4076d", "-", "-"),
 ].join("\n")}\n`;
 
 const TABLE = [
-  "rung name             gate calls tokens transcript       refused verb:code  missed check",
-  "E0  door_alive        pass    1     40 d754e12fc924374a",
+  "rung name                 gate calls tokens transcript       refused verb:code  missed check",
+  "E0  door_alive           pass    1     76 d754e12fc924374a   -                  -",
   "",
   "6 of 6 rungs pass, 0 failed; 7 door calls, 2296 est tokens",
-  "wall ms per rung: E0=12 E1=31 E2=18 E3=17 E4=44 E5=90",
+  "wall ms per rung: E0=2 E1=0 E2=0 E3=0 E4=4 E5=2",
   "tape (the compared artifact, no wall clock):",
 ].join("\n");
 
@@ -108,7 +108,7 @@ test("agent-ladder: a second run that gains or loses a rung is reported", () => 
 
 test("agent-ladder: a pass prints its counts, a fail its reason", () => {
   const lines = verdictRows(parseTape(TAPE).rows);
-  assert.equal(lines[0], "pass E0 door_alive (1 calls, 40 est tokens)");
+  assert.equal(lines[0], "pass E0 door_alive (1 calls, 76 est tokens)");
 
   const refused = `${MAGIC}\t1\n${row("E1", "player_walks", "fail", "0", "0", "-", "sim.step:bad_json", "-")}\n`;
   assert.deepEqual(verdictRows(parseTape(refused).rows), [

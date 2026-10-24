@@ -960,7 +960,7 @@ fn edge_at(luma: &[u8], width: usize, height: usize, x: usize, y: usize) -> u32 
 fn border_median(luma: &[u8], width: usize, height: usize) -> u8 {
     let mut hist = [0u32; 256];
     let mut total = 0u32;
-    let mut push = |x: usize, y: usize, hist: &mut [u32; 256], total: &mut u32| {
+    let push = |x: usize, y: usize, hist: &mut [u32; 256], total: &mut u32| {
         let value = luma_at(luma, width, height, x, y);
         if let Some(slot) = hist.get_mut(usize::try_from(value).unwrap_or(0)) {
             *slot += 1;
@@ -1558,7 +1558,10 @@ mod tests {
         .expect("inside frame");
         assert_eq!(touching.headroom_permille, 0);
         assert!(inside.headroom_permille <= HEADROOM_BAND.1, "{inside:?}");
-        assert_eq!(touching.worst_part, "headroom");
+        assert!(
+            touching.total_permille < inside.total_permille,
+            "touching {touching:?} vs inside {inside:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -1,5 +1,5 @@
 //! `world` pack: the door bakes, samples and paints the TVER terrain that
-//! `engine-world` owns.
+//! `engine-world` owns, and lays out the maps that sit on it.
 //!
 //! `world.terrain.bake` bakes a seeded map and reports its integer stats
 //! (byte count, FNV digest, side, height range and mean, holes, per-layer
@@ -9,6 +9,13 @@
 //! seed bake or a TVER file this door wrote. `world.terrain.paint` applies
 //! bounded edits (rect, height delta, optional hole and splat) and reports the
 //! same stats plus how many cells moved.
+//!
+//! `world.scatter` lays seeded Poisson-disk points over a square of 1 cm cells,
+//! answers each point's height and hole from a named terrain, and writes a JSON
+//! placement only when `out` names one. `world.wfc` solves a tile map from an
+//! adjacency table, retries later seeds when the bake refuses, refuses a solve
+//! whose passable kinds sit in more than one region, and writes a compact JSON
+//! map only when `out` names one.
 //!
 //! Units: texels for sides, rects and points, heights in texel steps
 //! `0..=255`, hundredths for the mean, permille for splat coverage. File IO
@@ -20,9 +27,13 @@
 
 use std::path::{Component, Path};
 
+use engine_world::scatter::poisson_disk;
 use engine_world::terrain::{
     bake_terrain, paint_terrain, parse_terrain, terrain_hash, terrain_stats, write_terrain, Edit,
     Terrain,
+};
+use engine_world::wfc::{
+    bake as wfc_bake, is_connected, Adjacency, WfcError, DIRECTIONS, MAX_KINDS, MAX_WFC_SIDE,
 };
 use engine_world::MAX_BAKE_SIZE;
 
@@ -296,8 +307,8 @@ fn write_out(root: &Path, rel: &str, bytes: &[u8]) -> Result<(), McpToolError> {
         McpToolError::new(
             "write_failed",
             format!(
-                "could not write terrain `{rel}` under the project root ({why}); re-run with a \
-                 writable relative path such as target/terrain/tver.bin"
+                "could not write `{rel}` under the project root ({why}); re-run with a writable \
+                 relative path such as target/terrain/tver.bin"
             ),
         )
     };
@@ -334,11 +345,16 @@ fn run_bake(root: &Path, args: &BakeArgs) -> Result<TerrainSummary, McpToolError
     Ok(summary)
 }
 
-/// Resolve the map a sample reads: a seed bake or a written TVER file.
-fn sampled_terrain(root: &Path, args: &SampleArgs) -> Result<(Vec<u8>, Terrain), McpToolError> {
-    match (args.seed, args.path.as_deref()) {
+/// Resolve one map from its source: a seed bake or a written TVER file.
+fn resolve_source(
+    root: &Path,
+    seed: Option<u64>,
+    size: Option<u16>,
+    path: Option<&str>,
+) -> Result<(Vec<u8>, Terrain), McpToolError> {
+    match (seed, path) {
         (Some(seed), None) => {
-            let size = args.size.unwrap_or(DEFAULT_SIZE);
+            let size = size.unwrap_or(DEFAULT_SIZE);
             check_size(size)?;
             let bytes = bake_terrain(seed, size).map_err(|_| size_refused(size))?;
             let terrain = terrain_of(&bytes)?;
@@ -362,6 +378,11 @@ fn sampled_terrain(root: &Path, args: &SampleArgs) -> Result<(Vec<u8>, Terrain),
                 .to_owned(),
         )),
     }
+}
+
+/// Resolve the map a sample reads: a seed bake or a written TVER file.
+fn sampled_terrain(root: &Path, args: &SampleArgs) -> Result<(Vec<u8>, Terrain), McpToolError> {
+    resolve_source(root, args.seed, args.size, args.path.as_deref())
 }
 
 /// Refusal for a point list that is empty or over [`MAX_POINTS`].
@@ -477,6 +498,471 @@ fn paint_verb(_server: &McpServer, args: &PaintArgs) -> Result<PaintOutput, McpT
     run_paint(&super::codex::project_root(None), args)
 }
 
+/// Verb: scatter seeded Poisson-disk points over a square.
+pub const TOOL_WORLD_SCATTER: &str = "world.scatter";
+/// Verb: solve a wave-function-collapse tile map.
+pub const TOOL_WORLD_WFC: &str = "world.wfc";
+
+/// Most cells one scatter side may name; a cell is one centimetre.
+pub const MAX_SCATTER_SIDE: u16 = 4096;
+/// Most points one `world.scatter` call answers.
+pub const MAX_SCATTER_POINTS: usize = 65_536;
+/// Extra seeds `world.wfc` tries after the first one refuses.
+pub const MAX_WFC_RETRIES: u32 = 8;
+/// Recipe name the scatter seed mixes into: one name, so the same seed keeps
+/// the same points.
+pub const SCATTER_RECIPE: &str = "world.scatter";
+
+/// A terrain a scatter reads heights and holes from: the same two sources as
+/// `world.terrain.sample`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct TerrainRef {
+    /// Bake seed; pass either this (with an optional `size`) or `path`.
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// Side to bake when `seed` is given; defaults to [`DEFAULT_SIZE`].
+    #[serde(default)]
+    pub size: Option<u16>,
+    /// Relative TVER path under the project root; pass instead of `seed`.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// Args for `world.scatter`: a square, a spacing, an optional terrain and an
+/// optional JSON path to write under the project root.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ScatterArgs {
+    /// Scatter seed; the same seed and spacing always give the same points.
+    pub seed: u64,
+    /// Square side in 1 cm cells, `1..=`[`MAX_SCATTER_SIDE`].
+    pub size: u16,
+    /// Smallest gap between two points in cm, `1..=size / 2`.
+    pub radius_cm: u16,
+    /// Most points to answer, `1..=`[`MAX_SCATTER_POINTS`]; omitted answers
+    /// every point the spacing allows.
+    #[serde(default)]
+    pub count: Option<u32>,
+    /// Terrain to read height and hole from; omitted answers neither.
+    #[serde(default)]
+    pub terrain: Option<TerrainRef>,
+    /// Relative JSON path under the project root for the placement
+    /// (`target/world/roman-camp-scatter.json`). Omitted writes nothing.
+    #[serde(default)]
+    pub out: Option<String>,
+}
+
+/// One scattered point: where it landed and what the terrain holds there.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ScatterPoint {
+    /// Cell as `[x, y]` in 1 cm cells.
+    pub at: [u16; 2],
+    /// Height at that cell, when the call named a terrain.
+    #[serde(default)]
+    pub height: Option<u8>,
+    /// True when that cell is a hole, when the call named a terrain.
+    #[serde(default)]
+    pub hole: Option<bool>,
+}
+
+/// `world.scatter` result: the points in `(x, y)` order and their digest.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ScatterOutput {
+    /// Square side in 1 cm cells.
+    pub size: u16,
+    /// Smallest gap the call asked for, in cm.
+    pub radius_cm: u16,
+    /// How many points the answer holds.
+    pub point_count: u32,
+    /// FNV-1a 64 of the point cells as 16 lowercase hex chars; the same seed,
+    /// spacing and count answer the same digest.
+    pub digest: String,
+    /// Points sorted by `x`, then `y`; one point per cell.
+    pub points: Vec<ScatterPoint>,
+    /// The relative path written, when the call named one.
+    pub out: Option<String>,
+}
+
+/// The JSON placement file `world.scatter` writes: the cells and the digest
+/// the preview answered.
+#[derive(Debug, Clone, Serialize)]
+#[serde(crate = "rmcp::serde")]
+struct PlacementDoc {
+    seed: u64,
+    size: u16,
+    radius_cm: u16,
+    digest: String,
+    cells: Vec<[u16; 2]>,
+}
+
+/// Args for `world.wfc`: a sized map, one adjacency mask per kind, an optional
+/// passable mask and an optional JSON path to write under the project root.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct WfcArgs {
+    /// Solve seed; when the bake refuses, later seeds are tried in order.
+    pub seed: u64,
+    /// Cells across, `1..=engine_world::wfc::MAX_WFC_SIDE` (128).
+    pub width: u16,
+    /// Cells down, `1..=engine_world::wfc::MAX_WFC_SIDE` (128).
+    pub height: u16,
+    /// How many kinds the table names, `1..=engine_world::wfc::MAX_KINDS` (16).
+    pub kinds: u8,
+    /// One `[+x, -x, +z, -z]` row per kind: a 16-bit mask of the kinds that
+    /// may sit on that side.
+    pub masks: Vec<[u16; DIRECTIONS]>,
+    /// Kinds that count as walkable for the connectivity check, as a 16-bit
+    /// mask; omitted counts every kind.
+    #[serde(default)]
+    pub passable: Option<u16>,
+    /// Relative JSON path under the project root for the solved map
+    /// (`target/world/roman-camp-wfc.json`). Omitted writes nothing.
+    #[serde(default)]
+    pub out: Option<String>,
+}
+
+/// `world.wfc` result: the solved cells and the checks that ran.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct WfcOutput {
+    /// Cells across.
+    pub width: u16,
+    /// Cells down.
+    pub height: u16,
+    /// The seed that solved it: the requested seed plus the retries taken.
+    pub seed: u64,
+    /// How many kinds the table named.
+    pub kinds: u8,
+    /// One lowercase hex digit per kind index, `x` fastest; `width * height`
+    /// characters.
+    pub cells: String,
+    /// FNV-1a 64 of the cells as 16 lowercase hex chars; the same seed, table
+    /// and constraints answer the same digest.
+    pub digest: String,
+    /// True when every passable cell is reachable from every other.
+    pub connected: bool,
+    /// Extra seeds the solve took after the requested one: `0` means the first
+    /// seed solved.
+    pub retries: u32,
+    /// The relative path written, when the call named one.
+    pub out: Option<String>,
+}
+
+/// Every kind bit for a `kinds`-wide table (`kinds` is at most 16).
+fn all_kinds(kinds: u8) -> u16 {
+    1u16.checked_shl(u32::from(kinds))
+        .map_or(u16::MAX, |mask| mask.saturating_sub(1))
+}
+
+/// The cell a bake-time point falls in: `v` is in cell units on `[0, size)`.
+/// A binary search keeps the door integer and casts no float.
+fn cell_of(v: f32, size: u16) -> u16 {
+    let mut low = 0u16;
+    let mut high = size.saturating_sub(1);
+    while low < high {
+        let mid = low + (high - low + 1) / 2;
+        if f32::from(mid) <= v {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    low
+}
+
+/// Refusal for a scatter square outside `1..=`[`MAX_SCATTER_SIDE`].
+fn scatter_size_refused(size: u16) -> McpToolError {
+    bad_args(format!(
+        "size {size} is outside 1..={MAX_SCATTER_SIDE} cells; re-run with a square side in 1 cm \
+         cells, for example 64"
+    ))
+}
+
+/// Refusal for a spacing that cannot fit the square twice.
+fn radius_refused(radius_cm: u16, size: u16) -> McpToolError {
+    let biggest = size / 2;
+    bad_args(format!(
+        "radius_cm {radius_cm} does not fit a {size} x {size} cell square twice; re-run with a \
+         spacing in 1..={biggest} cm, for example 8"
+    ))
+}
+
+/// Check the square, the spacing and the count before any sample; answers the
+/// most points the call may answer.
+fn scatter_want(args: &ScatterArgs) -> Result<usize, McpToolError> {
+    if args.size == 0 || args.size > MAX_SCATTER_SIDE {
+        return Err(scatter_size_refused(args.size));
+    }
+    let radius = u32::from(args.radius_cm);
+    if radius == 0 || radius * 2 > u32::from(args.size) {
+        return Err(radius_refused(args.radius_cm, args.size));
+    }
+    let want = args.count.map_or(MAX_SCATTER_POINTS, |count| {
+        usize::try_from(count).unwrap_or(usize::MAX)
+    });
+    if want == 0 || want > MAX_SCATTER_POINTS {
+        return Err(bad_args(format!(
+            "count {want} is outside 1..={MAX_SCATTER_POINTS}; re-run with the most points to \
+             answer, for example 512"
+        )));
+    }
+    Ok(want)
+}
+
+/// Sample the square, map every point to its cell, sort by `(x, y)`, keep one
+/// point per cell and cut the answer to `want` points.
+fn scatter_cells(args: &ScatterArgs, want: usize) -> Result<Vec<[u16; 2]>, McpToolError> {
+    let side = f32::from(args.size);
+    let sampled = poisson_disk(
+        args.seed,
+        SCATTER_RECIPE,
+        side,
+        side,
+        f32::from(args.radius_cm),
+    )
+    .map_err(|why| {
+        bad_args(format!(
+            "{why}: radius_cm {} and size {} do not fit a Poisson-disk grid; re-run with a \
+             spacing in 1..={} cm",
+            args.radius_cm,
+            args.size,
+            args.size / 2
+        ))
+    })?;
+    let mut cells: Vec<[u16; 2]> = sampled
+        .iter()
+        .map(|point| [cell_of(point[0], args.size), cell_of(point[1], args.size)])
+        .collect();
+    cells.sort_by_key(|at| (at[0], at[1]));
+    cells.dedup();
+    cells.truncate(want);
+    Ok(cells)
+}
+
+/// One row per cell: where it is, and what the named terrain holds there.
+fn scatter_rows(map: Option<&Terrain>, cells: &[[u16; 2]]) -> Vec<ScatterPoint> {
+    let mut points = Vec::with_capacity(cells.len());
+    for at in cells {
+        let (height, hole) = match map {
+            Some(terrain) => {
+                let n = usize::from(terrain.size);
+                let x = usize::from(at[0]).min(n.saturating_sub(1));
+                let y = usize::from(at[1]).min(n.saturating_sub(1));
+                let i = y * n + x;
+                (Some(terrain.heights[i]), Some(terrain.holes[i]))
+            }
+            None => (None, None),
+        };
+        points.push(ScatterPoint {
+            at: *at,
+            height,
+            hole,
+        });
+    }
+    points
+}
+
+/// FNV-1a 64 over the point cells as little-endian pairs, as 16 hex chars.
+fn scatter_digest(cells: &[[u16; 2]]) -> String {
+    let mut plain = Vec::with_capacity(cells.len() * 4);
+    for at in cells {
+        plain.extend_from_slice(&at[0].to_le_bytes());
+        plain.extend_from_slice(&at[1].to_le_bytes());
+    }
+    format!("{:016x}", terrain_hash(&plain))
+}
+
+/// Scatter one square of Poisson-disk points and optionally write the
+/// placement, reading height and hole from the named terrain.
+fn run_scatter(root: &Path, args: &ScatterArgs) -> Result<ScatterOutput, McpToolError> {
+    let want = scatter_want(args)?;
+    let cells = scatter_cells(args, want)?;
+    let map = match &args.terrain {
+        Some(source) => {
+            Some(resolve_source(root, source.seed, source.size, source.path.as_deref())?.1)
+        }
+        None => None,
+    };
+    let points = scatter_rows(map.as_ref(), &cells);
+    let digest = scatter_digest(&cells);
+    let mut out = ScatterOutput {
+        size: args.size,
+        radius_cm: args.radius_cm,
+        point_count: u32::try_from(points.len()).unwrap_or(u32::MAX),
+        digest: digest.clone(),
+        points,
+        out: None,
+    };
+    if let Some(rel) = args.out.as_deref() {
+        let doc = PlacementDoc {
+            seed: args.seed,
+            size: args.size,
+            radius_cm: args.radius_cm,
+            digest,
+            cells,
+        };
+        let text = rmcp::serde_json::to_string(&doc).map_err(|why| {
+            McpToolError::new(
+                "write_failed",
+                format!(
+                    "could not serialize the placement ({why}); re-run with the same seed, size \
+                     and radius_cm"
+                ),
+            )
+        })?;
+        write_out(root, rel, text.as_bytes())?;
+        out.out = Some(rel.to_owned());
+    }
+    Ok(out)
+}
+
+/// Refusal for an adjacency table the crate will not take.
+fn mask_refused(error: WfcError) -> McpToolError {
+    bad_args(format!(
+        "{error}; re-run with one `[+x, -x, +z, -z]` mask per kind, 1..={MAX_KINDS} rows, every \
+         bit below `kinds`"
+    ))
+}
+
+/// Solve the map, trying later seeds while the bake refuses; answers the cells,
+/// the seed that worked and how many retries it took.
+fn solve_map(args: &WfcArgs, adjacency: &Adjacency) -> Result<(Vec<u8>, u64, u32), McpToolError> {
+    let mut seed = args.seed;
+    let mut retries = 0u32;
+    loop {
+        match wfc_bake(args.width, args.height, adjacency, seed) {
+            Ok(cells) => return Ok((cells, seed, retries)),
+            Err(WfcError::TooLarge { side }) => {
+                return Err(bad_args(format!(
+                    "wfc side {side} is outside 1..={MAX_WFC_SIDE}; re-run with a smaller width \
+                     or height"
+                )));
+            }
+            Err(error) => {
+                if retries >= MAX_WFC_RETRIES {
+                    return Err(bad_args(format!(
+                        "{error} after {retries} retries from seed {}; re-run with another seed or \
+                         a table that admits more neighbours",
+                        args.seed
+                    )));
+                }
+                retries += 1;
+                seed = seed.wrapping_add(1);
+            }
+        }
+    }
+}
+
+/// One lowercase hex digit per kind index, `x` fastest.
+fn cells_text(cells: &[u8]) -> String {
+    let mut text = String::with_capacity(cells.len());
+    for kind in cells {
+        text.push(char::from_digit(u32::from(*kind), 16).unwrap_or('?'));
+    }
+    text
+}
+
+/// Solve one map, trying later seeds when the bake refuses, then check that the
+/// passable kinds form one region and optionally write the map.
+fn run_wfc(root: &Path, args: &WfcArgs) -> Result<WfcOutput, McpToolError> {
+    if args.width == 0
+        || args.height == 0
+        || args.width > MAX_WFC_SIDE
+        || args.height > MAX_WFC_SIDE
+    {
+        return Err(bad_args(format!(
+            "width {} x height {} is outside 1..={MAX_WFC_SIDE} per side; re-run with a smaller \
+             map, for example 16 x 16",
+            args.width, args.height
+        )));
+    }
+    let adjacency = Adjacency::new(args.kinds, &args.masks).map_err(mask_refused)?;
+    let allowed = all_kinds(args.kinds);
+    let passable = args.passable.unwrap_or(allowed);
+    if passable == 0 || passable & !allowed != 0 {
+        return Err(bad_args(format!(
+            "passable {passable} names kinds outside the {allowed} table (bits 0..={}); re-run \
+             with a mask of the kinds that may be walked, for example {allowed}",
+            args.kinds.saturating_sub(1)
+        )));
+    }
+    let (solved, seed, retries) = solve_map(args, &adjacency)?;
+    if !is_connected(&solved, args.width, args.height, passable) {
+        return Err(McpToolError::new(
+            "wfc_disconnected",
+            format!(
+                "the solve with {retries} retries leaves the passable kinds {passable} in more \
+                 than one region; re-run with a `passable` mask that covers more kinds, for \
+                 example {allowed}, or another seed"
+            ),
+        ));
+    }
+    let text = cells_text(&solved);
+    let digest = format!("{:016x}", terrain_hash(&solved));
+    let mut out = WfcOutput {
+        width: args.width,
+        height: args.height,
+        seed,
+        kinds: args.kinds,
+        cells: text,
+        digest: digest.clone(),
+        connected: true,
+        retries,
+        out: None,
+    };
+    if let Some(rel) = args.out.as_deref() {
+        let doc = WfcDoc {
+            cells: out.cells.clone(),
+            width: args.width,
+            height: args.height,
+            seed,
+            digest,
+        };
+        let json = rmcp::serde_json::to_string(&doc).map_err(|why| {
+            McpToolError::new(
+                "write_failed",
+                format!(
+                    "could not serialize the solved map ({why}); re-run with the same seed and \
+                     table"
+                ),
+            )
+        })?;
+        write_out(root, rel, json.as_bytes())?;
+        out.out = Some(rel.to_owned());
+    }
+    Ok(out)
+}
+
+/// The compact solved map `world.wfc` writes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(crate = "rmcp::serde")]
+struct WfcDoc {
+    cells: String,
+    width: u16,
+    height: u16,
+    seed: u64,
+    digest: String,
+}
+
+/// `world.scatter` handler: the project root the door was built in.
+fn scatter_verb(_server: &McpServer, args: &ScatterArgs) -> Result<ScatterOutput, McpToolError> {
+    run_scatter(&super::codex::project_root(None), args)
+}
+
+/// `world.wfc` handler: the project root the door was built in.
+fn wfc_verb(_server: &McpServer, args: &WfcArgs) -> Result<WfcOutput, McpToolError> {
+    run_wfc(&super::codex::project_root(None), args)
+}
+
 crate::e2_tool!(
     /// `world.terrain.bake`: bake a seeded TVER map and report its stats.
     TerrainBakeTool,
@@ -510,14 +996,38 @@ crate::e2_tool!(
     invoke = paint_verb
 );
 
+crate::e2_tool!(
+    /// `world.scatter`: seeded Poisson-disk points over a square.
+    ScatterTool,
+    name = TOOL_WORLD_SCATTER,
+    description = "Scatter seeded Poisson-disk points over a square of 1 cm cells: 1..=65536 points sorted by x then y, one per cell, at least `radius_cm` apart. A radius that cannot fit twice across the square refuses. Name `terrain` (seed with an optional size, or a TVER path under the project root) to answer each point's height and hole. Writes a JSON placement (cells, seed, size, radius_cm, digest) only when `out` names a relative path; the same seed, size and spacing always give the same points and digest.",
+    readonly = false,
+    args = ScatterArgs,
+    output = ScatterOutput,
+    invoke = scatter_verb
+);
+
+crate::e2_tool!(
+    /// `world.wfc`: solve a tile map from an adjacency table.
+    WfcTool,
+    name = TOOL_WORLD_WFC,
+    description = "Solve a wave-function-collapse tile map of up to 128 x 128 cells from 1..=16 kinds and one [+x, -x, +z, -z] adjacency mask per kind. Answers one hex digit per cell (x fastest), the digest, the connectivity flag and the retries (later seeds tried after a refusal). A solve that leaves the passable kinds in more than one region refuses with the retry count and one recovery. Writes a compact JSON map only when `out` names a relative path; the same seed and table always give the same cells.",
+    readonly = false,
+    args = WfcArgs,
+    output = WfcOutput,
+    invoke = wfc_verb
+);
+
 /// The world pack: terrain bake, sample and paint, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
-        "terrain: world.terrain.bake bakes a seeded TVER heightmap, hole mask and 3-way splat \
-         and reports its stats; world.terrain.sample answers height, hole and splat at up to \
-         4096 points; world.terrain.paint applies rect height/hole/splat edits and reports what \
-         moved. Both writers write only an `out` path under the project root",
+        "terrain and layout: world.terrain.bake bakes a seeded TVER heightmap, hole mask and \
+         3-way splat and reports its stats; world.terrain.sample answers height, hole and splat \
+         at up to 4096 points; world.terrain.paint applies rect height/hole/splat edits and \
+         reports what moved; world.scatter lays seeded Poisson-disk points over a square with \
+         terrain heights; world.wfc solves a tile map from an adjacency table. Every writer \
+         writes only a relative `out` path under the project root",
         false,
     );
     pack.add(VerbSpec::of::<TerrainBakeTool>(
@@ -532,6 +1042,16 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<TerrainPaintTool>(
         TOOL_WORLD_TERRAIN_PAINT,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<ScatterTool>(
+        TOOL_WORLD_SCATTER,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<WfcTool>(
+        TOOL_WORLD_WFC,
         PACK,
         CapabilityCard::Commit,
     )?);
@@ -788,7 +1308,172 @@ mod tests {
     }
 
     #[test]
-    fn pack_registers_its_three_verbs() {
+    fn scatter_is_deterministic_and_refuses_a_radius_that_cannot_fit() {
+        let root = scratch("scatter");
+        let args = ScatterArgs {
+            seed: 2040,
+            size: 64,
+            radius_cm: 8,
+            count: Some(32),
+            terrain: Some(TerrainRef {
+                seed: Some(2040),
+                size: Some(16),
+                path: None,
+            }),
+            out: None,
+        };
+        let first = run_scatter(&root, &args).expect("scatters");
+        let second = run_scatter(&root, &args).expect("scatters twice");
+        assert_eq!(first, second, "the same seed answers the same points");
+        assert_eq!(first.point_count, 32);
+        assert_eq!(first.points.len(), 32);
+        let mut sorted = first.points.clone();
+        sorted.sort_by_key(|point| (point.at[0], point.at[1]));
+        assert_eq!(sorted, first.points, "points arrive sorted by (x, y)");
+        for point in &first.points {
+            assert!(point.at[0] < 64 && point.at[1] < 64, "{:?}", point.at);
+            assert!(
+                point.height.is_some() && point.hole.is_some(),
+                "the named terrain answers height and hole"
+            );
+        }
+        let terrain = parse_terrain(&bake_terrain(2040, 16).expect("bakes")).expect("parses");
+        let first_point = &first.points[0];
+        let i =
+            usize::from(first_point.at[1].min(15)) * 16 + usize::from(first_point.at[0].min(15));
+        assert_eq!(first_point.height, Some(terrain.heights[i]));
+        assert!(!root.exists(), "no out path writes nothing");
+        // The placement JSON is byte-equal twice and carries the digest.
+        let with_out = ScatterArgs {
+            out: Some("scatter/points.json".to_owned()),
+            ..args.clone()
+        };
+        run_scatter(&root, &with_out).expect("writes the placement");
+        let once = std::fs::read(root.join("scatter/points.json")).expect("file lands");
+        run_scatter(&root, &with_out).expect("writes the placement again");
+        let twice = std::fs::read(root.join("scatter/points.json")).expect("file lands");
+        assert_eq!(once, twice, "same points write the same bytes");
+        let text = String::from_utf8(once).expect("json is text");
+        assert!(text.contains(&first.digest), "{text}");
+        // A radius that cannot fit twice across the square refuses.
+        let refused = run_scatter(
+            &root,
+            &ScatterArgs {
+                radius_cm: 40,
+                ..args.clone()
+            },
+        )
+        .expect_err("radius refuses");
+        assert_eq!(refused.code, "bad_args");
+        assert!(refused.message.contains("1..=32"), "{}", refused.message);
+        assert!(refused.message.contains("re-run"), "{}", refused.message);
+        // No terrain source: heights and holes stay absent.
+        let bare = run_scatter(
+            &root,
+            &ScatterArgs {
+                terrain: None,
+                ..args
+            },
+        )
+        .expect("scatters without a terrain");
+        assert!(bare
+            .points
+            .iter()
+            .all(|point| point.height.is_none() && point.hole.is_none()));
+        assert_eq!(bare.digest, first.digest, "the terrain never moves a cell");
+    }
+
+    #[test]
+    fn wfc_solves_twice_equal_and_refuses_a_bad_mask() {
+        let root = scratch("wfc");
+        let every = all_kinds(3);
+        let args = WfcArgs {
+            seed: 2040,
+            width: 16,
+            height: 16,
+            kinds: 3,
+            masks: vec![[every; DIRECTIONS]; 3],
+            passable: None,
+            out: None,
+        };
+        let first = run_wfc(&root, &args).expect("solves");
+        let second = run_wfc(&root, &args).expect("solves twice");
+        assert_eq!(first, second, "the same seed answers the same cells");
+        assert_eq!(first.retries, 0, "a generous table solves its first seed");
+        assert_eq!(first.seed, 2040);
+        assert!(
+            first.connected,
+            "every kind is passable, so the map is one region"
+        );
+        assert_eq!(first.cells.len(), 256);
+        assert!(first
+            .cells
+            .chars()
+            .all(|cell| cell.to_digit(16).is_some_and(|kind| kind < 3)));
+        assert!(!root.exists(), "no out path writes nothing");
+        // The compact map is byte-equal twice and carries the cells.
+        let with_out = WfcArgs {
+            out: Some("wfc/map.json".to_owned()),
+            ..args.clone()
+        };
+        run_wfc(&root, &with_out).expect("writes the map");
+        let once = std::fs::read(root.join("wfc/map.json")).expect("file lands");
+        run_wfc(&root, &with_out).expect("writes the map again");
+        let twice = std::fs::read(root.join("wfc/map.json")).expect("file lands");
+        assert_eq!(once, twice, "same cells write the same bytes");
+        let text = String::from_utf8(once).expect("json is text");
+        assert!(
+            text.contains(&first.cells) && text.contains(&first.digest),
+            "{text}"
+        );
+        // A mask bit above `kinds` refuses with the table's legal range.
+        let bad = WfcArgs {
+            masks: vec![[every | 0b1000; DIRECTIONS]; 3],
+            ..args.clone()
+        };
+        let refused = run_wfc(&root, &bad).expect_err("mask refuses");
+        assert_eq!(refused.code, "bad_args");
+        assert!(refused.message.contains("re-run"), "{}", refused.message);
+        // A passable mask outside the table refuses too.
+        let bad_mask = run_wfc(
+            &root,
+            &WfcArgs {
+                passable: Some(0b1000),
+                ..args
+            },
+        )
+        .expect_err("passable refuses");
+        assert_eq!(bad_mask.code, "bad_args");
+        assert!(bad_mask.message.contains("0..=2"), "{}", bad_mask.message);
+    }
+
+    #[test]
+    fn wfc_refuses_a_disconnected_solve_naming_the_retries() {
+        let root = scratch("wfc-disconnected");
+        // A checkerboard table: one kind never touches itself, so a one-kind
+        // passable mask splits the map into isolated cells.
+        let masks = vec![[0b10; DIRECTIONS], [0b01; DIRECTIONS]];
+        let refused = run_wfc(
+            &root,
+            &WfcArgs {
+                seed: 2040,
+                width: 8,
+                height: 8,
+                kinds: 2,
+                masks,
+                passable: Some(0b01),
+                out: None,
+            },
+        )
+        .expect_err("disconnected refuses");
+        assert_eq!(refused.code, "wfc_disconnected");
+        assert!(refused.message.contains("retries"), "{}", refused.message);
+        assert!(refused.message.contains("re-run"), "{}", refused.message);
+        assert!(!root.exists(), "a refusal writes nothing");
+    }
+
+    #[test]
+    fn pack_registers_its_five_verbs() {
         let pack = pack().expect("registers");
         assert_eq!(pack.name(), PACK);
         assert_eq!(
@@ -796,7 +1481,9 @@ mod tests {
             vec![
                 TOOL_WORLD_TERRAIN_BAKE,
                 TOOL_WORLD_TERRAIN_SAMPLE,
-                TOOL_WORLD_TERRAIN_PAINT
+                TOOL_WORLD_TERRAIN_PAINT,
+                TOOL_WORLD_SCATTER,
+                TOOL_WORLD_WFC
             ]
         );
         assert!(!pack.default_loaded());

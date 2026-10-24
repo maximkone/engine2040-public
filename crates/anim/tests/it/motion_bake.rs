@@ -5,10 +5,11 @@
 //! `fixtures/clips/stagger.receipt.json`. This module proves the shipped
 //! bytes: the pack loads through the existing unpack path, the planted foot
 //! slips under 8 cm/s, the decode re-packs to the same bytes, `qclip_hash`
-//! equals the receipt and the seed-7 constant two tool runs printed, and the
+//! equals the receipt and the seed-7 constant the bake prints, and the
 //! endpoint rule cut the teacher's trailing tail.
 
-use engine_anim::clip::{avg_slip, qclip_hash, TICK_DT};
+use engine_anim::clip::{avg_world_slip, qclip_hash, TICK_DT};
+use engine_anim::contract::{Joint, Skeleton};
 use engine_anim::motion_bake::{bake_len, bake_unpack, bake_unpack_rots, last_constrained};
 use engine_anim::pack::{pack_qclip, BUDGET_BYTES_PER_FIGHTER};
 
@@ -16,10 +17,10 @@ use engine_anim::pack::{pack_qclip, BUDGET_BYTES_PER_FIGHTER};
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 /// The planted foot's slip ceiling, m/s (the row's accept line).
 const SLIP_LIMIT: f32 = 0.08;
-/// `qclip_hash` two seed-7 tool runs printed; the committed pack is one run.
-const SEED7_QCLIP_HASH: u64 = 0xbc8c_1300_6a5a_ad0a;
+/// The `qclip_hash` the seed-7 bake prints and the committed pack holds.
+const SEED7_QCLIP_HASH: u64 = 0xf5f4_de57_dd5a_7280;
 /// sha256 of the pack bytes the seed-7 run wrote.
-const SEED7_PACK_SHA256: &str = "7d46ef7e40e9408a876e3dd2d36cf87826272e4527b47bb53590df6b3e9ef65c";
+const SEED7_PACK_SHA256: &str = "a9204ea95e00f9c0b2339cbea3674446c9797b5a17b2052f0e7cf4d9d16acbdc";
 /// sha256 of the seed-7 teacher `.npz` the pack was baked from.
 const SEED7_SOURCE_SHA256: &str =
     "2bc933c4175af98d2a39303b93ef97809ee8b04361d059c91321daf857d01fa1";
@@ -83,6 +84,38 @@ fn track_index(receipt: &str, name: &str) -> usize {
         .unwrap_or_else(|| panic!("the receipt has no track {name}"))
 }
 
+/// The fighter rig's leg chains, in the joint order the pack carries (the
+/// receipt lists it): hips 0, leftupleg 55, leftleg 56, leftfoot 57, and the
+/// right side at 60/61/62. Every other joint hangs off the hips; the
+/// world-slip meter walks only the chain up from the foot, so only these
+/// parents matter. `engine-assets` owns the real table and `anim` cannot
+/// depend on it (assets depends on anim), so this test mirrors the links it
+/// reads, exactly as the crate's own fixture test does.
+fn fighter_legs() -> Skeleton {
+    let mut joints: Vec<Joint> = (0..65)
+        .map(|index| Joint {
+            name: format!("joint{index}"),
+            parent: Some(0),
+        })
+        .collect();
+    let links = [
+        (0usize, None, "hips"),
+        (55, Some(0), "leftupleg"),
+        (56, Some(55), "leftleg"),
+        (57, Some(56), "leftfoot"),
+        (60, Some(0), "rightupleg"),
+        (61, Some(60), "rightleg"),
+        (62, Some(61), "rightfoot"),
+    ];
+    for (index, parent, name) in links {
+        joints[index] = Joint {
+            name: name.to_string(),
+            parent,
+        };
+    }
+    Skeleton { joints }
+}
+
 #[test]
 fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
     let bytes = fixture("stagger.am5p");
@@ -113,9 +146,17 @@ fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
 
     // The planted foot never slides: under 8 cm/s on average. The feet are
     // named by the receipt, so the gate reads the same tracks the pack holds.
+    //
+    // The pack carries **local** offsets, so the foot's own track is its
+    // offset inside the leg, not its motion over the sand. The planted foot's
+    // slip is its **world** speed: the offsets composed down the leg with the
+    // rotations, the meter the receipt's `avg_slip` line prints.
     let left = track_index(&receipt, "leftfoot");
     let right = track_index(&receipt, "rightfoot");
-    let slip = avg_slip(&clip, left, ticks);
+    let rots = bake_unpack_rots(&bytes).expect("the rotations read back");
+    assert_eq!(rots.len(), 65, "one rotation track per joint");
+    let legs = fighter_legs();
+    let slip = avg_world_slip(&clip, &rots, &legs, left, ticks);
     assert!(
         slip < SLIP_LIMIT,
         "left foot slip {slip} is over {SLIP_LIMIT}"
@@ -126,16 +167,18 @@ fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
         (slip - reported).abs() < 1e-5,
         "receipt says {reported}, the pack measures {slip}"
     );
-    println!(
-        "AM27_SLIP left={slip:.6} right={:.6}",
-        avg_slip(&clip, right, ticks)
+    let right_slip = avg_world_slip(&clip, &rots, &legs, right, ticks);
+    println!("AM27_SLIP left={slip:.6} right={right_slip:.6}");
+    // One foot stands and one steps: a bake that froze the body would read
+    // zero for both, so the stagger is real motion, not a still.
+    assert!(
+        right_slip > 2.0 * SLIP_LIMIT,
+        "the stepping right foot measures {right_slip}: the bake is frozen"
     );
 
     // The decode is a fixed point of the wire, and the hash is the receipt's.
     // The committed pack carries the rotations too, so the fixed point is
     // checked on the whole pack: the positions and the rotations.
-    let rots = bake_unpack_rots(&bytes).expect("the rotations read back");
-    assert_eq!(rots.len(), 65, "one rotation track per joint");
     let mut rebuilt = pack_qclip(&clip).expect("packs");
     let mut rot_tracks = Vec::with_capacity(rots.len());
     for (index, track) in rots.iter().enumerate() {
@@ -153,7 +196,8 @@ fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
         bytes.len()
     );
     assert_eq!(bytes.len() as u64, integer(&receipt, "packed_bytes"));
-    // The cook found the teacher's plant windows, not a frozen foot.
+    // The pack carries the whole fighter body at the bake's rate, read from
+    // the shipped teacher.
     assert_eq!(
         integer(&receipt, "track_count"),
         65,
@@ -175,8 +219,8 @@ fn stagger_receipt_is_the_seed_seven_run() {
         7,
         "the fixture is the seed-7 run"
     );
-    // Two tool runs at seed 7 print this hash (the second run is on the AM27
-    // progress line); the committed pack carries the same bytes hash.
+    // The seed-7 bake prints this hash on every run; the committed pack
+    // carries the same bytes, so the receipt and the pack are one run.
     assert_eq!(
         hash(&receipt, "qclip_hash"),
         SEED7_QCLIP_HASH,
@@ -191,9 +235,14 @@ fn stagger_receipt_is_the_seed_seven_run() {
         "stagger",
         "one clip name everywhere"
     );
+    // The receipt names the plant windows it counted. The synthetic seed-7
+    // teacher plants no window under the world-space contact rule (the
+    // committed receipt and `fixtures/clips/README.md` both say 0/0), so the
+    // planted foot's proof is its world slip in the test above, and this
+    // line pins the counts the shipped run wrote instead of inventing them.
     let planted = receipt.find("\"plant_windows\":").expect("plant_windows");
-    assert_eq!(number(&receipt, "leftfoot", planted), 2.0, "left plants");
-    assert_eq!(number(&receipt, "rightfoot", planted), 3.0, "right plants");
+    assert_eq!(value(&receipt, "leftfoot", planted), "0", "left plants");
+    assert_eq!(value(&receipt, "rightfoot", planted), "0", "right plants");
     println!("AM27_RECEIPT seed=7 qclip_hash=0x{SEED7_QCLIP_HASH:016x}");
 }
 

@@ -278,6 +278,8 @@ const fillConsts = (idx, src, message) => message
 // Every tool type the source declares: e2_tool! macros and `impl ToolBase for T` blocks.
 function toolDefs(idx) {
   const defs = new Map();
+  const byModule = new Map();
+  const moduleOf = (src) => src.rel.split("/").pop().replace(/\.rs$/, "");
   for (const src of idx.srcs) {
     for (const m of src.code.matchAll(/\be2_tool!\s*\(/g)) {
       if (src.inTest(m.index)) continue;
@@ -297,7 +299,7 @@ function toolDefs(idx) {
       d.args = kv.args ? squash(src.code.slice(...kv.args)) : null;
       d.output = kv.output ? squash(src.code.slice(...kv.output)) : null;
       d.entries = kv.invoke ? [squash(src.code.slice(...kv.invoke)).split("::").pop()] : [];
-      if (d.name) defs.set(ty, d);
+      if (d.name) { defs.set(ty, d); byModule.set(`${moduleOf(src)}::${ty}`, d); }
     }
     for (const m of src.code.matchAll(/\bimpl\s+(?:[\w:]+::)?ToolBase\s+for\s+(\w+)\s*\{/g)) {
       if (src.inTest(m.index)) continue;
@@ -325,10 +327,10 @@ function toolDefs(idx) {
         const inv = fnIndex(src).find((f) => f.body[0] > sOpen && f.body[1] < closeOf(src.code, sOpen) && f.name === "invoke");
         if (inv) { d.entries = calledNames(src, inv.body[0], inv.body[1]); d.invokeFn = inv; }
       }
-      if (d.name && !defs.has(ty)) defs.set(ty, d);
+      if (d.name && !defs.has(ty)) { defs.set(ty, d); byModule.set(`${moduleOf(src)}::${ty}`, d); }
     }
   }
-  return defs;
+  return { byType: defs, byModule };
 }
 
 // ---- argument structs ----
@@ -417,7 +419,7 @@ function parentSrc(idx, src) {
 function parseRegistrations(idx) {
   const regs = [];
   for (const src of idx.srcs) {
-    for (const m of src.code.matchAll(/\bVerbSpec::of::<\s*(\w+)\s*>\s*\(/g)) {
+    for (const m of src.code.matchAll(/\bVerbSpec::of::<\s*([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)\s*>\s*\(/g)) {
       if (src.inTest(m.index)) continue;
       const open = m.index + m[0].length - 1;
       const parts = splitTop(src.code, open + 1, closeOf(src.code, open));
@@ -551,7 +553,7 @@ export function buildModel(files, root = null) {
   // Core tools in contract order.
   const mcp = idx.byRel.get("mcp.rs");
   const coreList = mcp ? /\bCORE_TOOL_NAMES\s*:\s*\[[^\]]*\]\s*=\s*\[([^\]]*)\]/.exec(mcp.code) : null;
-  const byName = new Map([...defs.values()].map((d) => [d.name, d]));
+  const byName = new Map([...defs.byType.values()].map((d) => [d.name, d]));
   if (coreList) {
     const open = mcp.code.indexOf("[", coreList.index + coreList[0].indexOf("=")) ;
     for (const [a, b] of splitTop(mcp.code, open + 1, closeOf(mcp.code, open))) {
@@ -598,7 +600,9 @@ export function buildModel(files, root = null) {
     const mine = regs.filter((r) => (r.packOwner === src && (r.packExpr === "PACK" || r.packExpr.startsWith("super::"))) || r.packIsLiteral === pack.name);
     mine.sort((a, b) => (a.src === b.src ? a.at - b.at : a.src === src ? -1 : b.src === src ? 1 : a.src.rel < b.src.rel ? -1 : 1));
     for (const r of mine) {
-      const def = defs.get(r.type);
+      const parts = r.type.split("::");
+      const simple = parts[parts.length - 1];
+      const def = (parts.length > 1 ? defs.byModule.get(`${parts[parts.length - 2]}::${simple}`) : null) ?? defs.byType.get(simple);
       // VerbSpec::of refuses a name its tool does not carry, so the tool's own name is the verb's name.
       const name = def?.name;
       if (!def || !name) { model.unparsed.push(`verb ${r.type} in ${r.src.rel}: no declaration found`); continue; }
