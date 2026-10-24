@@ -852,6 +852,9 @@ pub struct World {
     multibody_joints: MultibodyJointSet,
     soft_bodies: SoftBodySet,
     ccd: CCDSolver,
+    /// Explicit CCD fixed-target-cache clears so far (PX48). Observation only: not folded into
+    /// the hash and it changes no body state.
+    ccd_clears: u64,
     /// Dynamic body handles in spawn order; fixes iteration/hash order.
     order: Vec<RigidBodyHandle>,
     /// Every accepted spawn in order, statics included, to rebuild from.
@@ -876,6 +879,7 @@ impl World {
             multibody_joints: MultibodyJointSet::new(),
             soft_bodies: SoftBodySet::new(),
             ccd: CCDSolver::new(),
+            ccd_clears: 0,
             order: Vec::new(),
             spawns: Vec::new(),
         }
@@ -956,6 +960,25 @@ impl World {
         self.colliders
             .insert_with_parent(collider, handle, &mut self.bodies);
         self.order.len()
+    }
+
+    /// Drop the CCD solver's cached fixed-target list.
+    ///
+    /// Rapier 0.36 caches every fixed collider with its prediction-fattened AABB for the
+    /// non-bullet sweep pass and keys that list only by the prediction distance, so a pose
+    /// change the solver does not see as a fresh user change would be swept against stale
+    /// boxes. A restore, a teleport or a collider swap must therefore clear it explicitly.
+    /// Idempotent, and it moves no body: the next step rebuilds the same list for the same
+    /// scene, so a replay after a restore stays identical.
+    fn clear_ccd_targets(&mut self) {
+        self.ccd.invalidate_fixed_targets_cache();
+        self.ccd_clears = self.ccd_clears.saturating_add(1);
+    }
+
+    /// How many times this world cleared the CCD fixed-target cache (PX48 teleports and
+    /// restores). Observation only, never hashed.
+    pub fn ccd_clears(&self) -> u64 {
+        self.ccd_clears
     }
 
     /// Advance the world by one fixed step. Only finite `dt > 0` is accepted;
@@ -1083,6 +1106,9 @@ impl World {
             body.reset_forces(false);
             body.wake_up(true);
         }
+        // A restore is a teleport to the solver: drop the CCD fixed-target cache so the next
+        // sweep cannot clamp against targets cached before the rollback.
+        self.clear_ccd_targets();
         Ok(())
     }
 
@@ -1173,6 +1199,9 @@ impl World {
         body.set_translation(Vector::new(pos[0], pos[1], pos[2]), true);
         body.reset_forces(true);
         body.wake_up(true);
+        // The controller teleports once per tick: a cached fixed-target list from before the
+        // move would be swept against this tick's pose, so clear it here.
+        self.clear_ccd_targets();
         true
     }
 }
@@ -1243,6 +1272,10 @@ fn check_pos(pos: [f32; 3]) -> Result<(), Error> {
         Err(Error::NonFinitePosition)
     }
 }
+
+#[cfg(test)]
+#[path = "rapier_ccd_tests.rs"]
+mod ccd_tests;
 
 #[cfg(test)]
 mod tests {

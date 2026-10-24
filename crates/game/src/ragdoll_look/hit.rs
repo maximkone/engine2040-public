@@ -71,6 +71,44 @@ pub(super) struct Reaction {
     /// Each chain bone's orientation in the pelvis frame at the blow: the blow's own bend is
     /// measured from here, so a clip swing never reads as a hit.
     spawn: [[f32; 4]; REACT_CHAIN.len()],
+    /// The clip pose the chain was driven toward last tick (world transforms, chain order), or
+    /// `None` before the first drive. SW170: the pose drive needs two ticks of the clip.
+    prev_clip: Option<[Transform; REACT_CHAIN.len()]>,
+}
+
+/// The chain a blow is seeded from (FEEL9): the local pose the ragdoll takes, the world place of
+/// every chain bone, the chest to hit and the carry velocity.
+struct Seed {
+    /// Chain pose in the pelvis frame, as `spawn_ragdoll` takes it.
+    local: LocalPose,
+    /// Every chain bone's world transform at the blow, in chain order.
+    place: Vec<Transform>,
+    /// The chest to land the blow on, world meters.
+    chest: [f32; 3],
+    /// Velocity the chain inherits from the fighter's travel, m/s.
+    velocity: [f32; 3],
+    /// Slot position at the blow: the chain rides the fighter's own travel.
+    at: [f32; 3],
+}
+
+impl Reaction {
+    /// A fresh chain reaction at the blow: age zero, no drive pose yet (SW170 drives from the
+    /// second tick the chain lives).
+    fn new(
+        rig: usize,
+        anchor: [f32; 3],
+        at: [f32; 3],
+        spawn: [[f32; 4]; REACT_CHAIN.len()],
+    ) -> Self {
+        Self {
+            rig,
+            age: 0,
+            anchor,
+            at,
+            spawn,
+            prev_clip: None,
+        }
+    }
 }
 
 impl RagdollLook {
@@ -105,6 +143,18 @@ pub(super) fn react_weight(age: u32, alpha: f32) -> f32 {
         (1.0 - (at - hold) / f32::from(REACT_FADE_TICKS)).max(0.0)
     };
     rise * fade
+}
+
+/// The pose-drive weight of a standing hit reaction `age` ticks after the blow (SW170): the
+/// complement of [`react_weight`]. The blow tick and the full-weight window keep the chain free
+/// (exactly the bytes this file wrote before the drive existed), and the fade hands the chain to the
+/// drive, which rises to the clip at the clip's own speed instead of a blend step. Zero at the blow
+/// and zero once the reaction is over.
+pub(super) fn react_drive_weight(age: u32) -> f32 {
+    if age == 0 || age >= REACT_TICKS {
+        return 0.0;
+    }
+    1.0 - react_weight(age, 0.0)
 }
 
 /// Turns `q` by `weight` of its angle about the same axis: a normalized lerp from the identity,
@@ -202,6 +252,7 @@ impl FighterLook {
             if let Some(fx) = self.ragdoll.react.as_mut() {
                 fx.step();
             }
+            self.drive_reactions();
         }
         for index in 0..MAX_LOOK_FIGHTERS {
             let Some(reaction) = self.ragdoll.reactions[index].as_mut() else {
@@ -223,34 +274,8 @@ impl FighterLook {
             return;
         };
         let impulse = react_impulse(&kick);
-        if self.ragdoll.reactions[index].is_some() && self.ragdoll.react.is_some() {
-            let chest = self
-                .ragdoll
-                .react
-                .as_ref()
-                .and_then(|fx| {
-                    placed(
-                        fx,
-                        Key::Bone {
-                            slot: slot_u8,
-                            bone: 1,
-                        },
-                        1.0,
-                    )
-                })
-                .map(|at| at.pos);
-            let hit = chest.is_some_and(|chest| {
-                self.ragdoll.react.as_mut().is_some_and(|fx| {
-                    fx.hit_ragdoll(slot_u8, chest, REACT_RADIUS_M, impulse)
-                        .is_ok()
-                })
-            });
-            if hit {
-                if let Some(reaction) = self.ragdoll.reactions[index].as_mut() {
-                    reaction.age = 0;
-                }
-                return;
-            }
+        if self.recharge_reaction(index, slot_u8, impulse) {
+            return;
         }
         let Some(slot) = self.slots.get(index).copied() else {
             return;
@@ -270,12 +295,84 @@ impl FighterLook {
         else {
             return;
         };
-        let Some(rig) = self.rigs.get(rig_index) else {
+        let Some(seed) = self.seed_reaction(index, rig_index, &layout.joint_of, &layout.tip_of)
+        else {
             return;
         };
-        let Ok(pose) = self.inertial_pose(rig, index, &slot, 0.0) else {
+        let Some(shape) = self.ragdoll.react_rig.take() else {
             return;
         };
+        let result = match self.ragdoll.react_world() {
+            Some(fx) => fx
+                .spawn_ragdoll(slot_u8, &shape, &seed.local, seed.velocity, [0.0; 3])
+                .and_then(|()| {
+                    fx.hit_ragdoll(slot_u8, seed.chest, REACT_RADIUS_M, impulse)
+                        .map(|_| ())
+                }),
+            None => Err(FxError::BadCaps),
+        };
+        self.ragdoll.react_rig = Some(shape);
+        if result.is_err() {
+            return;
+        }
+        let mut spawn = [[0.0, 0.0, 0.0, 1.0]; REACT_CHAIN.len()];
+        let sim_root = seed.place[0].rot;
+        for (index, one) in seed.place.iter().enumerate().skip(1) {
+            spawn[index] = unit(quat_mul(conj(sim_root), one.rot));
+        }
+        self.ragdoll.reactions[index] =
+            Some(Reaction::new(rig_index, seed.place[0].pos, seed.at, spawn));
+        self.ragdoll.reacted = self.ragdoll.reacted.saturating_add(1);
+    }
+
+    /// A live chain takes the blow again at its chest (FEEL9): false when the slot has no chain or
+    /// no reaction world, so the caller seeds a fresh one.
+    fn recharge_reaction(&mut self, index: usize, slot_u8: u8, impulse: [f32; 3]) -> bool {
+        if self.ragdoll.reactions[index].is_none() || self.ragdoll.react.is_none() {
+            return false;
+        }
+        let chest = self
+            .ragdoll
+            .react
+            .as_ref()
+            .and_then(|fx| {
+                placed(
+                    fx,
+                    Key::Bone {
+                        slot: slot_u8,
+                        bone: 1,
+                    },
+                    1.0,
+                )
+            })
+            .map(|at| at.pos);
+        let hit = chest.is_some_and(|chest| {
+            self.ragdoll.react.as_mut().is_some_and(|fx| {
+                fx.hit_ragdoll(slot_u8, chest, REACT_RADIUS_M, impulse)
+                    .is_ok()
+            })
+        });
+        if hit {
+            if let Some(reaction) = self.ragdoll.reactions[index].as_mut() {
+                reaction.age = 0;
+            }
+        }
+        hit
+    }
+
+    /// The chain seeded at the blow (FEEL9): the local pose `spawn_ragdoll` takes, the world place
+    /// of every chain bone, the chest to hit and the carry velocity. `None` when the slot or its
+    /// rig is gone.
+    fn seed_reaction(
+        &self,
+        index: usize,
+        rig_index: usize,
+        joint_of: &[usize],
+        tip_of: &[Option<usize>],
+    ) -> Option<Seed> {
+        let slot = self.slots.get(index).copied()?;
+        let rig = self.rigs.get(rig_index)?;
+        let pose = self.inertial_pose(rig, index, &slot, 0.0).ok()?;
         let (wp, wq) = forward(&rig.skeleton, &pose);
         // The chain goes into the world like a fall does: the slot root places it, or its
         // rotations would be read back without the fighter's yaw.
@@ -285,8 +382,8 @@ impl FighterLook {
         let world_rot: Vec<[f32; 4]> = wq.iter().map(|q| unit(quat_mul(turn, *q))).collect();
         let mut place: Vec<Transform> = Vec::with_capacity(REACT_CHAIN.len());
         for bone in REACT_CHAIN {
-            let joint = layout.joint_of[bone];
-            let len = match layout.tip_of[bone] {
+            let joint = *joint_of.get(bone)?;
+            let len = match tip_of.get(bone).copied().flatten() {
                 Some(tip) => length(sub(world_pos[tip], world_pos[joint])),
                 None => BONES[bone].fixed_len_m,
             };
@@ -303,20 +400,19 @@ impl FighterLook {
             positions: vec![[0.0; 3]; REACT_CHAIN.len()],
             rotations: vec![[0.0, 0.0, 0.0, 1.0]; REACT_CHAIN.len()],
         };
-        for index in 0..REACT_CHAIN.len() {
-            match react_parent(index) {
+        for (at, one) in place.iter().enumerate() {
+            match react_parent(at) {
                 Some(parent) => {
                     let up = conj(place[parent].rot);
-                    local.positions[index] = rotate(up, sub(place[index].pos, place[parent].pos));
-                    local.rotations[index] = unit(quat_mul(up, place[index].rot));
+                    local.positions[at] = rotate(up, sub(one.pos, place[parent].pos));
+                    local.rotations[at] = unit(quat_mul(up, one.rot));
                 }
                 None => {
-                    local.positions[index] = place[index].pos;
-                    local.rotations[index] = place[index].rot;
+                    local.positions[at] = one.pos;
+                    local.rotations[at] = one.rot;
                 }
             }
         }
-        let chest = place[1].pos;
         let velocity = [
             (slot.pos[0] - slot.prev_pos[0]) * TICK_HZ,
             0.0,
@@ -329,35 +425,85 @@ impl FighterLook {
                 0.0
             }
         });
-        let Some(shape) = self.ragdoll.react_rig.take() else {
-            return;
-        };
-        let result = match self.ragdoll.react_world() {
-            Some(fx) => fx
-                .spawn_ragdoll(slot_u8, &shape, &local, velocity, [0.0; 3])
-                .and_then(|()| {
-                    fx.hit_ragdoll(slot_u8, chest, REACT_RADIUS_M, impulse)
-                        .map(|_| ())
-                }),
-            None => Err(FxError::BadCaps),
-        };
-        self.ragdoll.react_rig = Some(shape);
-        if result.is_err() {
-            return;
-        }
-        let mut spawn = [[0.0, 0.0, 0.0, 1.0]; REACT_CHAIN.len()];
-        let sim_root = place[0].rot;
-        for (index, one) in place.iter().enumerate().skip(1) {
-            spawn[index] = unit(quat_mul(conj(sim_root), one.rot));
-        }
-        self.ragdoll.reactions[index] = Some(Reaction {
-            rig: rig_index,
-            age: 0,
-            anchor: place[0].pos,
+        Some(Seed {
+            local,
+            chest: place[1].pos,
+            place,
+            velocity,
             at: slot.pos,
-            spawn,
-        });
-        self.ragdoll.reacted = self.ragdoll.reacted.saturating_add(1);
+        })
+    }
+
+    /// The clip pose the reaction chain of `index` is driven toward this tick (SW170): the look's
+    /// own world transform of every chain bone, the same joints the chain was seeded from. `None`
+    /// when the slot, rig or layout is gone.
+    fn react_clip(
+        &self,
+        index: usize,
+        reaction: &Reaction,
+    ) -> Option<[Transform; REACT_CHAIN.len()]> {
+        let slot = self.slots.get(index).copied()?;
+        let rig = self.rigs.get(reaction.rig)?;
+        let layout = self
+            .ragdoll
+            .layouts
+            .get(reaction.rig)
+            .and_then(Option::as_ref)?;
+        let pose = self.inertial_pose(rig, index, &slot, 0.0).ok()?;
+        let (world_pos, world_rot) = forward(&rig.skeleton, &pose);
+        let mut out = [Transform::IDENTITY; REACT_CHAIN.len()];
+        for (at, bone) in REACT_CHAIN.iter().enumerate() {
+            let joint = layout.joint_of[*bone];
+            out[at] = Transform {
+                pos: *world_pos.get(joint)?,
+                rot: *world_rot.get(joint)?,
+            };
+        }
+        Some(out)
+    }
+
+    /// Drives every live standing reaction chain toward the clip with the clip's own speed (SW170):
+    /// the pose drive from `crates/physfx/src/fx/follow.rs`, weighted by [`react_drive_weight`], so
+    /// the chain rejoins the animation at the speed it is moving instead of lagging a tick and
+    /// snapping back. The blow tick reads weight 0, which is a no-op, so the shock lands exactly as
+    /// it did before this call existed. Presentation only.
+    pub(super) fn drive_reactions(&mut self) {
+        let mut clips: [Option<[Transform; REACT_CHAIN.len()]>; MAX_LOOK_FIGHTERS] =
+            [None; MAX_LOOK_FIGHTERS];
+        let mut any = false;
+        for (index, clip) in clips.iter_mut().enumerate() {
+            let Some(reaction) = self.ragdoll.reactions[index].as_ref() else {
+                continue;
+            };
+            if react_drive_weight(reaction.age) <= 0.0 {
+                continue;
+            }
+            *clip = self.react_clip(index, reaction);
+            any |= clip.is_some();
+        }
+        if !any {
+            return;
+        }
+        let Some(fx) = self.ragdoll.react.as_mut() else {
+            return;
+        };
+        for (index, clip) in clips.iter().enumerate() {
+            let Some(clip) = *clip else {
+                continue;
+            };
+            let Ok(slot) = u8::try_from(index) else {
+                continue;
+            };
+            let Some(reaction) = self.ragdoll.reactions[index].as_mut() else {
+                continue;
+            };
+            // The first driven tick has no previous pose yet: drive from the same pose, which asks
+            // for no speed and just sets the target.
+            let prev = reaction.prev_clip.unwrap_or(clip);
+            let weight = react_drive_weight(reaction.age);
+            let _ = fx.drive_pose(slot, &prev, &clip, 1.0 / TICK_HZ, weight);
+            reaction.prev_clip = Some(clip);
+        }
     }
 
     /// Blends the standing hit reaction of `index` onto `pose` (FEEL9): each chain bone turns
@@ -452,5 +598,128 @@ impl FighterLook {
             shown[bone] = Some(unit(quat_mul(parent, out)));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_physfx::Tier;
+
+    /// Nine chain bones stacked 0.25 m apart: any upright pose the chain can be spawned from.
+    const HEIGHTS: [f32; REACT_CHAIN.len()] = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
+    /// The upright chain pose, one bone per [`REACT_CHAIN`] entry.
+    fn chain_pose() -> LocalPose {
+        LocalPose {
+            positions: HEIGHTS.iter().map(|height| [0.0, *height, 0.0]).collect(),
+            rotations: vec![[0.0, 0.0, 0.0, 1.0]; REACT_CHAIN.len()],
+        }
+    }
+
+    /// The chain's world transforms in chain order, as the drive reads and writes them.
+    fn chain_world(fx: &PhysFx) -> Vec<Transform> {
+        let mut out = vec![Transform::IDENTITY; REACT_CHAIN.len()];
+        for placed in fx.transforms(1.0).expect("transforms") {
+            if let Key::Bone { bone, .. } = placed.key {
+                out[usize::from(bone)] = placed.at;
+            }
+        }
+        out
+    }
+
+    /// The angle between two unit quaternions, radians.
+    fn angle_between(a: [f32; 4], b: [f32; 4]) -> f32 {
+        let dot: f32 = (0..4).map(|i| a[i] * b[i]).sum();
+        2.0 * dot.abs().clamp(-1.0, 1.0).acos()
+    }
+
+    #[test]
+    fn look_follow_weight_is_zero_while_the_blow_shows_and_rises_as_it_fades() {
+        assert_eq!(
+            react_drive_weight(0),
+            0.0,
+            "the blow tick must stay exactly the bytes this file wrote before the drive"
+        );
+        assert_eq!(
+            react_drive_weight(REACT_TICKS),
+            0.0,
+            "a finished reaction drives nothing"
+        );
+        // The full-weight window belongs to the blow: the chain must be free to carry it.
+        for age in u32::from(REACT_RISE_TICKS)..=u32::from(REACT_HOLD_TICKS) {
+            assert_eq!(
+                react_drive_weight(age),
+                0.0,
+                "the chain must be free while the blow shows: age {age}"
+            );
+        }
+        // The fade hands the chain to the drive, and the drive never lets go of it again.
+        let mut last = 0.0f32;
+        for age in u32::from(REACT_HOLD_TICKS) + 1..REACT_TICKS {
+            let weight = react_drive_weight(age);
+            assert!(
+                weight >= last,
+                "the drive must not fall back while the reaction fades: age {age} reads {weight}"
+            );
+            last = weight;
+        }
+        let near_end = react_drive_weight(REACT_TICKS - 1);
+        println!("drive weight: blow 0.00, full-weight window 0.00, last tick {near_end:.2}");
+        assert!(
+            near_end > 0.9,
+            "the chain rejoins the clip driven at the end of the reaction, not blended: {near_end}"
+        );
+    }
+
+    #[test]
+    fn look_follow_tracks_the_clip_and_weight_zero_keeps_the_shown_bytes() {
+        let rig = reaction_rig().expect("reaction chain");
+        let pose = chain_pose();
+        let mut driven = PhysFx::new(Tier::Comfort);
+        driven
+            .spawn_ragdoll(0, &rig, &pose, [0.0; 3], [0.0; 3])
+            .expect("chain");
+        let mut plain = PhysFx::new(Tier::Comfort);
+        plain
+            .spawn_ragdoll(0, &rig, &pose, [0.0; 3], [0.0; 3])
+            .expect("chain");
+        let rest = chain_world(&driven);
+        // The clip turns the lower arm 25 degrees at its joint between two ticks.
+        let mut clip = rest.clone();
+        let half = 25.0_f32.to_radians() * 0.5;
+        let turn = [half.sin(), 0.0, 0.0, half.cos()];
+        clip[4].rot = unit(quat_mul(turn, rest[4].rot));
+        let chest = rest[1].pos;
+        for fx in [&mut driven, &mut plain] {
+            fx.hit_ragdoll(0, chest, REACT_RADIUS_M, [12.0, 0.0, 0.0])
+                .expect("blow");
+        }
+        driven
+            .drive_pose(0, &rest, &clip, 1.0 / TICK_HZ, 0.8)
+            .expect("drive");
+        let before = plain.transforms(1.0).expect("transforms");
+        assert_eq!(
+            plain.drive_pose(0, &rest, &clip, 1.0 / TICK_HZ, 0.0),
+            Ok(0),
+            "weight 0 drives nothing"
+        );
+        assert_eq!(
+            plain.transforms(1.0).expect("transforms"),
+            before,
+            "weight 0 writes no byte"
+        );
+        driven.step();
+        plain.step();
+        let with = angle_between(chain_world(&driven)[4].rot, clip[4].rot);
+        let without = angle_between(chain_world(&plain)[4].rot, clip[4].rot);
+        println!(
+            "lower arm to the clip one tick on: no drive {without:.4} rad, with the drive \
+             {with:.4} rad"
+        );
+        assert!(
+            with < without,
+            "the pose drive must cut the lag: {with} rad against {without} rad"
+        );
     }
 }
