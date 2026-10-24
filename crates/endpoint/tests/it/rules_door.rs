@@ -10,13 +10,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use engine_arena::spine_step::SpineMatch;
-use engine_arena::{ArenaConfig, FighterTape, FIGHTER_RADIUS_M};
+use engine_arena::{ArenaConfig, FighterTape, FIGHTER_RADIUS_M, MAX_PARTICIPANTS};
 use engine_editor::capability::Capability;
 use engine_editor::commands::{self, Batch, Document, Journal, Op};
 use engine_endpoint::mcp::McpServer;
 use engine_endpoint::packs::rules::{
-    RulesExplainArgs, RulesExplainTool, RulesGetArgs, RulesGetTool, RulesSetArgs, RulesSetTool,
-    RulesTestArgs, RulesTestTool, RulesUndoArgs, RulesUndoTool,
+    set_approval_hash, RulesApproval, RulesExplainArgs, RulesExplainTool, RulesGetArgs,
+    RulesGetTool, RulesSetArgs, RulesSetTool, RulesTestArgs, RulesTestTool, RulesUndoArgs,
+    RulesUndoTool,
 };
 use engine_endpoint::play::world_load;
 use engine_endpoint::play::{CheckpointDto, PlayRunArgs, PlayRunTool};
@@ -79,11 +80,20 @@ fn play_at(server: &McpServer, seed: u64, scene_rev: u64) -> (Vec<CheckpointDto>
 }
 
 fn set(server: &McpServer, source: &str, slots: Option<Vec<u8>>) -> Result<String, String> {
+    // AD13: an install is Commit class; the helper approves the exact text
+    // against whatever revision is installed now.
+    let rev = RulesGetTool::invoke(server, RulesGetArgs::default()).map_or(0, |info| info.rev);
     RulesSetTool::invoke(
         server,
         RulesSetArgs {
             source: source.to_owned(),
             slots,
+            approval: Some(RulesApproval {
+                script_hash: set_approval_hash(source),
+                rules_revision: rev,
+            }),
+            expected_hash: None,
+            no_op: None,
         },
     )
     .map(|out| out.hash)
@@ -131,7 +141,8 @@ fn rules_set_makes_play_run_differ_replay_and_refuse_bad_scripts() {
     assert_eq!(play(&server, 2040).0, plain);
 
     // A slot outside the arena is refused before anything runs.
-    let error = set(&server, BASH, Some(vec![16])).expect_err("slot 16 does not exist");
+    let outside = vec![MAX_PARTICIPANTS];
+    let error = set(&server, BASH, Some(outside)).expect_err("a slot past the roster is refused");
     assert!(error.starts_with("bad_slots"), "{error}");
 }
 

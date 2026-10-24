@@ -135,6 +135,8 @@ pub struct FramePostReceipt {
     pub upsample: PassReceipt,
     /// Bloom pass.
     pub bloom: PassReceipt,
+    /// Heat shimmer pass over the brazier and the hot-sand patches (QA9).
+    pub shimmer: PassReceipt,
     /// Exposure pass.
     pub exposure: PassReceipt,
     /// ACES tonemap pass.
@@ -155,6 +157,7 @@ impl FramePostReceipt {
         self.taa.ms
             + self.upsample.ms
             + self.bloom.ms
+            + self.shimmer.ms
             + self.exposure.ms
             + self.aces.ms
             + self.grade.ms
@@ -178,6 +181,8 @@ mod taa;
 pub use taa::*;
 mod upscale;
 pub use upscale::*;
+mod fsr1;
+pub use fsr1::fsr1_easu;
 mod chain;
 pub use chain::*;
 pub(crate) mod auto_exposure;
@@ -1712,6 +1717,11 @@ mod tests {
             bloom: PassReceipt {
                 pass: "bloom",
                 pixels: 1024,
+                ms,
+            },
+            shimmer: PassReceipt {
+                pass: "shimmer",
+                pixels: 0,
                 ms,
             },
             exposure: PassReceipt {
