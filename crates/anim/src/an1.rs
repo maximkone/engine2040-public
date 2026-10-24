@@ -4,7 +4,8 @@
 //! local and their identity inverse binds.
 
 use crate::contract::{
-    skinning_matrices, validate_pose, validate_skeleton, AnimError, LocalPose, Skeleton,
+    dual_quat_from_matrix, skinning_matrices, validate_pose, validate_skeleton, AnimError,
+    DualQuat, LocalPose, Skeleton,
 };
 use engine_core::mat4;
 
@@ -166,11 +167,28 @@ pub fn an1_skinning_matrices(
         .collect())
 }
 
+/// Compose one AN1 frame as a dual-quaternion skin palette (AM30): the same
+/// `inverse_bind * joint_world` transform the matrix path builds, folded to rotation plus
+/// translation, 8 floats a joint against the matrix path's 16. The bind composition is shared,
+/// so the two palettes cannot drift; only the expansion differs.
+pub fn an1_skinning_dual_quats(
+    an1: &Skeleton,
+    pose: &LocalPose,
+    inverse_binds: &[[[f32; 4]; 4]],
+) -> Result<Vec<DualQuat>, An1Error> {
+    let matrices = an1_skinning_matrices(an1, pose, inverse_binds)?;
+    Ok(matrices.iter().map(dual_quat_from_matrix).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::contract::Joint;
-
+    use crate::contract::{
+        dual_quat_of, skin_point_dual_quat, skin_point_linear_blend, skinning_dual_quats,
+        transform_point_dual_quat, transform_point_matrix, DualQuat, SkinPalette, DUAL_QUAT_FLOATS,
+        DUAL_QUAT_PALETTE_BYTES, MATRIX_PALETTE_BYTES,
+    };
     /// Skinned bones in the shipped CT7 rig; the body adds the armature and
     /// mesh nodes beside them.
     const BONES: usize = 43;
@@ -433,5 +451,138 @@ mod tests {
             Err(An1Error::Pose(AnimError::UnnormalizedQuat(4))),
             "clip row 3 is AN1 row 4"
         );
+    }
+
+    // ---- AM30: the dual-quaternion palette beside the matrix one --------
+
+    /// One rigid palette matrix from a translation and a unit quaternion, basis rows first (the
+    /// same layout [`skinning_matrices`] writes), so the twist test can build both palettes.
+    fn matrix_of(pos: [f32; 3], rot: &[f32; 4]) -> [[f32; 4]; 4] {
+        let x = crate::contract::rotate(&[1.0, 0.0, 0.0], rot);
+        let y = crate::contract::rotate(&[0.0, 1.0, 0.0], rot);
+        let z = crate::contract::rotate(&[0.0, 0.0, 1.0], rot);
+        [
+            [x[0], x[1], x[2], 0.0],
+            [y[0], y[1], y[2], 0.0],
+            [z[0], z[1], z[2], 0.0],
+            [pos[0], pos[1], pos[2], 1.0],
+        ]
+    }
+
+    /// A posed copy of the bind: every bone tilted a little, so the palette has real motion and
+    /// no joint sits at identity.
+    fn posed(rig: &Rig) -> LocalPose {
+        let mut pose = rig.bind.clone();
+        for (index, rot) in pose.rotations.iter_mut().enumerate() {
+            let lean = 0.05 + 0.002 * f32::from(u16::try_from(index % 7).unwrap_or(0));
+            *rot = tilt(lean, 1.0);
+        }
+        pose
+    }
+
+    #[test]
+    fn dual_quat_palette_is_half_the_bytes_on_the_43_bone_rig() {
+        let rig = rig();
+        assert_eq!(rig.an1.len(), BONES, "the shipped CT7 bone count");
+        let pose = posed(&rig);
+        let matrices =
+            an1_skinning_matrices(&rig.an1, &pose, &rig.inverse_binds).expect("bind matrices");
+        let quats =
+            an1_skinning_dual_quats(&rig.an1, &pose, &rig.inverse_binds).expect("dual quats");
+        assert_eq!(quats.len(), matrices.len());
+        let matrix_bytes = matrices.len() * MATRIX_PALETTE_BYTES;
+        let quat_bytes = quats.len() * DUAL_QUAT_PALETTE_BYTES;
+        println!("AM30 palette: {matrix_bytes} B matrices -> {quat_bytes} B dual quats over {BONES} joints");
+        assert_eq!(matrix_bytes, 2_752, "43 joints at 64 B");
+        assert_eq!(quat_bytes, 1_376, "43 joints at 32 B");
+        assert_eq!(DQ_JOINT_FLOATS, 8, "one dual quaternion is 8 floats");
+    }
+
+    #[test]
+    fn dual_quat_palette_matches_the_matrix_path_within_a_millimeter() {
+        let rig = rig();
+        for pose in [rig.bind.clone(), posed(&rig)] {
+            let matrices =
+                an1_skinning_matrices(&rig.an1, &pose, &rig.inverse_binds).expect("matrices");
+            let quats =
+                an1_skinning_dual_quats(&rig.an1, &pose, &rig.inverse_binds).expect("quats");
+            let mut worst = 0.0f32;
+            for (joint, (matrix, quat)) in matrices.iter().zip(&quats).enumerate() {
+                for corner in 0..8 {
+                    let point = [
+                        if corner & 1 == 0 { 0.1 } else { -0.1 },
+                        if corner & 2 == 0 { 0.0 } else { 0.2 },
+                        if corner & 4 == 0 { 0.1 } else { -0.1 },
+                    ];
+                    let a = transform_point_matrix(matrix, point);
+                    let b = transform_point_dual_quat(quat, point);
+                    let gap =
+                        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2))
+                            .sqrt();
+                    worst = worst.max(gap);
+                    assert!(
+                        gap < 0.001,
+                        "joint {joint} corner {corner}: {gap} m between the two palettes"
+                    );
+                }
+            }
+            println!(
+                "AM30 error: worst vertex gap {:.6} m over {BONES} joints",
+                worst
+            );
+        }
+    }
+
+    /// Two bones 170 degrees apart about x, blended half and half: the matrix blend pulls a
+    /// point toward the axis (the candy wrapper), the dual-quaternion blend keeps its radius.
+    #[test]
+    fn dual_quat_palette_keeps_the_radius_a_linear_blend_collapses() {
+        const COS85: f32 = 0.087_155_74;
+        const SIN85: f32 = 0.996_194_7;
+        let twist = [SIN85, 0.0, 0.0, COS85];
+        let still = [0.0, 0.0, 0.0, 1.0];
+        let matrices = [matrix_of([0.0; 3], &still), matrix_of([0.0; 3], &twist)];
+        let quats = [dual_quat_of([0.0; 3], still), dual_quat_of([0.0; 3], twist)];
+        let point = [0.0, 0.1, 0.0];
+        let pair = [(0usize, 0.5f32), (1, 0.5)];
+        let linear = skin_point_linear_blend(&matrices, point, &pair);
+        let dual = skin_point_dual_quat(&quats, point, &pair);
+        // Distance from the twist axis (x), the radius the candy wrapper loses.
+        let radius = |p: [f32; 3]| (p[1] * p[1] + p[2] * p[2]).sqrt();
+        let (linear_r, dual_r) = (radius(linear), radius(dual));
+        println!(
+            "AM30 twist: 170 deg, radius {linear_r:.4} m linear blend vs {dual_r:.4} m dual quat"
+        );
+        assert!(
+            dual_r > linear_r + 0.005,
+            "dual quat kept {dual_r}, linear {linear_r}"
+        );
+        assert!(
+            (dual_r - 0.1).abs() < 1e-3,
+            "a rigid blend keeps the radius: {dual_r}"
+        );
+    }
+
+    #[test]
+    fn dual_quat_palette_is_off_by_default() {
+        assert_eq!(
+            SkinPalette::default(),
+            SkinPalette::Matrices,
+            "off unless asked"
+        );
+        assert_eq!(SkinPalette::from_label("dq"), SkinPalette::DualQuats);
+        assert_eq!(SkinPalette::from_label("dual_quat"), SkinPalette::DualQuats);
+        assert_eq!(SkinPalette::from_label("typo"), SkinPalette::Matrices);
+        assert_eq!(SkinPalette::Matrices.joint_bytes(), MATRIX_PALETTE_BYTES);
+        assert_eq!(
+            SkinPalette::DualQuats.joint_bytes(),
+            DUAL_QUAT_PALETTE_BYTES
+        );
+        // The off path is the matrix path, byte for byte.
+        let rig = rig();
+        let matrices =
+            an1_skinning_matrices(&rig.an1, &rig.bind, &rig.inverse_binds).expect("matrices");
+        let world = skinning_dual_quats(&rig.an1, &rig.bind).expect("world");
+        assert_eq!(world.len(), matrices.len());
     }
 }

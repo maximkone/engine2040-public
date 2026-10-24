@@ -274,13 +274,13 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   frame-split p50 at 8 fighters before and after posted. F2P: no non-test
   caller of `JobPool::scope` in arena. P2P: golden unchanged. needs: none.
   Correction 2026-10-21: duplicate of PW20 (`ecs: the job pool in the sim`, which closes E21 and RC36); do not run both - PW20 is the owning row.
-- [ ] RC37 arena: fork runs on the shared pool — `crates/arena/src/fork.rs:276-285`
+- [x] RC37 arena: fork runs on the shared pool — `crates/arena/src/fork.rs:276-285`
   spawns one OS thread per branch (callers `endpoint/src/assistant.rs:1139`,
   `arena/src/probe.rs:55`), capping AX12's 20-branch speedup. Run branches on
   the RC36 pool, keep `ForkCrashed`. Diff: good. Tier B. Size S. Owns the
   worker hunk of `fork.rs`. Accept: `cargo test -p engine-arena --lib fork` x2
   green; a 20-branch run's wall time before and after posted. F2P: thread per
-  branch. P2P: fork results byte-equal. needs: RC36.
+  branch. P2P: fork results byte-equal. needs: RC36. RETIRED (dup): child of RC36, same job (lead, trim audit 2026-10-24)
 - [x] CQ17 quality: a loom model of the pool — no `loom` or TSan anywhere; Miri
   (CQ15) does not find races or lock cycles (Gregory 4.7-4.9). A `loom` test of
   `JobPool::scope` behind a `loom` cfg. Diff: good. Tier B. Size S. Owns a
@@ -322,7 +322,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   Size M. Owns those two types and their call sites, the presenter hunk.
   Accept: `rg -n "struct Handle\(pub|struct Fixed\(pub" crates` empty;
   workspace tests green. F2P: public fields. P2P: golden unchanged. needs: none.
-  Correction 2026-10-21: board audit 2 named PW52 (`tools: the layering rule gains three checks`, which closes CQ20) as the owning row, but PW52 only adds crate-layer rules and does none of this row's newtype or `SUN_CACHES` work; keep one of the two and fold the other's items in - do not run both.
+  Correction 2026-10-21: board audit 2 named PW52 (`tools: the layering rule gains three checks`, which closes CQ20) as the owning row, but PW52 only adds crate-layer rules and does none of this row's newtype or `SUN_CACHES` work; keep one of the two and fold the other's items in - do not run both. Progress 2026-10-24: Handle half landed 41190089e (private field, from_raw/raw; registry 8 passed, golden x2). Left: Fixed (52+ sites, waits for crates/core/src/det_math.rs to be clean) and SUN_CACHES.
 - [x] CQ21 quality: the crate graph is tested acyclic and coupling has an alarm — Landed 5791e829. The DFS cycle check lives in `tools/arch-fitness.mjs` (wired into workspace-check at `tools/workspace-check.mjs:754`): `node --test tools/arch-fitness.test.mjs` 4 pass (seeded cycle a->b->a fails, self loop fails, real graph passes); `node --test tools/crate-map.test.mjs` 3 pass incl. instability Ce/(Ca+Ce); `node tools/crate-map.mjs` prints instability per crate. Tests sit in those two files, not workspace-check.test.mjs.
   `docs/ARCHITECTURE.md:9` promises an acyclic graph; `tools/workspace-check.mjs:308-318`
   only walks reachability; `tools/crate-map.mjs:4-5` prints fan-in and fan-out
