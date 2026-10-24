@@ -42,7 +42,11 @@ impl WakeSet {
         }
     }
     pub fn count(&self) -> usize {
-        self.words.iter().map(|w| w.count_ones() as usize).sum()
+        // One word's bit count is a u32; the named conversion keeps the width change visible.
+        self.words
+            .iter()
+            .map(|w| usize::try_from(w.count_ones()).unwrap_or(usize::MAX))
+            .sum()
     }
     pub fn ids(&self) -> Vec<usize> {
         (0..self.n).filter(|&i| self.is_awake(i)).collect()

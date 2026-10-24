@@ -91,13 +91,7 @@ pub fn gtao_live_half_size(width_px: u32, height_px: u32) -> [u32; 2] {
     if !gtao_live_half_enabled() {
         return [width_px, height_px];
     }
-    if width_px == 0 || height_px == 0 {
-        return [width_px, height_px];
-    }
-    [
-        width_px.div_ceil(GTAO_HALF_DIV).max(1),
-        height_px.div_ceil(GTAO_HALF_DIV).max(1),
-    ]
+    crate::gtao_half::gtao_target_size(crate::gtao_half::GtaoRes::Half, width_px, height_px)
 }
 
 /// Live upsample through half size: half on (default) lifts the half buffer
