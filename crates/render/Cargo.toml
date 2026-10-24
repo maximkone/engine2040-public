@@ -92,6 +92,9 @@ windows = { version = "0.62", optional = true, default-features = false, feature
 
 [dev-dependencies]
 engine-core = { workspace = true, features = ["test-util"] }
+# SW120: the Rome HDRI test checks its bytes against the sha256 in the HDRI
+# PROVENANCE row (never hand-roll a hash).
+sha2 = { workspace = true }
 # ENG20 pair capture: writes the TAA-off reference and the TAA-on arms as
 # PNG sequences (png only, same crate as the optional `v1` dep). Files land
 # under target/captures/taa-pair, never in git.
