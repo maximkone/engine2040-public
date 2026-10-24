@@ -8,7 +8,7 @@
 //! (translation in the last row), read verbatim from the glTF column-major
 //! accessor so `p' = p * inverse_bind * joint_world`.
 //! Determinism: same bytes give the same import (document order, no maps).
-//! Errors: typed [`BodyImportError`]; a body without a skin, an image that is
+//! Errors: typed [`BodyImportError`](crate::body_import::BodyImportError); a body without a skin, an image that is
 //! not an embedded buffer view, or a skin/mesh primitive mismatch fails loudly.
 //!
 //! Budget: cold load only (three bounded parses of one file, no tick work).
@@ -95,6 +95,9 @@ pub struct BodyPart {
     pub material: CookedMaterial,
     /// Encoded base-color image (PNG/JPEG bytes) when the material has one.
     pub base_color_image: Option<Vec<u8>>,
+    /// The source material's name (`gladius_blade`, `scutum_board`), empty when the
+    /// file names none. The view audit reads it to judge a part by what it is.
+    pub name: String,
 }
 
 /// One skinned body: skeleton, node bind pose, inverse binds and parts.
@@ -209,6 +212,17 @@ fn inverse_binds(loaded: &Loaded, order: &[usize]) -> Result<Vec<[[f32; 4]; 4]>,
     Ok(out)
 }
 
+/// Source material name per triangle primitive, document order (empty when unnamed).
+fn material_names(loaded: &Loaded) -> Vec<String> {
+    let mut out = Vec::new();
+    for mesh in loaded.document.meshes() {
+        for primitive in mesh.primitives() {
+            out.push(primitive.material().name().unwrap_or_default().to_string());
+        }
+    }
+    out
+}
+
 /// Embedded base-color image bytes per triangle primitive, document order.
 fn base_color_images(loaded: &Loaded) -> Result<Vec<Option<Vec<u8>>>, BodyImportError> {
     let mut out = Vec::new();
@@ -261,6 +275,7 @@ pub fn import_skinned_body(bytes: &[u8]) -> Result<SkinnedBody, BodyImportError>
     let bind = bind_pose(&loaded.document, &order)?;
     let inverse_binds = inverse_binds(&loaded, &order)?;
     let images = base_color_images(&loaded)?;
+    let names = material_names(&loaded);
     if images.len() != meshes.meshes.len() || skinned.skins.len() != meshes.meshes.len() {
         return Err(BodyImportError::UnskinnedPart {
             part: skinned.skins.len().min(meshes.meshes.len()),
@@ -274,6 +289,7 @@ pub fn import_skinned_body(bytes: &[u8]) -> Result<SkinnedBody, BodyImportError>
         .zip(skinned.skins.into_iter().zip(images))
         .enumerate()
     {
+        let name = names.get(part).cloned().unwrap_or_default();
         if skin.skin.joints.len() != mesh.positions.len() {
             return Err(BodyImportError::UnskinnedPart { part });
         }
@@ -282,6 +298,7 @@ pub fn import_skinned_body(bytes: &[u8]) -> Result<SkinnedBody, BodyImportError>
             skin: skin.skin,
             material,
             base_color_image: image,
+            name,
         });
     }
     Ok(SkinnedBody {
