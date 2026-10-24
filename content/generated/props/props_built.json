@@ -1,5 +1,5 @@
 {
-  "count": 24,
+  "count": 27,
   "props": [
     {
       "build": "sword",
@@ -221,6 +221,27 @@
       "file": "world_banner.glb",
       "id": "world_banner",
       "triangles": 52
+    },
+    {
+      "build": "machine:ballista",
+      "classes": [],
+      "file": "machine_ballista.glb",
+      "id": "machine_ballista",
+      "triangles": 302
+    },
+    {
+      "build": "machine:crane",
+      "classes": [],
+      "file": "machine_crane.glb",
+      "id": "machine_crane",
+      "triangles": 770
+    },
+    {
+      "build": "machine:cart",
+      "classes": [],
+      "file": "machine_cart.glb",
+      "id": "machine_cart",
+      "triangles": 756
     }
   ]
 }
