@@ -61,6 +61,9 @@ pub const VIEW_FLINCH_TICKS: u32 = 27;
 pub const VIEW_FLINCH_RISE_TICKS: f32 = 6.0;
 /// Ticks the presentation flinch holds at full weight after the rise.
 pub const VIEW_FLINCH_HOLD_TICKS: f32 = 3.0;
+/// Integer twin of [`VIEW_FLINCH_RISE_TICKS`]: the age a riding strike is drawn as, so it
+/// skips the rise (a test pins the two equal).
+const RIDE_SKIP_TICKS: u32 = 6;
 /// Peak lean of the real skeleton's upper chain at unit weight, radians
 /// (~11.5 degrees); the head moves about 10 cm at this lean.
 pub const UPPER_LEAN_RAD: f32 = 0.20;
@@ -162,6 +165,26 @@ impl HitDir {
             Self::Front | Self::Back => SPINE,
             Self::Right | Self::FrontRight | Self::BackRight => ARM_R,
             Self::Left | Self::FrontLeft | Self::BackLeft => ARM_L,
+        }
+    }
+
+    /// Planar push in Q10 integer units (1024 reads unity): the same octant
+    /// table as [`HitDir::push`] with no float, so the capture-point balance
+    /// rule reads an integer direction. Diagonals use 724, the floor of
+    /// 1024/sqrt 2. Mirror-exact: swapping left and right flips the x lane and
+    /// holds the z lane, so a mirrored blow mirrors the reaction.
+    pub fn push_q10(self) -> [i32; 2] {
+        const U: i32 = 1024;
+        const D: i32 = 724;
+        match self {
+            Self::Front => [0, -U],
+            Self::FrontRight => [-D, -D],
+            Self::Right => [-U, 0],
+            Self::BackRight => [-D, D],
+            Self::Back => [0, U],
+            Self::BackLeft => [D, D],
+            Self::Left => [U, 0],
+            Self::FrontLeft => [D, -D],
         }
     }
 }
@@ -467,6 +490,273 @@ pub fn apply_hit_react(
     write_additive(strike.dir, total, scratch);
     layers::apply_additive(base, scratch, mask, IMPULSE_Q8_ONE, out)?;
     Ok(())
+}
+
+/// Most flinch lanes a stack holds: the strike being ridden plus the one before it.
+pub const FLINCH_LANES: usize = 2;
+/// Cap on the drawn delta against one full strike: two overlapping strikes never read more than
+/// 1.6 times a single one, so a flurry cannot fold the fighter in half.
+pub const OVERLAP_CAP: f32 = 1.6;
+
+/// One strike in a [`FlinchStack`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Flinch {
+    /// Tick the strike landed.
+    pub tick: u32,
+    /// Which way it pushed the body.
+    pub dir: HitDir,
+    /// Its impulse in Q8 units, the same units [`HitStrike`] carries.
+    pub impulse_q8: u16,
+    /// Share of the strike this lane draws, 1.0 for a fresh hit and less when a third strike
+    /// takes over a lane that was already decaying (so the drawn pose does not jump).
+    pub gain: f32,
+    /// What the lane it replaced was still drawing: the old push axis and its weight at the
+    /// swap tick, plus the ticks it had left. That residual fades to zero over those ticks, so
+    /// the swap keeps the old direction on the first frame instead of swinging the lean across
+    /// to the new side in one tick.
+    pub prior: Option<([f32; 2], f32, u32)>,
+    /// True when this strike landed while another lane was still drawing: it skips its rise and
+    /// adds at full weight at once, because the body is already leaning and a second rise would
+    /// read as the lean letting go and coming back.
+    pub ride: bool,
+}
+
+impl Flinch {
+    /// A fresh strike at `dir`, full gain, with the standing rise.
+    pub fn new(tick: u32, dir: HitDir, impulse_q8: u16) -> Self {
+        Self {
+            tick,
+            dir,
+            impulse_q8,
+            gain: 1.0,
+            prior: None,
+            ride: false,
+        }
+    }
+}
+
+/// Two flinch lanes, oldest first: a second hit during a flinch rides the first instead of
+/// snapping the body back, which is what one windowed pass does.
+///
+/// The drawn delta is the sum of the lanes' deltas at their own weights, with the newer lane's
+/// push axis orthonormalized against the older one so two hits from the same side add and two
+/// opposite hits cancel instead of both tipping the same axis. A third strike replaces the
+/// oldest lane and starts at that lane's decayed weight, so the sum at the swap tick is the sum
+/// the tick before it.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct FlinchStack {
+    lanes: [Option<Flinch>; FLINCH_LANES],
+}
+
+impl FlinchStack {
+    /// An empty stack: nothing drawn.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Land a strike. Same tick replaces the lane it collides with; a third strike takes the
+    /// oldest lane over at that lane's decayed weight.
+    pub fn push(&mut self, strike: Flinch) {
+        // A strike that lands while a lane is still drawing rides it: no second rise.
+        let riding = self.lanes.iter().flatten().any(|held| {
+            held.tick <= strike.tick && strike.tick.wrapping_sub(held.tick) < VIEW_FLINCH_TICKS
+        });
+        let fresh = Flinch {
+            gain: 1.0,
+            ride: riding,
+            ..strike
+        };
+        // A lane whose window is over frees its slot without carrying anything.
+        for lane in self.lanes.iter_mut() {
+            if lane.is_some_and(|held| fresh.tick.wrapping_sub(held.tick) >= VIEW_FLINCH_TICKS) {
+                *lane = None;
+            }
+        }
+        match self.lanes {
+            [None, None] => self.lanes[0] = Some(fresh),
+            [Some(_), None] => self.lanes[1] = Some(fresh),
+            [None, Some(newest)] => {
+                // Keep the order oldest first.
+                self.lanes = [Some(fresh), Some(newest)];
+            }
+            [Some(oldest), Some(newest)] => {
+                // The oldest lane leaves its residual push behind: the new strike takes the slot
+                // with the old direction and weight for one frame, so the lean does not swing
+                // across to the new side in a single tick.
+                let age = fresh.tick.wrapping_sub(oldest.tick);
+                let left = VIEW_FLINCH_TICKS.saturating_sub(age).max(1);
+                let weight = impulse_scale(oldest.impulse_q8)
+                    * view_envelope(age, 0.0)
+                    * oldest.gain.max(0.0);
+                self.lanes = [
+                    Some(Flinch {
+                        // The replacing strike rises from zero: the prior carries the first
+                        // frame, so the sum does not jump on the swap tick.
+                        ride: false,
+                        prior: Some((oldest.dir.push(), weight, left)),
+                        ..fresh
+                    }),
+                    Some(newest),
+                ];
+            }
+        }
+        // A lane that lands before the one it replaced still reads oldest first.
+        if let [Some(a), Some(b)] = self.lanes {
+            if b.tick < a.tick {
+                self.lanes = [Some(b), Some(a)];
+            }
+        }
+    }
+
+    /// Live lanes with their push and drawn weight at `tick`, oldest first: the pushes are
+    /// orthonormalized, so the newer lane only adds the part of its push the older one left.
+    pub fn lanes_at(&self, tick: u32, alpha: f32) -> Vec<([f32; 2], f32)> {
+        let mut out: Vec<([f32; 2], f32)> = Vec::with_capacity(FLINCH_LANES);
+        let mut add = |push: [f32; 2], weight: f32| {
+            if weight.is_nan() || weight <= 0.0 {
+                return;
+            }
+            let mut push = push;
+            if let Some((first, _)) = out.first() {
+                // Gram-Schmidt: drop the share of this push that repeats the first lane's axis.
+                let dot = push[0] * first[0] + push[1] * first[1];
+                let left = [push[0] - dot * first[0], push[1] - dot * first[1]];
+                let len2 = left[0] * left[0] + left[1] * left[1];
+                if len2 > 1e-6 {
+                    let inv = 1.0 / len2.sqrt();
+                    push = [left[0] * inv, left[1] * inv];
+                }
+            }
+            out.push((push, weight));
+        };
+        for lane in self.lanes.iter().flatten() {
+            let age = tick.wrapping_sub(lane.tick);
+            // The replaced lane's residual comes first: it is the older of the two axes.
+            if let Some((push, weight, left)) = lane.prior {
+                let fade = if age >= left {
+                    0.0
+                } else {
+                    f32::from(u16::try_from(left - age).unwrap_or(0))
+                        / f32::from(u16::try_from(left).unwrap_or(1).max(1))
+                };
+                add(push, weight * fade);
+            }
+            let envelope = if lane.ride {
+                // Skip the rise: a riding strike draws at full weight from its own tick. The
+                // constant is the integer twin of VIEW_FLINCH_RISE_TICKS (pinned by a test).
+                view_envelope(age.max(RIDE_SKIP_TICKS), alpha)
+            } else {
+                view_envelope(age, alpha)
+            };
+            add(
+                lane.dir.push(),
+                impulse_scale(lane.impulse_q8) * envelope * lane.gain.max(0.0),
+            );
+        }
+        out
+    }
+
+    /// The strike that landed most recently, for the HUD and the receipts.
+    pub fn newest(&self) -> Option<Flinch> {
+        self.lanes
+            .iter()
+            .flatten()
+            .max_by_key(|lane| lane.tick)
+            .copied()
+    }
+}
+
+/// Draw every lane of `stack` over `base` at `tick`, capped at [`OVERLAP_CAP`] of one strike per
+/// bone. Returns the peak drawn share of a single strike (1.6 at the cap), which the receipts
+/// print; ticks with no live lane copy `base` exactly.
+pub fn apply_flinches(
+    base: &Pose,
+    stack: &FlinchStack,
+    tick: u32,
+    mask: &MaskTable,
+    out: &mut Pose,
+    scratch: &mut Pose,
+) -> Result<f32, HitError> {
+    checked_out(out)?;
+    checked_out(scratch)?;
+    let lanes = stack.lanes_at(tick, 0.0);
+    if lanes.is_empty() {
+        if base.positions.len() != FIGHTER_JOINTS || base.rotations.len() != FIGHTER_JOINTS {
+            return Err(HitError::Layer(GraphError::LengthMismatch {
+                expected: FIGHTER_JOINTS,
+                got: base.positions.len().min(base.rotations.len()),
+            }));
+        }
+        out.positions.copy_from_slice(&base.positions);
+        out.rotations.copy_from_slice(&base.rotations);
+        return Ok(0.0);
+    }
+    let peak = write_sum(&lanes, scratch);
+    layers::apply_additive(base, scratch, mask, IMPULSE_Q8_ONE, out)?;
+    Ok(peak)
+}
+
+/// Write the summed delta of `lanes` (push plus weight each) into `out`, capped per bone. The
+/// return value is the largest drawn share of one strike before the cap is applied.
+fn write_sum(lanes: &[([f32; 2], f32)], out: &mut Pose) -> f32 {
+    const IDENTITY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    let mut peak = 0.0f32;
+    for joint in 0..FIGHTER_JOINTS {
+        let planar = PLANAR_SHARE[joint];
+        let dip = DIP_SHARE[joint];
+        if planar == 0.0 && dip == 0.0 {
+            out.positions[joint] = [0.0; 3];
+            out.rotations[joint] = IDENTITY;
+            continue;
+        }
+        // Sum the lanes on each axis: two hits from one side add, two opposite hits cancel.
+        let mut planar_x = 0.0f32;
+        let mut planar_z = 0.0f32;
+        let mut down = 0.0f32;
+        let mut lean = 0.0f32;
+        for (push, weight) in lanes {
+            planar_x += push[0] * weight;
+            planar_z += push[1] * weight;
+            down += weight;
+            lean += weight;
+        }
+        let mut pos = [
+            planar_x * planar * PEAK_M,
+            -DIP_M * dip * down,
+            planar_z * planar * PEAK_M,
+        ];
+        let travel = (pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]).sqrt();
+        let cap_m = OVERLAP_CAP * PEAK_M;
+        if travel > cap_m && travel > 0.0 {
+            let shrink = cap_m / travel;
+            pos = [pos[0] * shrink, pos[1] * shrink, pos[2] * shrink];
+        }
+        let angle = ROT_PEAK_RAD * lean * ROT_SHARE[joint];
+        let cap_rad = OVERLAP_CAP * ROT_PEAK_RAD * ROT_SHARE[joint];
+        peak = peak
+            .max(travel.min(cap_m) / PEAK_M)
+            .max(angle.min(cap_rad) / ROT_PEAK_RAD);
+        out.positions[joint] = pos;
+        out.rotations[joint] = if ROT_SHARE[joint] == 0.0 {
+            IDENTITY
+        } else {
+            // One lean per lane around its own axis, the sum's angle capped at the overlay cap.
+            let mut quat = IDENTITY;
+            for (push, weight) in lanes {
+                let scale = if angle > cap_rad && angle > 0.0 {
+                    cap_rad / angle
+                } else {
+                    1.0
+                };
+                quat = quat_mul(
+                    lean_delta(*push, ROT_PEAK_RAD * ROT_SHARE[joint] * weight * scale),
+                    quat,
+                );
+            }
+            quat
+        };
+    }
+    peak
 }
 
 #[cfg(test)]
@@ -1083,5 +1373,166 @@ mod tests {
             flinch(HitDir::Front, IMPULSE_Q8_MAX + 1, &mut out).unwrap_err(),
             HitError::BadImpulse(IMPULSE_Q8_MAX + 1)
         );
+    }
+
+    #[test]
+    fn push_q10_is_the_integer_push_and_mirrors() {
+        const U: i32 = 1024;
+        const D: i32 = 724;
+        for dir in all_dirs() {
+            let q = dir.push_q10();
+            let f = dir.push();
+            // The integer table agrees with the float one lane by lane.
+            for lane in 0..2 {
+                assert_eq!(q[lane] >= 0, f[lane] >= 0.0, "{dir:?} lane {lane} sign");
+            }
+            match dir.octant() % 2 {
+                // Axis hits push one lane at unity and leave the other at rest.
+                0 => {
+                    assert_eq!(q[0].abs() + q[1].abs(), U, "{dir:?} axis push");
+                    assert!(q[0] == 0 || q[1] == 0, "{dir:?} single lane");
+                }
+                // Diagonals split evenly at 1024/sqrt 2, floored.
+                _ => {
+                    assert_eq!(q[0].abs(), D, "{dir:?} diagonal x");
+                    assert_eq!(q[1].abs(), D, "{dir:?} diagonal z");
+                }
+            }
+        }
+        // Mirroring a blow swaps left and right: the x lane flips and the z
+        // lane holds, so a mirrored hit mirrors the reaction.
+        for (left, right) in [
+            (HitDir::Left, HitDir::Right),
+            (HitDir::FrontLeft, HitDir::FrontRight),
+            (HitDir::BackLeft, HitDir::BackRight),
+        ] {
+            let (l, r) = (left.push_q10(), right.push_q10());
+            assert_eq!(l[0], -r[0], "{left:?}/{right:?} x flips");
+            assert_eq!(l[1], r[1], "{left:?}/{right:?} z holds");
+            // The push magnitude is one value, so no side is weaker.
+            assert_eq!(l[0].abs() + l[1].abs(), r[0].abs() + r[1].abs());
+        }
+        // Front and back mirror across the plane: the z lane flips, x holds.
+        let (front, back) = (HitDir::Front.push_q10(), HitDir::Back.push_q10());
+        assert_eq!(front[0], -back[0], "front/back x");
+        assert_eq!(front[1], -back[1], "front/back z flips");
+    }
+
+    /// One strike at full impulse drawn over the bind pose, for the overlap numbers.
+    fn one_strike_peak(dir: HitDir) -> f32 {
+        let base = base_pose();
+        let mut stack = FlinchStack::new();
+        stack.push(Flinch::new(0, dir, IMPULSE_Q8_ONE));
+        let mut out = Pose::zero(FIGHTER_JOINTS);
+        let mut scratch = Pose::zero(FIGHTER_JOINTS);
+        apply_flinches(&base, &stack, 1, &hit_mask(), &mut out, &mut scratch).expect("draws")
+    }
+
+    /// The drawn delta of one joint: `layers::apply_additive` writes base plus the lane sum, so
+    /// every number below is measured against the bind pose, never the absolute pose.
+    fn delta_of(pose: &Pose, base: &Pose, joint: usize) -> [f32; 3] {
+        [
+            pose.positions[joint][0] - base.positions[joint][0],
+            pose.positions[joint][1] - base.positions[joint][1],
+            pose.positions[joint][2] - base.positions[joint][2],
+        ]
+    }
+
+    #[test]
+    fn a_second_strike_six_ticks_later_does_not_snap_the_lean() {
+        let base = base_pose();
+        let mask = hit_mask();
+        // A jab rides a jab: a quarter impulse, so the seam's shape is measured, not the cap.
+        let jab = IMPULSE_Q8_ONE / 4;
+        let mut stack = FlinchStack::new();
+        stack.push(Flinch::new(0, HitDir::Front, jab));
+        stack.push(Flinch::new(6, HitDir::Right, jab));
+        let (mut out, mut scratch) = (Pose::zero(FIGHTER_JOINTS), Pose::zero(FIGHTER_JOINTS));
+        let mut drawn = Vec::new();
+        let mut peak = 0.0f32;
+        for tick in 0..VIEW_FLINCH_TICKS + 2 {
+            peak = peak.max(
+                apply_flinches(&base, &stack, tick, &mask, &mut out, &mut scratch).expect("draws"),
+            );
+            drawn.push(delta_of(&out, &base, SPINE));
+        }
+        // The seam between tick 11 and 12 moves the drawn spine less than 2 mm.
+        let seam = {
+            let (a, b) = (drawn[11], drawn[12]);
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        };
+        println!(
+            "hit_react: overlap seam {:.4} m at tick 11..12, peak {peak:.3}x one jab",
+            seam
+        );
+        assert!(seam < 0.002, "the second strike snapped the spine {seam} m");
+        // Riding the first flinch draws more than one jab alone (a jab is a quarter impulse, so
+        // one jab peaks at 0.25 of a full strike), and never past the cap.
+        assert!(
+            peak > 0.25 + 1e-4,
+            "the two lanes summed to {peak}x, no overlap"
+        );
+        assert!(
+            peak <= OVERLAP_CAP + 1e-4,
+            "overlap drew {peak}x one strike"
+        );
+    }
+
+    #[test]
+    fn two_opposite_strikes_stay_under_the_peak_cap() {
+        let base = base_pose();
+        let mask = hit_mask();
+        let mut stack = FlinchStack::new();
+        stack.push(Flinch::new(0, HitDir::Front, IMPULSE_Q8_ONE));
+        stack.push(Flinch::new(6, HitDir::Back, IMPULSE_Q8_ONE));
+        let (mut out, mut scratch) = (Pose::zero(FIGHTER_JOINTS), Pose::zero(FIGHTER_JOINTS));
+        let single = one_strike_peak(HitDir::Front);
+        let mut peak = 0.0f32;
+        for tick in 0..VIEW_FLINCH_TICKS + 2 {
+            peak = peak.max(
+                apply_flinches(&base, &stack, tick, &mask, &mut out, &mut scratch).expect("draws"),
+            );
+            for joint in 0..FIGHTER_JOINTS {
+                let at = delta_of(&out, &base, joint);
+                let travel = (at[0] * at[0] + at[1] * at[1] + at[2] * at[2]).sqrt() / PEAK_M;
+                assert!(
+                    travel <= OVERLAP_CAP + 1e-4,
+                    "joint {joint} at {travel}x one strike on tick {tick}"
+                );
+            }
+        }
+        println!("hit_react: opposite pair peak {peak:.3}x one strike (one strike {single:.3}x)");
+        assert!(peak <= OVERLAP_CAP + 1e-4, "opposite pair drew {peak}x");
+        // The same script draws the same pose twice, bit for bit.
+        let mut second = FlinchStack::new();
+        second.push(Flinch::new(0, HitDir::Front, IMPULSE_Q8_ONE));
+        second.push(Flinch::new(6, HitDir::Back, IMPULSE_Q8_ONE));
+        let (mut again, mut scratch2) = (Pose::zero(FIGHTER_JOINTS), Pose::zero(FIGHTER_JOINTS));
+        let (mut out1, mut scratch1) = (Pose::zero(FIGHTER_JOINTS), Pose::zero(FIGHTER_JOINTS));
+        for tick in [0u32, 5, 6, 11, 20] {
+            apply_flinches(&base, &stack, tick, &mask, &mut out1, &mut scratch1).expect("draws");
+            apply_flinches(&base, &second, tick, &mask, &mut again, &mut scratch2).expect("draws");
+            assert_eq!(out1.positions, again.positions, "tick {tick} replays");
+            assert_eq!(out1.rotations, again.rotations, "tick {tick} replays");
+        }
+        // A third strike takes the oldest lane over without a jump at the swap tick. Jabs, so
+        // the seam is the swap and not one tick of a full strike's own decay.
+        let mut third = FlinchStack::new();
+        let jab = IMPULSE_Q8_ONE / 4;
+        third.push(Flinch::new(0, HitDir::Front, jab));
+        third.push(Flinch::new(6, HitDir::Right, jab));
+        let (mut before, mut scratch3) = (Pose::zero(FIGHTER_JOINTS), Pose::zero(FIGHTER_JOINTS));
+        apply_flinches(&base, &third, 11, &mask, &mut before, &mut scratch3).expect("draws");
+        third.push(Flinch::new(12, HitDir::Left, jab));
+        let (mut after, mut scratch4) = (Pose::zero(FIGHTER_JOINTS), Pose::zero(FIGHTER_JOINTS));
+        apply_flinches(&base, &third, 12, &mask, &mut after, &mut scratch4).expect("draws");
+        let jump = {
+            let (a, b) = (
+                delta_of(&before, &base, SPINE),
+                delta_of(&after, &base, SPINE),
+            );
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        };
+        assert!(jump < 0.002, "the third strike snapped the spine {jump} m");
     }
 }
