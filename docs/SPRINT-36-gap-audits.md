@@ -42,6 +42,12 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   F2P: a height grid cooks to a mesh plus collider and one `terrain.set` verb (new test).
   P2P: the golden tape does not move. Accept: a 64x64 grid renders and blocks at the
   cooked height.
+  Part 2026-10-24: `bce18fe0f` cooks a `HeightGrid` (integer mm) to a `TerrainMesh` +
+  `HeightfieldRecord`, byte-equal twice, 8 triangles on a 3x3, malformed grids refused;
+  `18f6cc10a` puts the cooked mesh in the draw list as one `"terrain"` node
+  (`TERRAIN_MESH_ID`), no GPU upload path change. Runs 40060965451, 40061456369.
+  Remaining: `world.terrain.set`/`world.terrain.stats` (home: `packs/world.rs`, already
+  registered) and the 64x64 blocking accept.
 - [x] WG6 editor: a rule node that compiles to the existing Rhai text - the node graph
   has no script node (`crates/editor/src/graph.rs:26-31`); `crates/rules` runs text.
   Tier B. Size M. Owns `crates/editor/src/graph.rs`, `crates/rules/src/`.
@@ -104,7 +110,9 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   no `project.*`; only `game.build` (`crates/endpoint/src/build_game.rs:24`). Tier A.
   Size S. Owns `crates/endpoint/src/packs/`. F2P: the three verbs are absent (new test).
   P2P: `game.build` stays green. Accept: new -> build -> run from one session.
-  Blocked 2026-10-24: the same 34-file endpoint dirty set as WG4.
+  Unblocked 2026-10-24: `packs/mod.rs` is clean; only `packs/asset*`, `level_paint.rs`,
+  `audit/` and `mcp_refusal.rs` are held by other seats. Add a new `packs/project.rs`
+  and register it with one hunk in `packs/mod.rs`.
 
 ## Tools and dev loop
 
@@ -197,7 +205,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
 - [x] LG2 playtest: the eval scorecard is a standing CI gate with a measured bar -
   `tools/eval-bar.json` + `eval-check.yml` (mock only): `rows 8, at 100%: 7, red: 0`.
   Landed `1873f4d59`.
-- [ ] LG3 provider: `agent_loop` runs the door and the call log keeps args - the loop says
+- [x] LG3 provider: `agent_loop` runs the door and the call log keeps args - the loop says
   "no in-repo consumer" (`agent_loop.rs:6`) and the audit chain keeps 1024 entries with
   no args. Tier A. Size M. Owns `crates/provider/src/agent_loop.rs`,
   `crates/endpoint/src/audit/`. F2P: one scripted task runs read -> preview -> apply
@@ -214,7 +222,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   one capture's material split.
   Landed `c9eb97072`: `ImagePart` (media type, 1 MiB cap, signature check) renders one
   `image_url` block only in the chat wire; text body stayed byte-stable (run 40049910363).
-- [ ] LG6 endpoint: a streamable HTTP transport with a token gate - stdio only
+- [x] LG6 endpoint: a streamable HTTP transport with a token gate - stdio only
   (`bin/e2040-mcp.rs:77`), remote shim is in-process. Tier B. Size L. Owns
   `crates/endpoint/src/transport.rs`, `bin/e2040-mcp.rs`. F2P: a second binary serves the
   same door over loopback HTTP with a token (new test). P2P: stdio stays green.
@@ -245,7 +253,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   Landed `1e98cc205`: `QuotaCharge::of_request` + `QuotaBook::admit_request`; the refusal
   names the remaining budget and the card prints a `cost per row` column, `unknown` when
   any row is (never zero-claimed). Runs 40048528789, 40048960305.
-- [ ] LG10 endpoint: parallel read-only tool calls - one `Mutex<ServerState>`
+- [x] LG10 endpoint: parallel read-only tool calls - one `Mutex<ServerState>`
   (`mcp.rs:1082`) serializes every call. Tier C. Size M. Owns `crates/endpoint/src/mcp.rs`.
   F2P: two `scene.read` calls overlap under the new read path (new test). P2P: the write
   path stays serialized. Accept: 8 concurrent reads, no interleaved write.
