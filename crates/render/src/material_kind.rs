@@ -65,6 +65,11 @@ impl MaterialKind {
     }
 }
 
+/// SW51: the rim and backlight terms, keyed off the kind word above. The CPU
+/// twin of the two arms `shaders/forward.wgsl` `direct_light` now carries.
+#[path = "rim_light.rs"]
+pub mod rim_light;
+
 #[cfg(test)]
 mod tests {
     use super::*;
