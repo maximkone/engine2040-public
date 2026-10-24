@@ -159,6 +159,42 @@ Test names in these modules: `phase_wrap_past_clip_end`, `invalid_skeleton_and_t
 
 Tests: `node tools/gh-check.mjs cargo test -p engine-anim --lib` (add `--features json` for the codec).
 
+### 1.9 Animation budget (AM33)
+
+`crates/anim/src/anim_budget.rs` is a pure allocator. It spends one per-frame pose budget, in milliseconds, through the `lod::Tier` ladder: full rate, every 2nd tick, every 4th tick, then a held far pose. The least significant actors drop first (module doc).
+
+- `significance` (`anim_budget.rs:218`) reads screen size, distance and a fight bonus (`FIGHT_BONUS`, 1.0). A pinned actor gets `SIG_PINNED` (100) and stays at `Tier::Full`. The player and the current opponent are pinned.
+- `BudgetConfig` (`anim_budget.rs:123`) holds `budget_ms`, `hold_frames`, `headroom`, `emergency`, `smoothing` and `initial_unit_ms`.
+- `AnimBudget::new` (`anim_budget.rs:298`) builds the allocator. `set_budget_ms` (`:322`) changes the budget.
+- `AnimBudget::step(actors, measured_ms, out)` (`anim_budget.rs:410`) writes one `Tier` per actor into `out`. `updates_this_frame(tiers, index)` (`:345`) says whether an actor's pose is sampled this frame.
+- Cost model: a full-rate actor of weight 1 costs `unit_ms`. A tier with period `p` costs `unit_ms / p` on average. `unit_ms` is learned from the measured cost (module doc).
+- Hysteresis: a rung holds for `hold_frames`. Going finer needs the plan under `budget_ms * headroom`. A measured cost over `budget_ms * emergency` skips the hold when going coarser (module doc).
+- `MAX_BUDGET_ACTORS` is 1024 (`anim_budget.rs:35`).
+
+**Limits.**
+
+- Presentation only. Tiers gate view-side pose sampling and never the sim (module doc).
+- Not wired yet: the live pose step. `pose_frame` in `crates/game/src/fighter_look.rs` is the target (AM34 row, open).
+- The module doc names row AM25 for the game wiring. The board shows AM25 as the look-at row, which landed. Read AM34 as the wiring row.
+
+**Tests.** `node tools/gh-check.mjs cargo test -p engine-anim --test it anim_budget` runs 10 tests in `crates/anim/tests/it/anim_budget.rs`. They include `over_budget_least_significant_drop_first`, `the_player_and_the_opponent_never_drop`, `a_rung_holds_for_the_hold_frames`, `the_dead_band_never_flips_a_rung`, `emergency_skips_the_hold_going_coarser` and `the_same_tape_gives_the_same_tiers_twice`.
+
+### 1.10 Motion warping for melee root motion (AM40)
+
+`crates/anim/src/motion_warp.rs` is presentation only, and it uses f64 inside. One lunge clip covers many distances. A warp window on the clip's root table is scaled and turned, so the root ends on a target instead of where the clip would put it (module doc).
+
+- `lunge_target(from, opponent, reach)` (`motion_warp.rs:120`) gives the point `reach` metres short of the opponent, as a displacement. A fighter already inside reach gets zero.
+- `warp_root(table, WarpWindow, WarpTarget, WarpLimits)` (`motion_warp.rs:193`) returns a warped table and a `WarpReport` (peak scale, peak turn, residual, and whether a limit held it). A rejected call returns no table and a `WarpError` (`motion_warp.rs:104`).
+- `WarpWindow` (`:51`) is the tick range. `WarpTarget` (`:61`) is the planar move and the yaw change. `WarpLimits` (`:70`) bounds the stretch and the turn. Its default allows a stride scale from 0.4 to 2.5 and a turn of up to 90 degrees.
+- Ticks outside the window are bit-identical to the clip (module doc).
+- `root_after` (`motion_warp.rs:341`) gives the root at the end of a table. `slide_mm(clip, authority)` (`motion_warp.rs:356`) measures the foot-slide gap in millimetres.
+
+**Limits.**
+
+- Not wired yet: the look does not read a root table. The drawn body still uses the authority position, `slot_root` in `crates/game/src/fighter_look.rs` (AM41 row, open).
+
+**Tests.** `node tools/gh-check.mjs cargo test -p engine-anim --lib motion_warp` runs the 11 tests in `crates/anim/src/motion_warp_test.rs`. They include `warp_root_ends_exactly_at_the_target_at_the_window_end`, `warp_root_leaves_every_tick_outside_the_window_untouched`, `warp_root_velocity_is_continuous_at_the_window_edges`, `warp_root_is_bit_exact_on_replay`, `warp_root_refuses_hostile_input_and_returns_no_table` and `lunge_target_stops_a_blade_reach_short_of_the_opponent`.
+
 ## 2. `engine-ai` (`crates/ai`)
 
 Brains and decision tools. Gameplay brains emit `FighterInput` (validated, the arena's input type).
@@ -229,6 +265,29 @@ Consumers: `NetPolicy` is used by `crates/distill` (offline trainer) only. No ti
 Tests: `node tools/gh-check.mjs cargo test -p engine-ai --lib` and `--test general-presets`, `--test crowd_orca_bench`.
 Named: `percept_features_quantize_with_goldens`, `perception_clock_holds_intent_between_ticks` (gladiator.rs),
 `unknown_phase_and_role_refuse_loudly`, `feint_triggers_on_close_release_then_expires` (depth.rs).
+
+### 2.5 AI decision trace (AIN8)
+
+`crates/ai/src/bt_trace.rs` records each behavior-tree node that a tick visits. For each node it stores the status, the state or blackboard key it read, and the value it saw. For a utility pick it also stores the five lane scores (module doc). The trace is off by default and read-only. The tree walker is the same generic function with or without a sink, so tracing cannot change a status, an action or a blackboard value.
+
+- `BtTrace::new(cap)` (`bt_trace.rs:456`) makes a fixed ring. A push over the cap overwrites the oldest row (`push`, `bt_trace.rs:493`). `MAX_ROWS` is 4096 (`bt_trace.rs:32`).
+- `BtTree::tick_with(.., slot, Some(&mut BtTrace))` (`crates/ai/src/bt.rs:481`) files one row per visited node.
+- `BtTrace::note_decisions(&DecisionLog)` (`bt_trace.rs:535`) adds the utility lane rows from the existing decision tape. It does not make a second source.
+- Readers: `tree_text` (`bt_trace.rs:646`) prints an indented tree for people. `lines_text` (`:676`) prints one line per node for agents. `to_bytes` (`:542`) and `from_bytes` (`:568`) give the canonical tape. `from_bytes` refuses short, long and unknown-tag tapes.
+- `bout::run_bout_traced` (`crates/ai/src/bout.rs:218`) runs a bout with the trace on.
+- Door: `ai.decisions` with `mode=trace`. The handler is `ai_trace_core` (`crates/endpoint/src/packs/play.rs:1029`), and `ai_decisions_core` dispatches to it (`play.rs:1059`). The arguments are listed under `ai.decisions` in `door-reference.md`.
+
+**Limits.**
+
+- Nothing records a live match yet. The arena and the seat do not turn the trace on (AIN8 row).
+- No door verb reads a running seat's ring.
+- The lane scores reach the trace only through the decision tape. They are not tagged per tree node (AIN8 row).
+- The showcase station is SHOW7, not built (`docs/plan/showcase.md`).
+
+**Tests.**
+
+- `node tools/gh-check.mjs cargo test -p engine-ai --lib bt_trace` runs 8 tests. They include `a_traced_tick_names_the_nodes_statuses_and_reads`, `tracing_never_changes_a_decision_or_a_hash`, `a_traced_bout_keeps_the_same_tape_digest`, `the_ring_is_bounded_and_ticking_allocates_nothing`, `bytes_round_trip_and_bad_tapes_are_refused` and `lane_rows_come_from_the_existing_decision_tape`.
+- Door: `node tools/gh-check.mjs cargo test -p engine-endpoint --features mcp --lib ai_decisions` covers the trace print and the refusals (`play.rs:1636` and `play.rs:1672`).
 
 ## 3. `engine-nav` (`crates/nav`)
 
