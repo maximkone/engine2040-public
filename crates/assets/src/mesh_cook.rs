@@ -34,7 +34,7 @@ use super::wire::bound_chars;
 use engine_core::Fnv64;
 use std::fmt;
 
-pub use super::collapse::simplify;
+pub use super::collapse::{mesh_extent_m, seam_lock, simplify, simplify_with_attributes, AttrCost};
 
 /// Hero LOD0 triangle budget (content pipeline convention).
 pub const HERO_MAX_TRIS: u32 = 40_000;
