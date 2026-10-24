@@ -562,6 +562,12 @@ pub(crate) fn build_batch(
             ),
         ));
     }
+    // AD26: a bad argument list answers once. Two or more bad op fields come
+    // back as one `bad_args` refusal naming every pointer; a single bad field
+    // keeps the precise code the conversion below returns.
+    if let Some(refusal) = ops_refusal(ops) {
+        return Err(refusal);
+    }
     let mut converted = Vec::with_capacity(ops.len());
     for (index, dto) in ops.iter().enumerate() {
         converted.push(op_from_dto(index, dto)?);
@@ -652,7 +658,22 @@ fn origin_label(source: &engine_scene::provenance::Source) -> String {
 
 #[path = "mcp_refusal.rs"]
 mod mcp_refusal;
-pub(crate) use self::mcp_refusal::{batch_error, cap_error, granted_ops};
+pub(crate) use self::mcp_refusal::{
+    batch_error, cap_error, envelope_outcome, granted_ops, refusal_outcome,
+};
+
+// AD26: the one advice table and the multi-field reply for a bad argument
+// list. The refusal record keeps its home in `mcp_refusal`; the closed advice
+// code comes from here.
+#[path = "advice.rs"]
+mod advice;
+pub(crate) use self::advice::ops_refusal;
+pub use self::advice::{advice_for_code, Advice};
+
+// MCP31: the `input_required` ask (multi round-trip). A verb raises it as a
+// refusal record and the door turns it into the typed result.
+#[path = "mcp_input.rs"]
+pub(crate) mod mcp_input;
 
 /// Map a gated-undo refusal to a tool error: the gate's own mapping for mask,
 /// scope, budget and command refusals, plus the journal-level refusals a
@@ -702,6 +723,12 @@ pub struct ServerState {
     pub(crate) cap: Capability,
     pub(crate) ledger: ApprovalLedger,
     pub(crate) jobs: PlayJobs,
+    /// SW145: the session's stills, keyed by (tick, pose), so a retried
+    /// photo.shoot answers the same file and hash.
+    pub(crate) photo_shots: super::photo_verb::PhotoShots,
+    /// The host's renderer for photo.shoot; None on a headless door, which
+    /// then refuses the still by name instead of hanging.
+    pub(crate) photo_renderer: Option<super::photo_verb::PhotoRendererFn>,
     /// The session's play slot: the live bout held across `play.step`,
     /// `sim.step` and `sim.observe` (a longer prefix only simulates its new
     /// ticks), plus the capture hook and re-query cache of this session.
@@ -709,6 +736,11 @@ pub struct ServerState {
     pub(crate) logs: LogStore,
     pub(crate) insight: super::insight::Index,
     pub(crate) audit: DoorAudit,
+    /// MCP31: the MRTR round this call retries, armed by the door from the
+    /// request before dispatch: the `requestState` the retry echoes and the
+    /// licence answer it carries. `None` outside a retry, so a plain call
+    /// seals a plain one-round record.
+    pub(crate) round: Option<super::audit::RoundNote>,
     /// Evidence receipt of the newest state-changing `tx.apply` on this
     /// session, if any: the witnessed-plan gate seals one per landed write.
     /// Ledger replays move no revision and keep the retained receipt.
@@ -793,10 +825,13 @@ impl ServerState {
             cap,
             ledger: ApprovalLedger::new(),
             jobs: PlayJobs::new(),
+            photo_shots: super::photo_verb::PhotoShots::new(),
+            photo_renderer: None,
             play: super::play::play_session::PlaySlot::default(),
             logs: LogStore::new(LOG_RING_CAP),
             insight,
             audit: DoorAudit::new(),
+            round: None,
             last_witness_receipt: None,
             watch_subscription: None,
             watch_digest: None,
@@ -1112,6 +1147,20 @@ impl ServerState {
     /// unpinned, empty (revision 0) or stale pin is refused before any
     /// simulation, and the job manifest carries the pin's revision and digest.
     pub fn play_run(&mut self, args: &PlayRunArgs) -> Result<PlayRunOutput, McpToolError> {
+        self.play_run_for(args, false)
+    }
+
+    /// [`play_run`](Self::play_run) for a client whose capabilities may name
+    /// the tasks extension (AX28): with `wants_tasks` a `start` files a task
+    /// job, whose progress walks in [`PlayJobs`](super::play::PlayJobs) slices
+    /// and which `PlayJobs::task_for` answers as a task. The tool answer bytes
+    /// are the same start and poll answer either way, so a client that does
+    /// not declare the extension reads exactly what it read before.
+    pub fn play_run_for(
+        &mut self,
+        args: &PlayRunArgs,
+        wants_tasks: bool,
+    ) -> Result<PlayRunOutput, McpToolError> {
         let world = match args.action.as_str() {
             "start" => Some(super::scene_tools::pinned_world(&self.doc, args.scene_rev)?),
             _ => None,
@@ -1129,10 +1178,36 @@ impl ServerState {
                     note: scripted.note(),
                     run: &run,
                 };
-                return self.jobs.play_run_with(args, world, Some(&runner));
+                return self
+                    .jobs
+                    .play_run_with_for(args, world, Some(&runner), wants_tasks);
             }
         }
-        self.jobs.play_run_in(args, world)
+        self.jobs.play_run_with_for(args, world, None, wants_tasks)
+    }
+
+    /// SW145: one still for an agent. The session holds its shots per
+    /// `(tick, pose)`, so a retry answers the same path and hash, and a door
+    /// with no renderer installed refuses with `no_renderer` instead of
+    /// waiting for a frame that never comes.
+    pub fn photo_shoot(
+        &mut self,
+        args: &super::photo_verb::PhotoShootArgs,
+    ) -> Result<super::photo_verb::PhotoShot, McpToolError> {
+        let request = args.request().map_err(super::photo_verb::photo_refusal)?;
+        let dir = args.dir_path();
+        let looked: Option<&super::photo_verb::PhotoRenderer<'_>> = self
+            .photo_renderer
+            .as_ref()
+            .map(|render| render as &super::photo_verb::PhotoRenderer<'_>);
+        self.photo_shots
+            .shoot(&request, &dir, looked)
+            .map_err(super::photo_verb::photo_refusal)
+    }
+
+    /// Install the host renderer `photo.shoot` uses (the arena window does).
+    pub fn set_photo_renderer(&mut self, renderer: super::photo_verb::PhotoRendererFn) {
+        self.photo_renderer = Some(renderer);
     }
 
     /// MCP2 renderer receipt. Unwired by construction: structured
@@ -1169,6 +1244,10 @@ pub use self::mcp_tools::{
 pub struct McpServer {
     state: RwLock<ServerState>,
     tool_router: ToolRouter<Self>,
+    /// MCP31: the retry answers of the `tools/call` in flight, keyed by
+    /// request id. Set before a call dispatches and cleared after it, so a
+    /// verb reads the answers of its own call and never a stale round.
+    retry_answers: std::sync::Mutex<rmcp::model::InputResponses>,
     /// Test-only gate: a read call reports entering its shared span and waits
     /// for the release, so a test can hold eight reads inside at once.
     #[cfg(test)]
@@ -1252,8 +1331,49 @@ impl McpServer {
         Self {
             state: RwLock::new(state),
             tool_router,
+            retry_answers: std::sync::Mutex::new(rmcp::model::InputResponses::new()),
             #[cfg(test)]
             read_gate: None,
+        }
+    }
+
+    /// MCP31: the retry answers of the call in flight; empty on a first call.
+    /// A poisoned lock answers empty, so a verb asks again rather than reading
+    /// another call's answers.
+    #[cfg_attr(
+        not(feature = "intake"),
+        expect(
+            dead_code,
+            reason = "the only reader is `asset.intake`, which rides the `intake` feature"
+        )
+    )]
+    pub(crate) fn retry_answers(&self) -> rmcp::model::InputResponses {
+        self.retry_answers
+            .lock()
+            .map(|answers| answers.clone())
+            .unwrap_or_default()
+    }
+
+    /// Arm the retry answers for the call about to dispatch.
+    pub(crate) fn set_retry_answers(&self, answers: rmcp::model::InputResponses) {
+        if let Ok(mut guard) = self.retry_answers.lock() {
+            *guard = answers;
+        }
+    }
+
+    /// MCP31: arm the ledger round this call retries (the `requestState` a
+    /// retry echoes plus the answer it carries), or clear it. Reading it back
+    /// is the seal path's, one record at a time.
+    pub(crate) fn set_round(&self, round: Option<super::audit::RoundNote>) {
+        if let Ok(mut state) = self.state.write() {
+            state.round = round;
+        }
+    }
+
+    /// Clear the retry answers once the call answered.
+    pub(crate) fn clear_retry_answers(&self) {
+        if let Ok(mut guard) = self.retry_answers.lock() {
+            guard.clear();
         }
     }
 
@@ -1381,6 +1501,20 @@ impl McpServer {
         // note before a long call and one after it, so a slow build reads as
         // progress and not as a hang.
         let call_name = request.name.clone();
+        // MCP31: a retry carries the answers to the previous ask. They ride
+        // this call only; the caller's next first-call sees none. The
+        // `requestState` it echoes keys the ledger round the seal path folds.
+        let answers = request.input_responses.clone().unwrap_or_default();
+        self.set_retry_answers(answers.clone());
+        self.set_round(
+            request
+                .request_state
+                .as_ref()
+                .map(|state| super::audit::RoundNote {
+                    request_state: state.clone(),
+                    answer: mcp_input::answered_licence(&answers),
+                }),
+        );
         let note = ProgressNote::for_call(&call_name, &context);
         if let Some(note) = &note {
             note.send(0.0, &format!("{call_name}: started")).await;
@@ -1389,6 +1523,8 @@ impl McpServer {
         // answer, so a client that re-lists on the note sees the new surface.
         let notices = context.clone();
         let answer = self.dispatch_call(request, context).await;
+        self.set_round(None);
+        self.clear_retry_answers();
         self.flush_notices(&notices).await;
         if let Some(note) = &note {
             note.send(1.0, &format!("{call_name}: done")).await;
@@ -1404,7 +1540,13 @@ impl McpServer {
     ) -> Result<CallToolResponse, ErrorData> {
         if self.tool_router.has_route(&request.name) {
             let tcc = ToolCallContext::new(self, request, context);
-            let response = self.tool_router.call(tcc).await?;
+            // AD26: a door refusal leaves the router as an envelope; it
+            // answers as an `isError` result, a foreign envelope stays a
+            // protocol error.
+            let response = match self.tool_router.call(tcc).await {
+                Ok(response) => response,
+                Err(envelope) => return envelope_outcome(envelope),
+            };
             // AX27: a frame receipt answers with an image block plus a caption
             // instead of a raw `png_bytes` number array. Every other value and
             // every error result passes through untouched.
@@ -1422,7 +1564,7 @@ impl McpServer {
         let Some(verb) = PackRegistry::shipped().verb(&name) else {
             return match self.dispatch(&name, |_| Ok::<(), McpToolError>(())) {
                 Ok(()) => Err(ErrorData::invalid_params("tool not found", None)),
-                Err(error) => Err(ErrorData::from(error)),
+                Err(error) => refusal_outcome(error),
             };
         };
         let args = request
@@ -1431,7 +1573,12 @@ impl McpServer {
         match verb.invoke(self, args) {
             // AX27: `play.step` returns its frame the same way `capture` does.
             Ok(value) => Ok(frame_call_result(value).into()),
-            Err(error) => Err(ErrorData::from(error)),
+            // MCP31: an ask leaves as the typed `input_required` result; any
+            // other refusal keeps the AD26 result-or-envelope split.
+            Err(error) => match mcp_input::into_response(&error) {
+                Some(asked) => Ok(asked),
+                None => refusal_outcome(error),
+            },
         }
     }
 

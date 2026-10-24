@@ -23,13 +23,13 @@
 # rung_0 light + parry (Holder grunt), rung_1 heavy, rung_2 dodge answer +
 # stamina (Flanker veteran), rung_3 riposte, rung_4 stamina pressure + wall
 # band, rung_5 elite pressure, rung_6 gate mouth + ring, rung_7 final bout
-# (boss flag; GA15 primus replaces the tier).
+# (boss flag; GA15 primus replaces the tier). The arena= cell names the placement the rung runs (base, ludus or siege): new_arena is 1 when the rung swaps that placement and 0 when it keeps it.
 table ladder version 1
-rung_0 tier=1 new_moves=1 new_rules=1 new_arena=0 reward=100 penalty=25 minutes=2 rank=0 boss=0 # rank 0 Tiro
-rung_1 tier=1 new_moves=1 new_rules=0 new_arena=0 reward=125 penalty=25 minutes=2 rank=0 boss=0 # rank 0 Tiro
-rung_2 tier=2 new_moves=1 new_rules=1 new_arena=0 reward=150 penalty=25 minutes=3 rank=1 boss=0 # rank 1 Miles
-rung_3 tier=2 new_moves=1 new_rules=0 new_arena=0 reward=175 penalty=25 minutes=3 rank=1 boss=0 # rank 1 Miles
-rung_4 tier=2 new_moves=0 new_rules=1 new_arena=1 reward=200 penalty=25 minutes=4 rank=1 boss=0 # rank 1 Miles
-rung_5 tier=3 new_moves=1 new_rules=0 new_arena=0 reward=225 penalty=25 minutes=4 rank=2 boss=0 # rank 2 Immunis
-rung_6 tier=3 new_moves=1 new_rules=0 new_arena=1 reward=250 penalty=25 minutes=5 rank=2 boss=0 # rank 2 Immunis
-rung_7 tier=3 new_moves=1 new_rules=0 new_arena=0 reward=275 penalty=25 minutes=6 rank=3 boss=1 # rank 3 Optio
+rung_0 tier=1 new_moves=1 new_rules=1 new_arena=0 arena=base reward=100 penalty=25 minutes=2 rank=0 boss=0 # rank 0 Tiro
+rung_1 tier=1 new_moves=1 new_rules=0 new_arena=0 arena=base reward=125 penalty=25 minutes=2 rank=0 boss=0 # rank 0 Tiro
+rung_2 tier=2 new_moves=1 new_rules=1 new_arena=0 arena=base reward=150 penalty=25 minutes=3 rank=1 boss=0 # rank 1 Miles
+rung_3 tier=2 new_moves=1 new_rules=0 new_arena=0 arena=base reward=175 penalty=25 minutes=3 rank=1 boss=0 # rank 1 Miles
+rung_4 tier=2 new_moves=0 new_rules=1 new_arena=1 arena=ludus reward=200 penalty=25 minutes=4 rank=1 boss=0 # rank 1 Miles
+rung_5 tier=3 new_moves=1 new_rules=0 new_arena=0 arena=ludus reward=225 penalty=25 minutes=4 rank=2 boss=0 # rank 2 Immunis
+rung_6 tier=3 new_moves=1 new_rules=0 new_arena=1 arena=siege reward=250 penalty=25 minutes=5 rank=2 boss=0 # rank 2 Immunis
+rung_7 tier=3 new_moves=1 new_rules=0 new_arena=0 arena=siege reward=275 penalty=25 minutes=6 rank=3 boss=1 # rank 3 Optio

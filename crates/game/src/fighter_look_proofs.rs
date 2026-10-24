@@ -233,27 +233,64 @@ fn clocks(look: &FighterLook, slot: u8) -> Clocks {
     }
 }
 
+/// One joint of a slot's rig, named for a failure message: `#12 head`.
+fn joint_label(look: &FighterLook, slot: u8, joint: usize) -> String {
+    let rig = &look.rigs[look.rig_for_slot(usize::from(slot))];
+    match rig.skeleton.joints.get(joint) {
+        Some(named) => format!("#{joint} {}", named.name),
+        None => format!("#{joint} of {}", rig.skeleton.joints.len()),
+    }
+}
+
 /// How far two shapes differ, for a failure message: clip, yaw and the worst
-/// joint gap in centimeters.
-fn gap(now: &Option<Shape>, then: &Option<Shape>) -> String {
+/// joint gap in centimeters, with the joint that first differs named by
+/// `label`. A non-finite joint is named at once: the `f32::max` fold drops
+/// NaN, so a NaN joint would otherwise read as a 0.0 cm gap and hide itself.
+fn gap(now: &Option<Shape>, then: &Option<Shape>, label: &dyn Fn(usize) -> String) -> String {
     let (Some(now), Some(then)) = (now, then) else {
         return "a body vanished".to_string();
     };
-    let worst_m = now
-        .joints
-        .iter()
-        .zip(&then.joints)
-        .map(|(a, b)| {
-            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
-        })
-        .fold(0.0f32, f32::max);
-    format!(
-        "clip {} vs {}, clip clock gap {:.4} s, yaw gap {:.4} rad, worst joint gap {:.1} cm",
+    let mut head = format!(
+        "clip {} vs {}, clip clock gap {:.4} s, yaw gap {:.4} rad",
         now.clip,
         then.clip,
         (now.clip_s - then.clip_s).abs(),
         (now.yaw - then.yaw).abs(),
-        worst_m * 100.0
+    );
+    if now.joints.len() != then.joints.len() {
+        head.push_str(&format!(
+            ", joint count {} vs {}",
+            now.joints.len(),
+            then.joints.len()
+        ));
+    }
+    let (mut worst_m, mut worst, mut first, mut broken) = (0.0f32, 0usize, None, None);
+    for (index, (a, b)) in now.joints.iter().zip(&then.joints).enumerate() {
+        if broken.is_none() && !a.iter().chain(b.iter()).all(|value| value.is_finite()) {
+            broken = Some((index, *a, *b));
+        }
+        let distance =
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        if distance > worst_m {
+            worst_m = distance;
+            worst = index;
+        }
+        if distance > 0.0 && first.is_none() {
+            first = Some(index);
+        }
+    }
+    if let Some((index, a, b)) = broken {
+        return format!(
+            "{head}, joint {} non-finite: now {a:?} then {b:?}, worst finite joint gap {:.1} cm",
+            label(index),
+            worst_m * 100.0
+        );
+    }
+    let named = first.map_or_else(String::new, |index| format!(", first {}", label(index)));
+    format!(
+        "{head}, worst joint gap {:.1} cm ({}){named}",
+        worst_m * 100.0,
+        label(worst)
     )
 }
 
@@ -318,7 +355,7 @@ fn hitstop_hold_posed_pair_does_not_move_through_the_freeze() {
                             got == want,
                             "tick {tick} (impact {} + {age}) alpha {alpha}: slot {slot} moved in the freeze: {}",
                             open.impact,
-                            gap(got, want)
+                            gap(got, want, &|index| joint_label(&look, slot, index))
                         );
                     }
                     if age + 1 == open.freeze {
@@ -358,12 +395,23 @@ fn hitstop_hold_posed_pair_does_not_move_through_the_freeze() {
                             was.since + 1,
                             "tick {tick}: slot {slot} clip clock"
                         );
-                        assert_eq!(
-                            is.fade,
-                            was.fade.saturating_sub(1),
-                            "tick {tick}: slot {slot} blend"
-                        );
-                        resumed += 1;
+                        // A blend resuming one tick on is the law; a blend the
+                        // bridge cancels on the thaw reads zero instead: the Bevy
+                        // retrigger rule (`retarget_cancel`) drops the fade when
+                        // the clip it faded from is the one that resumed, and the
+                        // slot then shows that clip whole.
+                        if is.fade == was.fade.saturating_sub(1) {
+                            resumed += 1;
+                        } else {
+                            assert_eq!(
+                                is.fade, 0,
+                                "tick {tick}: slot {slot} blend ({was:?} then {is:?})"
+                            );
+                            assert!(
+                                was.fade > 1,
+                                "tick {tick}: slot {slot} blend ({was:?} then {is:?})"
+                            );
+                        }
                     }
                     if let (Some(was), Some(is)) = (was.flinch, is.flinch) {
                         assert_eq!(is, was + 1, "tick {tick}: slot {slot} flinch clock");
@@ -398,7 +446,7 @@ fn hitstop_hold_posed_pair_does_not_move_through_the_freeze() {
                     assert!(
                         at(0) == at(1) && at(1) == at(2),
                         "tick {tick}: slot {slot} plays on between ticks: {}",
-                        gap(at(0), at(2))
+                        gap(at(0), at(2), &|index| joint_label(&look, slot, index))
                     );
                 }
                 window = Some(Window {
@@ -498,14 +546,80 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
     let camera = arena_camera();
     let mut starts: [[Option<[f32; 2]>; 2]; 4] = [[None; 2]; 4];
     let mut drift_cm = Vec::new();
+    let mut zz_prev: [[Option<([f32; 2], [f32; 3])>; 2]; 4] = [[None; 2]; 4];
+    let mut zz_hist = [0u32; 10];
+    let mut zz_run = [[[0u32; 3]; 2]; 4];
+    let (mut zz_plant3, mut zz_plant2) = ([0u32; 3], [0u32; 3]);
+    let (mut zz_model_still, mut zz_low_y) = (0u32, f32::MAX);
+    let mut zz_slides = 0u32;
     for tick in 0..300u32 {
         let out = app.tick_empty();
         look.observe_hitstop(tick, &out.cues, app.hitstop_remaining());
         look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
         look.observe_live_balances(app.live_match(), 4);
+        if frames_per_tick == 1 && ik {
+            for (s, slot) in look.slots.iter().take(4).enumerate() {
+                for (f, p) in slot.feet.plants.iter().enumerate() {
+                    let (Some(w), Some(a)) = (p.world, p.ankle) else {
+                        continue;
+                    };
+                    if let Some((pw, pa)) = zz_prev[s][f] {
+                        let ws: f32 = (w[0] - pw[0]).hypot(w[1] - pw[1]) * 1000.0;
+                        let ms: f32 = (a[0] - pa[0]).hypot(a[2] - pa[2]) * 1000.0;
+                        let wb = (ws / 5.0).floor().min(9.0) as usize;
+                        zz_hist[wb] += 1;
+                        for (k, lim) in [5.0f32, 10.0, 20.0].iter().enumerate() {
+                            if ws <= *lim {
+                                zz_run[s][f][k] += 1;
+                                if zz_run[s][f][k] >= 3 {
+                                    zz_plant3[k] += 1;
+                                }
+                                if zz_run[s][f][k] >= 2 {
+                                    zz_plant2[k] += 1;
+                                }
+                            } else {
+                                zz_run[s][f][k] = 0;
+                            }
+                        }
+                        if ms < 2.5 {
+                            zz_model_still += 1;
+                        }
+                        zz_low_y = zz_low_y.min(a[1]);
+                    }
+                    zz_prev[s][f] = Some((w, a));
+                }
+            }
+        }
         for frame in 0..frames_per_tick {
             let alpha = (f32::from(frame) + 0.5) / f32::from(frames_per_tick);
             let bodies = look.pose_frame_joints(4, alpha).expect("joints pose");
+            if frames_per_tick == 1 && zz_slides < 40 {
+                for b in &bodies {
+                    let s = usize::from(b.slot);
+                    for foot in 0..2 {
+                        let Some(slide) = b.foot_slide_m[foot] else {
+                            continue;
+                        };
+                        if slide < 0.05 {
+                            continue;
+                        }
+                        zz_slides += 1;
+                        let p = look.slots[s].feet.plants[foot];
+                        let mm = |v: f32| (v * 1000.0).round();
+                        eprintln!(
+                            "zzslide ik={ik} t{tick} s{s} f{foot} slide={} act={:?} still={} contact={:?} clipworld={:?} offs={:?} drawn={:?} root={:?}",
+                            mm(slide),
+                            look.slots[s].act,
+                            p.still,
+                            p.contact.map(mm),
+                            p.world.map(|w| w.map(mm)),
+                            p.offset.map(|o| o.map(mm)),
+                            world_xz(b, ankles[foot]).map(mm),
+                            [b.root[0], b.root[2]].map(mm),
+                        );
+                    }
+                }
+            }
             laws.note(&camera, f64::from(tick) + f64::from(alpha), &bodies);
             for body in &bodies {
                 let slot = usize::from(body.slot);
@@ -521,6 +635,10 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
             }
         }
     }
+    eprintln!(
+        "zzdiag duel_feet {frames_per_tick} ik={ik}: worst pop {:?} world mm/tick hist(5mm bins)={zz_hist:?} plant3(5/10/20mm)={zz_plant3:?} plant2={zz_plant2:?} model_still={zz_model_still} low_y={zz_low_y}",
+        laws.pop_detail()
+    );
     DuelFeet {
         line: laws.line().expect("the duel folded frames"),
         drift_cm,
@@ -564,6 +682,13 @@ fn clip_switches_do_not_pop_in_a_real_duel() {
         let pops: u32 = receipt_field(&line, "pops=")
             .parse()
             .expect("pops is a number");
+        // The joints-only bounds floor at the lowest joint less the sole: the
+        // skin-radius pad once read every idle body 1.1 m under the sand.
+        let sunk = receipt_number(&line, "sunk_cm_max=");
+        assert!(
+            sunk < 3.0,
+            "{frames} frame(s) per tick: bodies sunk {sunk} cm: {line}"
+        );
         assert_eq!(
             pops_in(&line, "attack"),
             0,
@@ -1157,7 +1282,9 @@ fn planted_feet_stand_still_in_hitstop_while_the_sim_goes_on_shoving() {
                 assert!(
                     now[0] == frozen[index][0],
                     "tick {tick} alpha {alpha}: slot 0 moved in the freeze: {}",
-                    gap(&now[0], &frozen[index][0])
+                    gap(&now[0], &frozen[index][0], &|index| joint_label(
+                        &look, 0, index
+                    ))
                 );
             }
         } else if tick == impact + HITSTOP_TICKS {
