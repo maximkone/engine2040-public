@@ -26,6 +26,14 @@ use engine_input::{Buttons, FighterId, FighterInput, MAX_PARTICIPANTS};
 #[path = "depth/steer.rs"]
 mod steer;
 pub use steer::{steer_wish, DEFAULT_HALF_EXTENT_MM, SEEK_MM, WALL_PROX_MM};
+
+// Bait stance (SW131): the resting stance plus the timed window it opens.
+#[path = "depth/bait.rs"]
+mod bait;
+pub use bait::{
+    BaitLadder, BaitPercept, BaitTactic, APPROACH_WINDOW_TICKS, BAIT_OPEN_CHANCE_PERMILLE_PER_TICK,
+    BAIT_RESET_ON_INVULNERABLE, BAIT_ROLL_MOD,
+};
 /// Commitment lease: hold the chosen intent for `N` ticks, `N = 0` is off.
 /// The step logic lives with the foe table in `opponent.rs`; this is the
 /// stable `ai::depth::ActionLease` door the row names.
@@ -251,6 +259,13 @@ impl Role {
         }
     }
 }
+
+// Ambush hold lives in depth/ambush.rs (directory child module so the
+// workspace module gate resolves it): the held nest, its timeout and the
+// memory-evidence gate.
+#[path = "depth/ambush.rs"]
+mod ambush;
+pub use ambush::{AmbushExpiry, AmbushHold, AMBUSH_TIMEOUT_TICKS};
 
 /// Duel tier from designer rows: skill-first enemy kinds.
 ///
