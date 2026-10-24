@@ -15,8 +15,8 @@
 //! never the sim hash. Errors: typed `IblError`, loud. Budget: 8192 sky
 //! samples at init (well under a millisecond), then the usual bake.
 
-use crate::arena_day::arena_day_params;
-use crate::ibl::{bake_env, IblBake, IblError};
+use crate::arena_day::{arena_day_params, arena_params_at};
+use crate::ibl::{bake_env, project_sh, IblBake, IblError, IrradianceSh};
 use crate::sky::{sky_radiance, SkyParams};
 use crate::v1_ibl_shadow::{uv_to_dir, EnvMap};
 
@@ -74,7 +74,19 @@ pub const ARENA_NIGHT_GROUND_BOUNCE: [f32; 3] = [0.16, 0.13, 0.10];
 /// ground's own bounce light under the horizon. Pure; the same call twice
 /// gives identical texels.
 pub fn arena_env(params: &SkyParams, ground_bounce: [f32; 3]) -> Result<EnvMap, IblError> {
+    arena_env_gain(params, ground_bounce, ARENA_ENV_GAIN)
+}
+
+/// [`arena_env`] with the sky's per-channel gain named by the caller.
+pub fn arena_env_gain(
+    params: &SkyParams,
+    ground_bounce: [f32; 3],
+    gain: [f32; 3],
+) -> Result<EnvMap, IblError> {
     let (w, h) = (ARENA_ENV_W, ARENA_ENV_H);
+    // A low sun lights the sky less (1.0 for the rig's own sun and every
+    // higher one, and for the night family).
+    let daylight = crate::arena_day::daylight_scale(params);
     let mut pixels = Vec::with_capacity(usize::try_from(w * h).unwrap_or(0));
     // Texel centers over the (small, `u16`-sized) map edges.
     let edge = |n: u32| f32::from(u16::try_from(n).unwrap_or(u16::MAX));
@@ -88,8 +100,8 @@ pub fn arena_env(params: &SkyParams, ground_bounce: [f32; 3]) -> Result<EnvMap, 
             let ground = (-dir[1] / ARENA_GROUND_BLEND).clamp(0.0, 1.0);
             let mut texel = [0.0f32; 3];
             for c in 0..3 {
-                let sky = radiance[c].min(ARENA_ENV_MAX) * ARENA_ENV_GAIN[c];
-                texel[c] = sky + (ground_bounce[c] - sky) * ground;
+                let sky = radiance[c].min(ARENA_ENV_MAX) * gain[c];
+                texel[c] = (sky + (ground_bounce[c] - sky) * ground) * daylight;
             }
             pixels.push(texel);
         }
@@ -124,6 +136,162 @@ pub fn bake_arena_night() -> Result<(IblBake, f64), IblError> {
     Ok((bake, ms))
 }
 
+/// The real Colosseum morning sky (Rome, Poly Haven `colosseum_2k`, CC0),
+/// the outdoor day probe for the establishing view. `content/arena/hdri/
+/// arena_rome_2k.hdr`, 2048x1024, 6,090,156 bytes, sha256 in the HDRI
+/// PROVENANCE row. The 1k `arena_day_1k.hdr` stays the potato fallback.
+pub const ARENA_ROME_HDRI: &[u8] = include_bytes!("../../../content/arena/hdri/arena_rome_2k.hdr");
+
+/// The arena's sky slots: the analytic day and night skies the ring is tuned
+/// for, plus the real Rome HDRI the establishing view can pick.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ArenaSky {
+    /// Analytic arena day (the duel's tuned ambient).
+    #[default]
+    Day,
+    /// Analytic arena night (torches carry the picture).
+    Night,
+    /// The Poly Haven Colosseum morning HDRI, `arena_rome`.
+    Rome,
+}
+
+impl ArenaSky {
+    /// Parse a `--sky` / env name; an unknown name is `None`, never a guess.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "day" => Some(Self::Day),
+            "night" => Some(Self::Night),
+            "arena_rome" | "rome" => Some(Self::Rome),
+            _ => None,
+        }
+    }
+}
+
+/// The env map for one slot: the Rome HDRI decodes straight to an [`EnvMap`],
+/// the two analytic slots keep their sky models.
+pub fn arena_env_for(sky: ArenaSky) -> Result<EnvMap, IblError> {
+    match sky {
+        ArenaSky::Day => arena_day_env(),
+        ArenaSky::Night => arena_night_env(),
+        ArenaSky::Rome => crate::v1_ibl_shadow::load_hdri(ARENA_ROME_HDRI).map_err(IblError::from),
+    }
+}
+
+/// The live bake for one slot. Caller: the establishing view picks
+/// [`ArenaSky::Rome`] when `arena_rome` is set.
+pub fn bake_arena_sky(sky: ArenaSky) -> Result<(IblBake, f64), IblError> {
+    let started = engine_clock::now();
+    let env = arena_env_for(sky)?;
+    let (bake, _) = bake_env(&env)?;
+    let ms = engine_clock::since(started).as_secs_f64() * 1000.0;
+    Ok((bake, ms))
+}
+
+/// Sun elevations of the five ambient keyframes, degrees: first light, early
+/// morning, the day rig's own afternoon, high sun, near noon. The ambient of
+/// any sun height between them is the lerp of the two neighbours' SH.
+pub const SKY_KEY_ELEVATIONS_DEG: [f32; 5] = [5.0, 14.0, 28.0, 48.0, 72.0];
+
+/// One time-of-day keyframe: the sky at one sun height as irradiance SH plus
+/// the direct sun's colour there.
+#[derive(Clone, PartialEq, Debug)]
+pub struct SkyKeyframe {
+    /// Sun elevation of this keyframe, degrees.
+    pub elevation_deg: f32,
+    /// Cosine-convolved irradiance of the arena env at that sun height.
+    pub sh: IrradianceSh,
+    /// Direct sun colour at that height ([`crate::sky::sun_color`]).
+    pub sun_color: [f32; 3],
+}
+
+impl SkyKeyframe {
+    fn write_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.elevation_deg.to_le_bytes());
+        out.extend_from_slice(&self.sh.to_bytes());
+        for c in self.sun_color {
+            out.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+}
+
+/// The five keyframes of the arena day, baked once at init from the same sky
+/// model the skybox and the fog read, so the ambient follows the sun the sky
+/// shows (RL40).
+#[derive(Clone, PartialEq, Debug)]
+pub struct SkyKeys {
+    frames: Vec<SkyKeyframe>,
+}
+
+/// Bake the five ambient keyframes: each is [`arena_env`] under the day rig at
+/// one sun height, projected to SH. Pure; the same call twice gives identical
+/// bytes. Budget: 5 x 8192 sky samples, a few ms at init, never per frame.
+pub fn bake_sky_keys() -> Result<SkyKeys, IblError> {
+    let mut frames = Vec::with_capacity(SKY_KEY_ELEVATIONS_DEG.len());
+    for elevation_deg in SKY_KEY_ELEVATIONS_DEG {
+        let params = arena_params_at(elevation_deg);
+        let env = arena_env(&params, ARENA_GROUND_BOUNCE)?;
+        let sun_color = crate::sky::sun_color(&params)
+            .map_err(|e| IblError::Invalid(format!("arena keyframe sun: {e}")))?;
+        frames.push(SkyKeyframe {
+            elevation_deg,
+            sh: project_sh(&env),
+            sun_color,
+        });
+    }
+    Ok(SkyKeys { frames })
+}
+
+impl SkyKeys {
+    /// The keyframes, lowest sun first.
+    pub fn frames(&self) -> &[SkyKeyframe] {
+        &self.frames
+    }
+
+    /// The ambient and sun colour at `elevation_deg`: a keyframe exactly on
+    /// one, the lerp of its two neighbours between two, the end keyframe past
+    /// either end. Pure, no allocation beyond the returned value.
+    pub fn at(&self, elevation_deg: f32) -> SkyKeyframe {
+        let (first, last) = (&self.frames[0], &self.frames[self.frames.len() - 1]);
+        if elevation_deg.is_nan() || elevation_deg <= first.elevation_deg {
+            return first.clone();
+        }
+        if elevation_deg >= last.elevation_deg {
+            return last.clone();
+        }
+        for pair in self.frames.windows(2) {
+            let (lo, hi) = (&pair[0], &pair[1]);
+            if elevation_deg <= hi.elevation_deg {
+                let t = (elevation_deg - lo.elevation_deg) / (hi.elevation_deg - lo.elevation_deg);
+                // `a * (1 - t) + b * t` is exactly `a` at 0 and `b` at 1.
+                let mix = |a: f32, b: f32| a * (1.0 - t) + b * t;
+                let mut sh = IrradianceSh::zero();
+                for (i, out) in sh.coeffs.iter_mut().enumerate() {
+                    for (c, out_c) in out.iter_mut().enumerate() {
+                        *out_c = mix(lo.sh.coeffs[i][c], hi.sh.coeffs[i][c]);
+                    }
+                }
+                let sun_color = [0, 1, 2].map(|c| mix(lo.sun_color[c], hi.sun_color[c]));
+                return SkyKeyframe {
+                    elevation_deg,
+                    sh,
+                    sun_color,
+                };
+            }
+        }
+        last.clone()
+    }
+
+    /// Deterministic little-endian bytes of every keyframe, lowest sun first.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for frame in &self.frames {
+            frame.write_bytes(&mut out);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +302,31 @@ mod tests {
 
     fn luma(c: [f32; 3]) -> f32 {
         0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    }
+
+    /// SW120: the arena's Rome slot is the real Colosseum morning sky, and its
+    /// sha256 is the one the HDRI PROVENANCE row records.
+    #[test]
+    fn rome_hdri_parses_to_2048x1024_and_its_sha_matches_the_row() {
+        use sha2::{Digest, Sha256};
+        let env = crate::v1_ibl_shadow::load_hdri(ARENA_ROME_HDRI).expect("the Rome HDRI decodes");
+        assert_eq!((env.width, env.height), (2048, 1024), "2k equirect");
+        assert_eq!(ARENA_ROME_HDRI.len(), 6_090_156, "bytes match the row");
+        let sha = format!("{:x}", Sha256::digest(ARENA_ROME_HDRI));
+        let row: &str = include_str!("../../../content/arena/hdri/PROVENANCE.md");
+        assert!(row.contains(&sha), "the row records sha256 {sha}");
+        assert_eq!(ArenaSky::parse("arena_rome"), Some(ArenaSky::Rome));
+        assert_eq!(ArenaSky::parse("rome"), Some(ArenaSky::Rome));
+        assert_eq!(ArenaSky::parse("hoth"), None);
+        // The slot bakes like the analytic skies do (the establishing view's
+        // one job for it), and the day slot is untouched by its arrival.
+        let (rome, _) = bake_arena_sky(ArenaSky::Rome).expect("Rome bakes");
+        assert!(rome.levels > 0, "the bake has mip levels");
+        assert_eq!(
+            arena_env_for(ArenaSky::Day).expect("day samples"),
+            arena_day_env().expect("day samples"),
+            "the day slot still comes from the analytic sky"
+        );
     }
 
     /// Brightest texel over mean texel of one prefilter level (luma): how
@@ -244,5 +437,170 @@ mod tests {
         );
         let fill = side(&arena) / side(&studio);
         assert!((0.7..=1.0).contains(&fill), "side fill ratio {fill}");
+    }
+
+    /// Solid-angle-weighted mean luminance of an env map: the sky capture mean
+    /// the SH's L0 band has to carry (the same weights `project_sh` uses).
+    fn weighted_mean_luma(env: &crate::v1_ibl_shadow::EnvMap) -> f32 {
+        let (w, h) = (env.width as usize, env.height as usize);
+        let (mut sum, mut weight) = (0.0f64, 0.0f64);
+        for y in 0..h {
+            let phi = (y as f64 + 0.5) / h as f64 * std::f64::consts::PI;
+            for x in 0..w {
+                sum += f64::from(luma(env.pixels[y * w + x])) * phi.sin();
+                weight += phi.sin();
+            }
+        }
+        (sum / weight) as f32
+    }
+
+    /// The mean radiance the SH's L0 band carries: its irradiance over pi,
+    /// luminance (a uniform radiance `p` gives irradiance `pi * p`).
+    fn l0_luma(sh: &IrradianceSh) -> f32 {
+        luma(sh.coeffs[0]) * 0.282_094_8 / std::f32::consts::PI
+    }
+
+    #[test]
+    fn sky_ibl_l0_matches_the_sky_capture_mean_at_five_elevations() {
+        // RL40 accept: the keyframe SH keeps the sky's energy, at every sun
+        // height of the day, to 0.02 of the capture's mean luminance.
+        let keys = bake_sky_keys().expect("keyframes bake");
+        assert_eq!(keys.frames().len(), 5);
+        for (frame, elevation) in keys.frames().iter().zip(SKY_KEY_ELEVATIONS_DEG) {
+            assert_eq!(frame.elevation_deg, elevation);
+            let env = arena_env(&arena_params_at(elevation), ARENA_GROUND_BOUNCE).expect("env");
+            let (mean, l0) = (weighted_mean_luma(&env), l0_luma(&frame.sh));
+            eprintln!("sun {elevation:>4} deg: capture mean {mean:.4} SH L0 {l0:.4}");
+            assert!(
+                (mean - l0).abs() <= 0.02,
+                "sun {elevation}: capture mean {mean} against SH L0 {l0}"
+            );
+            assert!(mean > 0.05, "a lit sky, not a black one: {mean}");
+        }
+    }
+
+    #[test]
+    fn sky_ibl_the_rig_sun_and_every_higher_one_keep_the_full_ambient() {
+        use crate::arena_day::{daylight_scale, DAYLIGHT_FLOOR};
+        let at = |deg: f32| daylight_scale(&arena_params_at(deg));
+        assert_eq!(
+            daylight_scale(&arena_day_params()),
+            1.0,
+            "the day rig itself"
+        );
+        for deg in [36.0, 48.0, 72.0, 89.0] {
+            assert_eq!(at(deg), 1.0, "sun at {deg}");
+        }
+        let mut last = 1.0f32;
+        for deg in [28.0, 20.0, 14.0, 8.0, 5.0, 1.0] {
+            let scale = at(deg);
+            assert!(scale < last && scale >= DAYLIGHT_FLOOR, "{deg}: {scale}");
+            last = scale;
+        }
+        assert!(at(5.0) < 0.3, "first light is far under noon: {}", at(5.0));
+        let night = crate::arena_day::arena_night_params();
+        assert_eq!(
+            daylight_scale(&night),
+            1.0,
+            "the night family has its own gain"
+        );
+    }
+
+    #[test]
+    fn sky_ibl_keyframe_bytes_x2_equal() {
+        let (a, b) = (
+            bake_sky_keys().expect("first bake"),
+            bake_sky_keys().expect("second bake"),
+        );
+        assert_eq!(a, b, "same call, same keyframes");
+        assert_eq!(a.to_bytes(), b.to_bytes(), "same call, same bytes");
+        assert_eq!(a.to_bytes().len(), 5 * (4 + 9 * 12 + 12));
+    }
+
+    #[test]
+    fn sky_ibl_dawn_and_noon_differ_on_shadow_side_sand() {
+        // The shadow side of sand takes the ambient alone: an up-facing normal.
+        // The sky at first light and near noon must light it differently, and
+        // by a margin a frame shows (more than a fifth of the brighter one).
+        let keys = bake_sky_keys().expect("keyframes bake");
+        let up = [0.0, 1.0, 0.0];
+        let at = |deg: f32| luma(eval_sh(&keys.at(deg).sh, up).expect("sh evaluates"));
+        let (dawn, noon) = (at(5.0), at(72.0));
+        eprintln!("shadow-side sand: dawn {dawn:.3} noon {noon:.3}");
+        assert!(
+            (noon - dawn).abs() > 0.2 * noon.max(dawn),
+            "dawn {dawn} against noon {noon}"
+        );
+    }
+
+    #[test]
+    fn sky_ibl_the_lerp_hits_each_key_and_stays_between_neighbours() {
+        let keys = bake_sky_keys().expect("keyframes bake");
+        for frame in keys.frames() {
+            assert_eq!(
+                &keys.at(frame.elevation_deg),
+                frame,
+                "on a key it is the key"
+            );
+        }
+        let (lo, hi) = (&keys.frames()[1], &keys.frames()[2]);
+        let mid = keys.at(0.5 * (lo.elevation_deg + hi.elevation_deg));
+        let c = |f: &SkyKeyframe| f.sh.coeffs[0][1];
+        let (a, b, m) = (c(lo), c(hi), c(&mid));
+        assert!(m > a.min(b) && m < a.max(b), "{a} < {m} < {b}");
+        let past = keys.at(200.0);
+        assert_eq!(
+            &past,
+            keys.frames().last().expect("five keys"),
+            "past the end"
+        );
+        assert_eq!(keys.at(-3.0).elevation_deg, 5.0, "under the first key");
+        assert_eq!(
+            keys.at(f32::NAN).elevation_deg,
+            5.0,
+            "nan keeps the first key"
+        );
+    }
+
+    #[test]
+    fn sky_ibl_sun_colour_warms_as_the_sun_sinks_and_stays_normalized() {
+        let sun_at = |deg: f32| crate::sky::sun_color(&arena_params_at(deg)).expect("sun colour");
+        let mut previous_blue = f32::MAX;
+        for deg in [72.0f32, 48.0, 28.0, 14.0, 5.0] {
+            let c = sun_at(deg);
+            eprintln!("sun {deg:>4} deg colour {c:?}");
+            assert!(c[0] >= c[1] && c[1] >= c[2], "warm order at {deg}: {c:?}");
+            assert!(
+                (c[0] - 1.0).abs() < 1e-6,
+                "red is the brightest channel: {c:?}"
+            );
+            assert!(c[2] < previous_blue, "blue falls as the sun sinks: {c:?}");
+            previous_blue = c[2];
+        }
+        let low = sun_at(5.0);
+        let high = sun_at(72.0);
+        assert!(low[2] < 0.9 * high[2], "a low sun is visibly warmer");
+    }
+
+    #[test]
+    fn sky_ibl_the_day_rig_sun_keeps_the_light_intensity() {
+        let rig = crate::arena_day::sun_elevation_deg(crate::arena_day::ARENA_DAY_SUN_DIR)
+            .expect("day rig elevation");
+        let sun = crate::arena_day::arena_sun_at(rig).expect("sun at the rig elevation");
+        let len: f32 = sun.dir_to_light.iter().map(|c| c * c).sum::<f32>().sqrt();
+        assert!((len - 1.0).abs() < 1e-5, "a unit direction: {len}");
+        assert!(
+            (sun.intensity - crate::arena_day::ARENA_SUN_INTENSITY).abs() < 0.2,
+            "the air dims the sun by under 7 percent at the rig height: {}",
+            sun.intensity
+        );
+        let day = crate::arena_day::ARENA_DAY_SUN_DIR;
+        let d = (day[0] * day[0] + day[1] * day[1] + day[2] * day[2]).sqrt();
+        for c in 0..3 {
+            assert!(
+                (sun.dir_to_light[c] - day[c] / d).abs() < 1e-4,
+                "the rig's own direction, axis {c}"
+            );
+        }
     }
 }

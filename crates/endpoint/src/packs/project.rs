@@ -201,8 +201,8 @@ fn parse_manifest(text: &str) -> Result<ProjectManifest, McpToolError> {
         }
         let value = raw.trim_matches('"');
         match key {
-            "name" => manifest.name = value.to_owned(),
-            "game" => manifest.game = value.to_owned(),
+            "name" => manifest.name = String::from(value),
+            "game" => manifest.game = String::from(value),
             "fixture" => {
                 manifest.fixture = value.parse().map_err(|_| {
                     McpToolError::new(
@@ -497,7 +497,7 @@ fn project_run(root: &Path, args: &ProjectDirArgs) -> Result<ProjectRunOutput, M
             format!("`{package}` does not start with the package magic; recovery: rebuild it"),
         ));
     }
-    let slice = build_project(&manifest)?;
+    let slice = build_project(manifest)?;
     let rebuilt = slice.package_bytes();
     if rebuilt != bytes {
         return Err(McpToolError::new(

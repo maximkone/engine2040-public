@@ -4,9 +4,24 @@
 use super::{GroupId, PhysFx};
 use crate::check::{self, MAX_COORD, MAX_SPEED};
 use crate::error::{Error, Field};
-use crate::tether::{self, Tether, TetherState};
+use crate::tether::{self, RopeBlock, Tether, TetherState};
+use crate::types::Key;
 use engine_physics::rapier::{FIXED_DT, GRAVITY_Y};
 use rapier3d::math::Vector;
+
+/// A point given in a body's own frame, put where that body carries it in the world.
+fn world_point(at: crate::types::Transform, local: [f32; 3]) -> [f32; 3] {
+    let [x, y, z, w] = at.rot;
+    // q * v * q^-1, written out: the unit quaternion turns the offset into the world.
+    let tx = 2.0 * (y * local[2] - z * local[1]);
+    let ty = 2.0 * (z * local[0] - x * local[2]);
+    let tz = 2.0 * (x * local[1] - y * local[0]);
+    [
+        at.pos[0] + local[0] + w * tx + (y * tz - z * ty),
+        at.pos[1] + local[1] + w * ty + (z * tx - x * tz),
+        at.pos[2] + local[2] + w * tz + (x * ty - y * tx),
+    ]
+}
 
 /// Spring of the carry, per second squared: a ragdoll 10 cm behind its track closes at 14 m/s^2.
 const CARRY_STIFFNESS: f32 = 144.0;
@@ -70,6 +85,66 @@ impl PhysFx {
         check::vec3(a, MAX_COORD, Field::Position)?;
         check::vec3(b, MAX_COORD, Field::Position)?;
         Ok(self.tether_mut(id).map(|t| t.set_ends(a, b)).is_some())
+    }
+
+    /// [`PhysFx::move_tether`] with the bodies the rope may not be drawn through: `blocks` are
+    /// taken once for the next step (not per sweep), and a node a body pushes out keeps
+    /// `friction` of its sideways motion (1 slides freely, 0 sticks). False when there is no
+    /// such rope; a bad end or a non-finite friction is refused and changes nothing.
+    pub fn move_tether_beside(
+        &mut self,
+        id: u32,
+        a: [f32; 3],
+        b: [f32; 3],
+        blocks: &[RopeBlock],
+        friction: f32,
+    ) -> Result<bool, Error> {
+        check::vec3(a, MAX_COORD, Field::Position)?;
+        check::vec3(b, MAX_COORD, Field::Position)?;
+        if !friction.is_finite() {
+            return Err(Error::NonFinite(Field::Alpha));
+        }
+        Ok(self
+            .tether_mut(id)
+            .map(|t| {
+                t.set_ends(a, b);
+                t.set_beside(blocks, friction);
+            })
+            .is_some())
+    }
+
+    /// The capsules of every live ragdoll bone, world space, in spawn order: the bodies a rope
+    /// must not be drawn through. The shapes are the ones Rapier holds (radius and half height of
+    /// the bone's capsule), so nothing restates them here. Presentation only; empty with no
+    /// ragdoll down.
+    pub fn tether_blocks(&self) -> Vec<RopeBlock> {
+        let mut out = Vec::new();
+        for group in &self.groups {
+            if !matches!(group.id, GroupId::Ragdoll(_)) {
+                continue;
+            }
+            for index in &group.bodies {
+                let Some(Some(rec)) = self.records.get(*index as usize) else {
+                    continue;
+                };
+                if !matches!(rec.key, Key::Bone { .. }) {
+                    continue;
+                }
+                let Some(collider) = self.world.colliders.get(rec.collider) else {
+                    continue;
+                };
+                let Some(capsule) = collider.shape().as_capsule() else {
+                    continue;
+                };
+                let (a, b) = (capsule.segment.a, capsule.segment.b);
+                out.push(RopeBlock {
+                    a: world_point(rec.curr, [a.x, a.y, a.z]),
+                    b: world_point(rec.curr, [b.x, b.y, b.z]),
+                    r: capsule.radius,
+                });
+            }
+        }
+        out
     }
 
     /// Changes the length of rope `id`: a reel that takes rope in or pays it out. False when

@@ -1230,7 +1230,7 @@ impl CompiledGraph {
                 validation_errors: 0,
                 covered_pixels: 0,
                 submit_ms: 0.0,
-                per_pass_gpu_ms: crate::timing::none_gpu_timings(0),
+                per_pass_gpu_ms: crate::present::timing::none_gpu_timings(0),
             });
         }
         let mut slot_count = 0usize;
@@ -1289,7 +1289,7 @@ impl CompiledGraph {
             }
         }
         let pass_count = self.order.len();
-        let ts = crate::timing::timestamp_setup(device, queue, pass_count);
+        let ts = crate::present::timing::timestamp_setup(device, queue, pass_count);
         queue.write_buffer(&submitter.uniform_buf, 0, &look_frame_uniform_bytes(frame));
         let started = Instant::now();
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1304,7 +1304,7 @@ impl CompiledGraph {
             let bind = &submitter.binds[pos];
             let ts_writes = match ts.as_ref() {
                 Some(ts) => {
-                    let (begin, end) = crate::timing::query_pair(pos);
+                    let (begin, end) = crate::present::timing::query_pair(pos);
                     Some(wgpu::RenderPassTimestampWrites {
                         query_set: &ts.query_set,
                         beginning_of_pass_write_index: Some(begin),
@@ -1416,8 +1416,13 @@ impl CompiledGraph {
         }
         readback.unmap();
         let period = ts.as_ref().map(|ts| ts.period).unwrap_or(0.0);
-        let per_pass_gpu_ms =
-            crate::timing::read_pass_ms(ts_staging, ts_slice.as_ref(), ts_rx, pass_count, period);
+        let per_pass_gpu_ms = crate::present::timing::read_pass_ms(
+            ts_staging,
+            ts_slice.as_ref(),
+            ts_rx,
+            pass_count,
+            period,
+        );
         let scope_err = pollster::block_on(scope.pop());
         if let Some(err) = scope_err {
             return Err(GpuSubmitError::Validation(format!("{err:?}"))); // alloc-ok: cold validation failure, never a steady frame
@@ -2293,7 +2298,9 @@ mod tests {
     #[test]
     #[cfg(feature = "gpu")]
     fn gx1_timestamp_ticks_convert_by_period() {
-        use crate::timing::{pass_ms_from_ticks, query_pair, ticks_to_ms, timestamp_query_count};
+        use crate::present::timing::{
+            pass_ms_from_ticks, query_pair, ticks_to_ms, timestamp_query_count,
+        };
         assert_eq!(ticks_to_ms(0, 1.0), 0.0);
         assert!((ticks_to_ms(1_000, 1.0) - 0.001).abs() < 1e-12);
         assert!((ticks_to_ms(1_000_000, 1.0) - 1.0).abs() < 1e-9);
@@ -2308,7 +2315,7 @@ mod tests {
     #[test]
     #[cfg(feature = "gpu")]
     fn gx1_timestamp_decode_needs_full_pairs() {
-        use crate::timing::{decode_pass_bytes, none_gpu_timings};
+        use crate::present::timing::{decode_pass_bytes, none_gpu_timings};
         let period = 1.0;
         let mut bytes = Vec::new();
         for (begin, end) in [(100u64, 1_100u64), (2_000u64, 5_000u64)] {
@@ -2344,7 +2351,7 @@ mod tests {
         assert!(receipt.is_clean(), "no validation error with timestamps");
         assert_eq!(receipt.per_pass_gpu_ms.len(), receipt.passes_submitted);
         assert!(receipt.covered_pixels > 0, "passes still write pixels");
-        if crate::timing::timestamp_supported(device) {
+        if crate::present::timing::timestamp_supported(device) {
             assert!(
                 receipt
                     .per_pass_gpu_ms
@@ -2363,7 +2370,7 @@ mod tests {
         eprintln!(
             "window timestamps on {} (supported={}): {:?}",
             info.name,
-            crate::timing::timestamp_supported(device),
+            crate::present::timing::timestamp_supported(device),
             receipt.per_pass_gpu_ms
         );
     }
@@ -2447,7 +2454,7 @@ mod tests {
     /// PF25 report. Pure: runs with no device.
     #[test]
     fn pass_timing_covers_every_compiled_pass() {
-        use crate::timing::{query_pair, timestamp_query_count};
+        use crate::present::timing::{query_pair, timestamp_query_count};
         let graphs: Vec<(&str, CompiledGraph)> = vec![
             (
                 "arena",

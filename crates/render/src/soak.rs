@@ -271,10 +271,17 @@ mod tests {
             !text.contains("render_soak_cliff"),
             "a healthy run prints no cliff line: {text}"
         );
-        assert!(!report.cliff, "the packaged stream never falls off the cliff");
+        assert!(
+            !report.cliff,
+            "the packaged stream never falls off the cliff"
+        );
         assert_eq!(report.frames, SOAK_HALF_HOUR_FRAMES);
         assert_eq!(report.frames, 108_000);
-        assert!(report.p50_ms >= 16.0 && report.p50_ms <= 20.0, "{}", report.p50_ms);
+        assert!(
+            report.p50_ms >= 16.0 && report.p50_ms <= 20.0,
+            "{}",
+            report.p50_ms
+        );
         assert!(report.p95_ms >= report.p50_ms, "{}", report.p95_ms);
         let rss = report.rss.expect("the packaged stream samples the memory");
         assert!(rss.peak_kib >= 32_768, "{}", rss.peak_kib);
@@ -315,10 +322,7 @@ mod tests {
     #[test]
     fn mobile_tier_soak_refuses_a_stream_it_cannot_split() {
         assert_eq!(check(&[], &[]), Err(SoakError::TooShort { frames: 0 }));
-        assert_eq!(
-            check(&[16.0], &[1]),
-            Err(SoakError::TooShort { frames: 1 })
-        );
+        assert_eq!(check(&[16.0], &[1]), Err(SoakError::TooShort { frames: 1 }));
         assert_eq!(
             SoakError::TooShort { frames: 0 }.to_string(),
             "soak: 0 frames cannot split into halves"

@@ -20,12 +20,20 @@ pub const SHADER_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders")
 /// each `concat!` of this chunk and their file.
 const TONEMAP_CHUNK: &str = include_str!("shaders/tonemap.wgsl");
 
+/// SW5: the potato tier's vertex-rate torch variant compiles AFTER
+/// `forward.wgsl`, so it reads that file's structs, bindings and helpers.
+const FORWARD_CHUNK: &str = include_str!("shaders/forward.wgsl");
+
 /// One source as the pipelines compile it: `forward.wgsl`, `blit.wgsl` and
 /// the two post shaders take [`TONEMAP_CHUNK`] prepended (they call
-/// `aces_tonemap`), every other file compiles alone.
+/// `aces_tonemap`), `forward_torch_vertex.wgsl` takes the whole forward file
+/// prepended (it only adds entries), every other file compiles alone.
 fn shipped_source<'a>(name: &str, wgsl: &'a str) -> std::borrow::Cow<'a, str> {
     let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
     match file {
+        "forward_torch_vertex.wgsl" => {
+            std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{FORWARD_CHUNK}{wgsl}"))
+        }
         "forward.wgsl" | "blit.wgsl" | "post_chain.wgsl" | "composite_compute.wgsl" => {
             std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{wgsl}"))
         }

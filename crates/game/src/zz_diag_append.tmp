@@ -1,0 +1,98 @@
+
+#[test]
+fn zz_diag_duel_pose() {
+    let config = crate::GameConfig {
+        seed: 2,
+        ticks: 300,
+        fighters: 4,
+        half_extent_m: 20.0,
+    };
+    let mut app = crate::App::new(config)
+        .and_then(crate::App::into_duel)
+        .expect("duel builds");
+    let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+    look.set_ragdoll(false);
+    for slot in &mut look.slots {
+        slot.feet.ik = true;
+    }
+    for (index, rig) in look.rigs.iter().enumerate() {
+        eprintln!(
+            "diag rig {index} {} joints={} radius_m={} pelvis={:?} rest_y={:?} parts={}",
+            rig.variant,
+            rig.skeleton.joints.len(),
+            rig.radius_m,
+            rig.bind_pelvis,
+            rig.legs.map(|legs| legs.rest_y),
+            rig.parts.len()
+        );
+        for clip in &rig.clips {
+            eprintln!("diag clip {} {:.3}s", clip.name, clip.duration);
+        }
+    }
+    let camera = arena_camera();
+    let mut laws = ViewLaws::default();
+    let mut min_y = [[f32::MAX; 4]; 4];
+    let mut idle_frames = [0u32; 4];
+    let mut run_frames = [0u32; 4];
+    let mut attack_frames = [0u32; 4];
+    let mut down_frames = [0u32; 4];
+    let mut steady = [0u32; 4];
+    let mut other_gait = [0u32; 4];
+    let mut plant_frames = [[0u32; 2]; 4];
+    for tick in 0..300u32 {
+        let out = app.tick_empty();
+        look.observe_hitstop(tick, &out.cues, app.hitstop_remaining());
+        look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
+        look.observe_live_balances(app.live_match(), 4);
+        let bodies = look.pose_frame_joints(4, 0.5).expect("joints pose");
+        laws.note(&camera, f64::from(tick) + 0.5, &bodies);
+        for slot in 0..4 {
+            let anim = look.slots[slot];
+            match anim.act {
+                Act::Idle => idle_frames[slot] += 1,
+                Act::Run => run_frames[slot] += 1,
+                Act::Attack(_) => attack_frames[slot] += 1,
+                Act::Down => down_frames[slot] += 1,
+            }
+            if anim.balance == GaitPhase::Steady {
+                steady[slot] += 1;
+            } else {
+                other_gait[slot] += 1;
+            }
+            for (foot, plant) in anim.feet.plants.iter().enumerate() {
+                if plant.planted {
+                    plant_frames[slot][foot] += 1;
+                }
+            }
+        }
+        for body in &bodies {
+            let slot = usize::from(body.slot);
+            if body.has_bounds() {
+                min_y[slot][0] = min_y[slot][0].min(body.min[1]);
+                min_y[slot][1] = min_y[slot][1].min(body.root[1]);
+            }
+        }
+        if tick % 50 == 0 || tick == 299 {
+            let row: Vec<String> = (0..4)
+                .map(|slot| {
+                    let anim = look.slots[slot];
+                    let body = bodies.iter().find(|b| usize::from(b.slot) == slot);
+                    format!(
+                        "{slot}:{:?}/{:?} minmax={:?} planted={} pos={:?}",
+                        anim.act,
+                        anim.balance,
+                        body.map(|b| [b.min[1], b.max[1], b.root[1]]),
+                        anim.feet.plants.iter().filter(|p| p.planted).count(),
+                        anim.pos
+                    )
+                })
+                .collect();
+            eprintln!("diag tick {tick}: {}", row.join(" | "));
+        }
+    }
+    eprintln!("diag min_y,min_root per slot: {min_y:?}");
+    eprintln!("diag idle={idle_frames:?} run={run_frames:?} attack={attack_frames:?} down={down_frames:?}");
+    eprintln!("diag steady={steady:?} other_gait={other_gait:?} plant_frames={plant_frames:?}");
+    eprintln!("diag view line: {}", laws.line().expect("folded"));
+    panic!("diag dump");
+}
