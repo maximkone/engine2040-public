@@ -873,6 +873,13 @@ impl Rp1Submitter {
                     pixels: present_px,
                     ms: bloom_ms,
                 },
+                // The GPU submit records no shimmer texels yet: the pass ships
+                // with the CPU chain and its WGSL, wired to the GPU path next.
+                shimmer: super::PassReceipt {
+                    pass: "shimmer",
+                    pixels: 0,
+                    ms: 0.0,
+                },
                 exposure: super::PassReceipt {
                     pass: "exposure",
                     pixels: present_px,

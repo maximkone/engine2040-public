@@ -23,6 +23,10 @@ import math
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import machine_gen  # same folder: the seeded machine presets (SHOW4)
+
 import bpy
 from mathutils import Vector
 
@@ -67,6 +71,16 @@ NEUTRAL = {
 
 class PropError(Exception):
     """A prop that could not be built."""
+
+
+# Machine props: seeded siege engines owned by `machine_gen.py`, so the props
+# kit and the standalone machine cook write the same file at this seed.
+MACHINE_SEED = 7
+MACHINES = (
+    ("machine_ballista", "ballista"),
+    ("machine_crane", "crane"),
+    ("machine_cart", "cart"),
+)
 
 
 def catalogue():
@@ -542,6 +556,32 @@ def main():
                         "triangles": triangles, "build": prop.get("build"),
                         "classes": prop.get("classes", [])})
         print(f"PROP {prop['id']} {triangles} tris")
+
+    # The machine props are not in the design catalogue (no fighter class
+    # carries a siege engine), so they append after the catalogue pass: three
+    # more files on the same shelf, from `machine_gen.py` at one fixed seed.
+    for prop_id, preset in MACHINES:
+        machine = machine_gen.generate(preset, MACHINE_SEED)
+        verts, faces, mats = machine.arrays()
+        ob = machine_gen.build_object(verts, faces, mats, prop_id)
+        path = os.path.join(outdir, f"{prop_id}.glb")
+        triangles = machine_gen.export_object(ob, path)
+        if triangles != machine.tri_count():
+            raise PropError(f"{prop_id}: Blender kept {triangles} tris, the mesh has {machine.tri_count()}")
+        info = machine_gen.summary(machine, preset, MACHINE_SEED, machine_gen.PRESETS[preset]["budget"])
+        with open(os.path.join(outdir, f"{prop_id}.machine.json"), "w", encoding="utf-8") as handle:
+            json.dump(info, handle, indent=2, sort_keys=True)
+        # Drop this machine's slots so the next one gets the same clean names
+        # ("machine_wood", not "machine_wood.001"): the standalone cook and this
+        # pass then write the same bytes for every machine.
+        for slot_name, _ in machine_gen.SLOTS:
+            material = bpy.data.materials.get(slot_name)
+            if material is not None:
+                bpy.data.materials.remove(material)
+        written.append({"id": prop_id, "file": os.path.basename(path),
+                        "triangles": triangles, "build": f"machine:{preset}",
+                        "classes": []})
+        print(f"PROP {prop_id} {triangles} tris (machine:{preset} seed {MACHINE_SEED})")
 
     with open(os.path.join(outdir, "props_built.json"), "w", encoding="utf-8") as handle:
         json.dump({"count": len(written), "props": written}, handle, indent=2, sort_keys=True)
