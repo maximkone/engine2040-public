@@ -1,0 +1,190 @@
+# The city-service table: how the walkers of a Roman city give their service.
+#
+# Stolen from Julius (github.com/bvschaik/julius, the open Caesar III re-implementation)
+# and Augustus (github.com/Keriew/augustus, its fork with roadblocks and a global labour
+# pool), read 2026-10-24. A service building spawns one walker that leaves by road,
+# walks a bounded roaming route, and sets the coverage of every populated house within
+# `radius` tiles of each road tile it reaches to `max_coverage`; the coverage decays by
+# `decay_per_day` once a day; houses evolve and devolve by the coverage they hold; the
+# labour pool staffs the buildings, and a building with no workers spawns no walker.
+#
+# Every section names its source in `ref` and says how sure we are of it in `certainty`:
+# `reconstructed` is a number read in the Julius or Augustus source (their claim is
+# bug-for-bug fidelity to Caesar III, which we cannot run), `invented` is ours, because
+# the original data file (c3_model.txt) is not in either source tree.
+
+[clock]
+ticks_per_day = 50
+covered_tick = 12
+growth_tick = 22
+labour_tick = 25
+water_tick = 28
+spawn_tick = 31
+decay_tick = 35
+evolve_tick = 39
+certainty = "reconstructed"
+ref = "julius src/game/time.c (50 ticks a day) and src/game/tick.c advance_tick: case 12 decay houses_covered, 25 city_labor_update, 28 water supply, 31 building_figure_generate, 35 house_service_decay_culture, 39 house evolve"
+
+[walk]
+ticks_per_tile = 15
+radius = 2
+max_coverage = 96
+decay_per_day = 1
+covered_cap = 300
+certainty = "reconstructed"
+ref = "julius src/figure/movement.c walk_ticks (15 ticks a tile, coverage when a tile is done); src/figure/service.c MAX_COVERAGE 96 and provide_culture over map_grid_get_area(x, y, 1, 2); src/building/house_service.c decay by 1; houses_covered capped at 300"
+
+[walker]
+cap = 64
+certainty = "invented"
+ref = "ours: at most 64 live walkers in a city, a fixed array, so the tick never allocates (Julius has 8000 figures)"
+
+# Spawn delay by staffing, in days: at 100, 75, 50, 25 and 1 percent of the laborers.
+[service.prefect]
+size = 1
+laborers = 6
+roam_ticks = 640
+category = 4
+delay_100 = 0
+delay_75 = 1
+delay_50 = 3
+delay_25 = 7
+delay_1 = 15
+certainty = "reconstructed"
+ref = "julius src/building/figure.c spawn_figure_prefecture (delays 0/1/3/7/15) and src/figuretype/maintenance.c figure_prefect_action (max_roam_length 640); laborers 6 and the 1 tile size are from the Caesar III manual, not in the source"
+
+[service.temple]
+size = 2
+laborers = 2
+roam_ticks = 384
+category = 8
+delay_100 = 3
+delay_75 = 7
+delay_50 = 10
+delay_25 = 15
+delay_1 = 20
+certainty = "reconstructed"
+ref = "julius src/building/figure.c spawn_figure_temple (3/7/10/15/20) and src/figuretype/service.c culture_action (max_roam_length 384); laborers 2 is the small temple of the Caesar III manual"
+
+[service.market]
+size = 2
+laborers = 5
+roam_ticks = 384
+category = 0
+delay_100 = 2
+delay_75 = 5
+delay_50 = 10
+delay_25 = 20
+delay_1 = 30
+certainty = "reconstructed"
+ref = "julius src/building/figure.c spawn_figure_market (2/5/10/20/30) and src/figuretype/service.c figure_market_trader_action (max_roam_length 384); the market lady hands out goods in Julius, here she only sets the market coverage a house needs to evolve"
+
+[service.bathhouse]
+size = 2
+laborers = 10
+roam_ticks = 384
+category = 7
+delay_100 = 3
+delay_75 = 7
+delay_50 = 15
+delay_25 = 29
+delay_1 = 44
+certainty = "reconstructed"
+ref = "julius src/building/figure.c default_spawn_delay (3/7/15/29/44) and figure_bathhouse_worker_action via culture_action (max_roam_length 384); laborers 10 is from the Caesar III manual"
+
+# A well walks nobody: every house within `radius` tiles of its edge has well access.
+[service.well]
+size = 1
+laborers = 0
+radius = 2
+certainty = "reconstructed"
+ref = "julius src/map/water_supply.c map_water_supply_update_houses: mark_well_access(well, 2) sets has_well_access on every building in the area"
+
+# Global labour pool (Augustus). Working age is 60 percent of the people; when the
+# pool is short, each pass gives each category its quantum, in this category order:
+# engineering, water, prefectures, military, food, industry and commerce,
+# entertainment, health and education, governance and religion.
+[labour]
+working_age_percent = 60
+quantum_industry = 2
+quantum_food = 4
+quantum_engineering = 3
+quantum_water = 1
+quantum_prefectures = 3
+quantum_military = 2
+quantum_entertainment = 1
+quantum_health = 1
+quantum_governance = 1
+certainty = "reconstructed"
+ref = "julius src/city/labor.c city_labor_calculate_workers (60 percent of the people of working age) and allocate_workers_to_categories with DEFAULT_PRIORITY; augustus global labour pool: a building takes workers from the whole city, not from the houses its labor seeker met"
+
+# The house ladder. Julius reads these from the original c3_model.txt, which is not in
+# its tree, so the thresholds are ours; the check shape is Julius's: a house evolves when
+# it meets the needs of the next level, devolves (after two grace days) when it fails
+# the needs of its own. water 1 = a well or better, religion = temples reached,
+# bathhouse and market = coverage of at least 1.
+[house.l0]
+name = "small tent"
+max_people = 5
+water = 0
+religion = 0
+bathhouse = 0
+market = 0
+certainty = "invented"
+ref = "julius src/building/house_evolution.c has_required_goods_and_services (the check shape); the small tent needs nothing, as in Caesar III; 5 people is the manual's small tent"
+
+[house.l1]
+name = "large tent"
+max_people = 7
+water = 0
+religion = 0
+bathhouse = 0
+market = 0
+certainty = "invented"
+ref = "julius src/building/house_evolution.c has_required_goods_and_services (the check shape); the large tent holds 7 in the manual; its needs are ours"
+
+[house.l2]
+name = "small shack"
+max_people = 9
+water = 1
+religion = 0
+bathhouse = 0
+market = 0
+certainty = "invented"
+ref = "julius src/building/house_evolution.c (check shape, model->water 1 is well access); the needs and the 9 people are ours"
+
+[house.l3]
+name = "large shack"
+max_people = 11
+water = 1
+religion = 0
+bathhouse = 0
+market = 1
+certainty = "invented"
+ref = "julius src/building/house_evolution.c (check shape, market stands for the food check); the needs and the 11 people are ours"
+
+[house.l4]
+name = "small hovel"
+max_people = 13
+water = 1
+religion = 1
+bathhouse = 0
+market = 1
+certainty = "invented"
+ref = "julius src/building/house_evolution.c (check shape, model->religion 1 is one god reached); the needs and the 13 people are ours"
+
+[house.l5]
+name = "large hovel"
+max_people = 15
+water = 1
+religion = 1
+bathhouse = 1
+market = 1
+certainty = "invented"
+ref = "julius src/building/house_evolution.c (check shape, model->bathhouse 1); the needs and the 15 people are ours"
+
+[growth]
+people_per_day = 1
+devolve_grace_days = 2
+certainty = "invented"
+ref = "ours: a populated house with road access takes one more person a day up to its level's maximum (Julius moves people through city-wide migration); the two grace days are julius src/building/house_evolution.c has_devolve_delay (devolve_delay < 2)"
