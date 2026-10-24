@@ -5,5 +5,6 @@
 //! plus one `mod <name>;` line below. Run one file with
 //! `cargo test -p engine-anim --test it <name>::`.
 
+mod anim_budget;
 mod anim_lod_pin;
 mod motion_bake;

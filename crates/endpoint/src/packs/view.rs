@@ -44,6 +44,14 @@
 //! Units: permille for scores, chars for path bounds. Determinism: the door
 //! adds nothing to the judge's bytes. Errors: [`McpToolError`] with
 //! `bad_args`, `unsupported_look_judge`, `bad_receipt` or the judge's own code.
+//!
+//! ARX05: the judge answers over three prompt wordings
+//! ([`LOOK_PROMPT_WORDINGS`]) and the answer carries the spread. The door asks
+//! the same judge three times and folds the answers: `scores` lists one score
+//! per wording, `spread` is high minus low, `score` is the low one, and `pass`
+//! needs every wording to pass plus a spread inside
+//! [`LOOK_SPREAD_MAX_PERMILLE`], so one wording that flips reports a spread
+//! and never a pass (source 2607.25921: a VLM verdict is not a gate).
 
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
@@ -70,6 +78,12 @@ use crate::tool_capabilities::{CapabilityCard, CheckKind};
 
 /// The art lane: contact sheet, look proposal, ignored-region compare.
 pub mod art;
+
+/// The scene lane (rows SP62, EG35): the spatial scene report and the render steer.
+pub mod scene;
+
+/// The claim lane (row AD21): check an agent's own claim against its receipt.
+pub mod claim;
 
 /// Pack name.
 pub const PACK: &str = "view";
@@ -161,6 +175,21 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         CapabilityCard::Observe,
     )?);
+    pack.add(VerbSpec::of::<scene::ViewSceneTool>(
+        scene::TOOL_VIEW_SCENE,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<scene::ViewSteerTool>(
+        scene::TOOL_VIEW_STEER,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<claim::ClaimCheckTool>(
+        claim::TOOL_CLAIM_CHECK,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
     Ok(pack)
 }
 
@@ -174,6 +203,8 @@ pub fn pack() -> Result<PackDef, PackError> {
 /// `content/fighters/previews`) and a Q1 reference directory. Units are
 /// relative directory paths. Errors are typed `bad_args` for a path that is
 /// absolute, climbs with `..` or is empty. Budget is 512 chars a path.
+/// `wording` is set by the door, not the caller: it names the prompt wording
+/// this one answer was asked under (ARX05).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -181,12 +212,21 @@ pub struct LookJudgeArgs {
     pub capture_dir: String,
     pub preview_dir: Option<String>,
     pub q1_dir: Option<String>,
+    pub wording: Option<String>,
 }
 
 /// Judge answer: schema, digest, verdict, mean score and the full report
 /// (rubric L1..L9, per-frame scores, entity-grounded regions, sequence).
 /// Units are permille. No errors once judged. Budget rides on the capture
 /// set (at most 64 frames).
+///
+/// ARX05: the judge answers under [`LOOK_PROMPT_WORDINGS`], so the answer
+/// also carries `scores` (one score per wording, in wording order), `spread`
+/// (the highest score minus the lowest) and the `wordings` names. `score` is
+/// the lowest one, so a headline never flatters the judge, and `pass` needs
+/// every wording to pass plus a spread inside
+/// [`LOOK_SPREAD_MAX_PERMILLE`]: a judge never gates alone on a wording it
+/// happens to like.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -196,7 +236,25 @@ pub struct LookJudgeOutput {
     pub pass: bool,
     pub score: u64,
     pub judgement: Value,
+    pub scores: Vec<u64>,
+    pub spread: u64,
+    pub wordings: Vec<String>,
 }
+
+/// The three prompt wordings the judge answers, in the order `scores` and
+/// `wordings` carry them (ARX05, source 2607.25921: one wording's verdict is
+/// not a verdict). The door asks the same judge three times, once per
+/// wording, and reports the spread.
+pub const LOOK_PROMPT_WORDINGS: [&str; 3] = [
+    "describe_then_score",
+    "score_each_item",
+    "compare_to_reference",
+];
+
+/// Widest spread in permille the door still calls stable: a set whose three
+/// wordings disagree by more than this never passes, whatever each wording
+/// said.
+pub const LOOK_SPREAD_MAX_PERMILLE: u64 = 100;
 
 /// A registered judge: reads the directories named in the request and
 /// returns the report as JSON text, or the refusal to pass on.
@@ -282,7 +340,7 @@ fn permille_of(item: &Value, key: &str) -> Option<u64> {
 }
 
 /// Check the judge's answer against the contract and lift the headline.
-fn validate(text: &str) -> Result<LookJudgeOutput, McpToolError> {
+fn validate(text: &str, wording: &str) -> Result<LookJudgeOutput, McpToolError> {
     let judgement: Value =
         serde_json::from_str(text).map_err(|_| contract("the answer is not JSON"))?;
     if !all_integers(&judgement) {
@@ -331,18 +389,68 @@ fn validate(text: &str) -> Result<LookJudgeOutput, McpToolError> {
         pass,
         score,
         judgement,
+        scores: vec![score],
+        spread: 0,
+        wordings: vec![wording.to_owned()],
     })
+}
+
+/// Fold the three wording answers into one: the first wording's report rides
+/// unchanged, `scores` lists every wording's score in order, `spread` is the
+/// high minus the low, `score` is the low (never a flattering headline), and
+/// `pass` needs every wording to pass and the spread inside
+/// [`LOOK_SPREAD_MAX_PERMILLE`]. A judge that flips on one wording therefore
+/// reports a spread and no pass.
+fn combine(answers: Vec<LookJudgeOutput>) -> LookJudgeOutput {
+    let scores: Vec<u64> = answers.iter().map(|answer| answer.score).collect();
+    let wordings: Vec<String> = answers
+        .iter()
+        .flat_map(|answer| answer.wordings.clone())
+        .collect();
+    let low = scores.iter().copied().min().unwrap_or(0);
+    let high = scores.iter().copied().max().unwrap_or(0);
+    let spread = high.saturating_sub(low);
+    let agreed = answers.iter().all(|answer| answer.pass);
+    let mut base = answers
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| LookJudgeOutput {
+            schema: LOOK_JUDGE_SCHEMA,
+            digest: String::new(),
+            pass: false,
+            score: 0,
+            judgement: Value::Null,
+            scores: Vec::new(),
+            spread: 0,
+            wordings: Vec::new(),
+        });
+    base.pass = agreed && spread <= LOOK_SPREAD_MAX_PERMILLE;
+    base.score = low;
+    base.scores = scores;
+    base.spread = spread;
+    base.wordings = wordings;
+    base
 }
 
 /// Run one request against an optional judge: arguments first, then the
 /// refusal when no judge is wired, then the contract check on its answer.
+/// The judge is asked once per wording (ARX05); a refusal on any wording is
+/// the answer, never a partial success.
 fn run_look_judge(
     args: &LookJudgeArgs,
     judge: Option<LookJudgeFn>,
 ) -> Result<LookJudgeOutput, McpToolError> {
     check_args(args)?;
     let judge = judge.ok_or_else(unsupported)?;
-    validate(&judge(args)?)
+    let mut answers = Vec::with_capacity(LOOK_PROMPT_WORDINGS.len());
+    for wording in LOOK_PROMPT_WORDINGS {
+        let asked = LookJudgeArgs {
+            wording: Some(wording.to_owned()),
+            ..args.clone()
+        };
+        answers.push(validate(&judge(&asked)?, wording)?);
+    }
+    Ok(combine(answers))
 }
 
 /// `look.judge` tool: machine rubric scores for a capture set, read-only.
@@ -1399,6 +1507,7 @@ mod tests {
             capture_dir: dir.to_owned(),
             preview_dir: None,
             q1_dir: None,
+            wording: None,
         }
     }
 
@@ -1426,6 +1535,27 @@ mod tests {
 
     fn good(_: &LookJudgeArgs) -> Result<String, McpToolError> {
         answer(|text| text)
+    }
+
+    /// The same contract-clean answer with a chosen headline score and pass.
+    fn answer_scored(score: u64, pass: bool) -> Result<String, McpToolError> {
+        answer(|text| {
+            text.replacen("\"pass\":false", &format!("\"pass\":{pass}"), 1)
+                .replacen("\"score\":500", &format!("\"score\":{score}"), 1)
+        })
+    }
+
+    /// ARX05 fake judge: it flips on one wording only.
+    fn flipping(args: &LookJudgeArgs) -> Result<String, McpToolError> {
+        match args.wording.as_deref() {
+            Some("compare_to_reference") => answer_scored(900, true),
+            _ => answer_scored(500, false),
+        }
+    }
+
+    /// A judge that agrees with itself on every wording.
+    fn steady(_: &LookJudgeArgs) -> Result<String, McpToolError> {
+        answer_scored(500, true)
     }
 
     #[test]
@@ -1529,10 +1659,54 @@ mod tests {
         assert!(wire.contains("\"judgement\""));
     }
 
+    /// ARX05: one wording's verdict is not a verdict. A judge that flips on
+    /// one of the three wordings reports the spread and no pass; a judge that
+    /// agrees on all three reports a spread of zero and passes.
+    #[test]
+    fn look_judge_reports_the_spread_and_never_passes_on_one_flipped_wording() {
+        let flipped = run_look_judge(&args("target/captures"), Some(flipping)).expect("answers");
+        assert_eq!(
+            flipped.wordings,
+            LOOK_PROMPT_WORDINGS.to_vec(),
+            "one answer per wording, in order"
+        );
+        assert_eq!(flipped.scores, vec![500, 500, 900]);
+        assert_eq!(flipped.spread, 400, "the spread is high minus low");
+        assert!(
+            !flipped.pass,
+            "a judge that flips on one wording never passes"
+        );
+        assert_eq!(flipped.score, 500, "the headline is the lowest wording");
+        assert!(
+            flipped.spread > LOOK_SPREAD_MAX_PERMILLE,
+            "the flip is outside the stable band"
+        );
+
+        let steady = run_look_judge(&args("target/captures"), Some(steady)).expect("answers");
+        assert_eq!(steady.scores, vec![500, 500, 500]);
+        assert_eq!(steady.spread, 0);
+        assert!(steady.pass, "three agreeing wordings pass");
+
+        // One refusal on any wording is the answer, never a partial success.
+        fn refuses_one(args: &LookJudgeArgs) -> Result<String, McpToolError> {
+            match args.wording.as_deref() {
+                Some("score_each_item") => Err(McpToolError::new("no_frames", "re-run")),
+                _ => answer_scored(500, true),
+            }
+        }
+        let refused =
+            run_look_judge(&args("target/captures"), Some(refuses_one)).expect_err("refuses");
+        assert_eq!(refused.code, "no_frames");
+    }
+
     #[test]
     fn look_judge_refuses_answers_outside_the_contract() {
         let bad = |edit: fn(String) -> String, why: &str| {
-            let error = validate(&answer(edit).expect("fixture builds")).expect_err(why);
+            let error = validate(
+                &answer(edit).expect("fixture builds"),
+                LOOK_PROMPT_WORDINGS[0],
+            )
+            .expect_err(why);
             assert_eq!(error.code, "bad_receipt", "{why}");
             assert!(error.message.contains(why), "{why}: {}", error.message);
         };
@@ -2604,6 +2778,9 @@ static PACK_ROW: super::PackModule = super::PackModule {
         "view.sheet",
         "look.propose",
         "view.frame",
+        "view.scene",
+        "view.steer",
+        "claim.check",
     ],
     build: pack,
 };

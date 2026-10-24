@@ -1,0 +1,19 @@
+# Ruined wall: a 3-thick curtain wall (W) across open ground (G) that time has
+# broken. Breaches (H) grow into ragged gaps, the top course erodes to rubble
+# (R), and rubble spills onto the ground beside every gap.
+# Grid 40 x 11, wall at y 4..6.
+size 40 11
+alphabet GWHR
+
+rect 2 4 36 3 W
+
+# Three breaches start at random wall cells and grow 30 steps, one cell at a time.
+one steps=3 { rule W = H }
+one steps=30 { rule HW = HH }
+
+# One round of weathering: wall that has open ground above it crumbles to
+# rubble 35 times in 100.
+all steps=1 { rule G/W = G/R p=35 sym=none }
+
+# Rubble falls out of each gap onto the ground above and below it.
+all steps=1 { rule H/G = H/R p=80 }

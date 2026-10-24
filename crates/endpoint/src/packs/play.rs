@@ -44,11 +44,14 @@ pub const TOOL_AI_DECISIONS: &str = "ai.decisions";
 
 #[path = "play_ext.rs"]
 mod play_ext;
+#[path = "play_scene.rs"]
+mod play_scene;
 #[path = "rival.rs"]
 mod rival;
 #[path = "sweep.rs"]
 mod sweep;
 
+pub use play_scene::{seat_ask, seat_is_open};
 pub use play_ext::{
     InputInjectArgs, InputInjectOutput, InputInjectTool, StateDigestArgs, StateDigestOutput,
     StateDigestTool, TOOL_INPUT_INJECT, TOOL_STATE_DIGEST,
@@ -882,7 +885,10 @@ crate::e2_tool!(
 );
 
 /// Longest hex a tape can carry: the header plus [`MAX_ROWS`](engine_ai::decision_log::MAX_ROWS) rows.
-const MAX_TAPE_HEX: usize = 2 * (4 + engine_ai::decision_log::MAX_ROWS * 26);
+const MAX_TAPE_HEX: usize = 2 * engine_ai::bt_trace::MAX_TAPE_BYTES;
+
+/// Most trace rows one `trace` answer prints before it says how many it cut.
+const MAX_TRACE_ROWS_OUT: usize = 400;
 
 /// Request: one decision tape as hex, optionally a second tape and a mode.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
@@ -894,9 +900,22 @@ pub struct AiDecisionsArgs {
     /// Right tape for `diff`; omit for `show`.
     #[serde(default)]
     pub right: Option<String>,
-    /// `show` (default without a right tape) or `diff` (needs a right tape).
+    /// `show` (default without a right tape), `diff` (needs a right tape) or
+    /// `trace` (`left` is a `BtTrace` tape, not a decision tape).
     #[serde(default)]
     pub mode: Option<String>,
+    /// `trace` only: fighter slot to show; omit for every slot.
+    #[serde(default)]
+    pub slot: Option<u8>,
+    /// `trace` only: first tick (default 0).
+    #[serde(default)]
+    pub from: Option<u32>,
+    /// `trace` only: last tick (default the end).
+    #[serde(default)]
+    pub to: Option<u32>,
+    /// `trace` only: `tree` (default, indented) or `lines` (one line per node).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// One decision row on the wire.
@@ -938,12 +957,14 @@ pub struct AiDecisionsDiff {
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct AiDecisionsOutput {
-    /// Mode served: `show` or `diff`.
+    /// Mode served: `show`, `diff` or `trace`.
     pub mode: String,
     /// Rows in the left tape.
     pub rows: u32,
     /// Show text, one line per row (`show` only).
     pub show: Option<String>,
+    /// Trace text for the slot and ticks asked (`trace` only).
+    pub trace: Option<String>,
     /// First divergence (`diff` only).
     pub diff: Option<AiDecisionsDiff>,
     /// True when `diff` found a divergence.
@@ -1007,7 +1028,41 @@ fn decision_row(decision: &Decision) -> AiDecisionsRow {
     }
 }
 
+/// `trace` mode: decode a `BtTrace` tape and print the slot and tick window.
+fn ai_trace_core(args: &AiDecisionsArgs) -> Result<AiDecisionsOutput, McpToolError> {
+    let bytes = tape_hex("left", &args.left)?;
+    let trace = engine_ai::bt_trace::BtTrace::from_bytes(&bytes).map_err(|error| {
+        McpToolError::new("bad_tape", format!("left tape refused: {error}"))
+            .with_data(rmcp::serde_json::json!({ "side": "left", "cause": error.to_string() }))
+    })?;
+    let from = args.from.unwrap_or(0);
+    let to = args.to.unwrap_or(u32::MAX);
+    if from > to {
+        return Err(bad_args(format!("from {from} is after to {to}")));
+    }
+    let text = match args.format.as_deref().unwrap_or("tree") {
+        "tree" => trace.tree_text(args.slot, from, to, MAX_TRACE_ROWS_OUT),
+        "lines" => trace.lines_text(args.slot, from, to, MAX_TRACE_ROWS_OUT),
+        other => {
+            return Err(bad_args(format!(
+                "format `{other}` is not `tree` or `lines`"
+            )))
+        }
+    };
+    Ok(AiDecisionsOutput {
+        mode: "trace".to_owned(),
+        rows: u32::try_from(trace.len()).unwrap_or(u32::MAX),
+        show: None,
+        trace: Some(text),
+        diff: None,
+        divergent: false,
+    })
+}
+
 fn ai_decisions_core(args: &AiDecisionsArgs) -> Result<AiDecisionsOutput, McpToolError> {
+    if args.mode.as_deref() == Some("trace") {
+        return ai_trace_core(args);
+    }
     let left = tape("left", &args.left)?;
     let rows = u32::try_from(left.len()).unwrap_or(u32::MAX);
     let mode =
@@ -1019,6 +1074,7 @@ fn ai_decisions_core(args: &AiDecisionsArgs) -> Result<AiDecisionsOutput, McpToo
             mode: "show".to_owned(),
             rows,
             show: Some(left.show_text()),
+            trace: None,
             diff: None,
             divergent: false,
         }),
@@ -1033,6 +1089,7 @@ fn ai_decisions_core(args: &AiDecisionsArgs) -> Result<AiDecisionsOutput, McpToo
                 mode: "diff".to_owned(),
                 rows,
                 show: None,
+                trace: None,
                 diff: found.map(|found| AiDecisionsDiff {
                     tick: found.tick,
                     fighter: found.fighter,
@@ -1044,7 +1101,9 @@ fn ai_decisions_core(args: &AiDecisionsArgs) -> Result<AiDecisionsOutput, McpToo
                 divergent: found.is_some(),
             })
         }
-        other => Err(bad_args(format!("mode `{other}` is not `show` or `diff`"))),
+        other => Err(bad_args(format!(
+            "mode `{other}` is not `show`, `diff` or `trace`"
+        ))),
     }
 }
 
@@ -1059,7 +1118,7 @@ crate::e2_tool!(
     /// `ai.decisions` tool: show one decision tape or diff two. Read-only.
     AiDecisionsTool,
     name = TOOL_AI_DECISIONS,
-    description = "Show one AI decision tape or diff two: feed canonical decision-log bytes as hex (row count, then tick, fighter, chosen lane and five utility scores per row). show prints one line per row; diff returns the first divergent tick, both score vectors and the chosen-score gap. Off by default in the brain; enable with Brain::record_decisions.",
+    description = "Show one AI decision tape, diff two, or trace a behavior tree: feed canonical bytes as hex. show prints one line per decision row (tick, fighter, chosen lane, five utility scores); diff returns the first divergent tick and the chosen-score gap; trace (left is a BtTrace tape) prints which node ran, its status, the state or blackboard value it read and the utility lanes, for a slot and tick range (format tree or lines). Off by default; enable with Brain::record_decisions or BtTree::tick_with.",
     readonly = true,
     args = AiDecisionsArgs,
     output = AiDecisionsOutput,
@@ -1471,6 +1530,7 @@ mod tests {
             left,
             right: None,
             mode: None,
+            ..AiDecisionsArgs::default()
         })
         .expect("show serves");
         assert_eq!(served.mode, "show");
@@ -1496,6 +1556,7 @@ mod tests {
             left,
             right: Some(right),
             mode: Some("diff".to_owned()),
+            ..AiDecisionsArgs::default()
         })
         .expect("diff serves");
         assert!(served.divergent);
@@ -1514,6 +1575,7 @@ mod tests {
             left: "abc".to_owned(),
             right: None,
             mode: None,
+            ..AiDecisionsArgs::default()
         })
         .expect_err("odd hex refuses");
         assert_eq!(odd.code(), "bad_args");
@@ -1522,6 +1584,7 @@ mod tests {
             left: "zz".to_owned(),
             right: None,
             mode: None,
+            ..AiDecisionsArgs::default()
         })
         .expect_err("non-hex refuses");
         assert_eq!(non_hex.code(), "bad_args");
@@ -1530,6 +1593,7 @@ mod tests {
             left: "0100".to_owned(),
             right: None,
             mode: None,
+            ..AiDecisionsArgs::default()
         })
         .expect_err("short tape refuses");
         assert_eq!(short.code(), "bad_tape");
@@ -1537,6 +1601,7 @@ mod tests {
             left: decision_hex(&[(1, 0, [1.0, 0.0, 0.0, 0.0, 0.0])]),
             right: None,
             mode: Some("replay".to_owned()),
+            ..AiDecisionsArgs::default()
         })
         .expect_err("unknown mode refuses");
         assert_eq!(unknown.code(), "bad_args");
@@ -1544,9 +1609,102 @@ mod tests {
             left: decision_hex(&[(1, 0, [1.0, 0.0, 0.0, 0.0, 0.0])]),
             right: None,
             mode: Some("diff".to_owned()),
+            ..AiDecisionsArgs::default()
         })
         .expect_err("diff needs a right tape");
         assert_eq!(missing.code(), "bad_args");
+    }
+
+    fn trace_hex() -> String {
+        use engine_ai::bt::{guard_tree, pressure_tree};
+        let mut trace = engine_ai::bt_trace::BtTrace::new(2048);
+        let _ =
+            engine_ai::bout::run_bout_traced(&pressure_tree(), &guard_tree(), 1, 30, 9, &mut trace);
+        trace
+            .to_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn trace_args(hex: String) -> AiDecisionsArgs {
+        AiDecisionsArgs {
+            left: hex,
+            mode: Some("trace".to_owned()),
+            ..AiDecisionsArgs::default()
+        }
+    }
+
+    #[test]
+    fn ai_decisions_trace_prints_the_tree_for_one_slot_and_tick_range() {
+        let served = ai_decisions_core(&AiDecisionsArgs {
+            slot: Some(1),
+            from: Some(4),
+            to: Some(5),
+            ..trace_args(trace_hex())
+        })
+        .expect("trace serves");
+        assert_eq!(served.mode, "trace");
+        assert!(
+            served.rows > 30,
+            "the tape rows are counted: {}",
+            served.rows
+        );
+        let text = served.trace.expect("trace text");
+        assert!(
+            text.starts_with(
+                "tick 4 slot 1
+"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "tick 5 slot 1
+"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("slot 0"), "{text}");
+        assert!(!text.contains("tick 6"), "{text}");
+        assert!(text.contains("selector -> "), "{text}");
+        assert!(text.contains("[dist_mm="), "{text}");
+    }
+
+    #[test]
+    fn ai_decisions_trace_lines_format_and_refusals() {
+        let lines = ai_decisions_core(&AiDecisionsArgs {
+            format: Some("lines".to_owned()),
+            slot: Some(0),
+            from: Some(2),
+            to: Some(2),
+            ..trace_args(trace_hex())
+        })
+        .expect("lines serve")
+        .trace
+        .expect("text");
+        assert!(lines.starts_with("t2 s0 #"), "{lines}");
+        assert!(!lines.contains("tick 2 slot"), "{lines}");
+        let backwards = ai_decisions_core(&AiDecisionsArgs {
+            from: Some(9),
+            to: Some(3),
+            ..trace_args(trace_hex())
+        })
+        .expect_err("from after to refuses");
+        assert_eq!(backwards.code(), "bad_args");
+        let format = ai_decisions_core(&AiDecisionsArgs {
+            format: Some("svg".to_owned()),
+            ..trace_args(trace_hex())
+        })
+        .expect_err("unknown format refuses");
+        assert_eq!(format.code(), "bad_args");
+        let decision_tape_as_trace = ai_decisions_core(&trace_args(decision_hex(&[(
+            1,
+            0,
+            [1.0, 0.0, 0.0, 0.0, 0.0],
+        )])))
+        .expect_err("a decision tape is not a trace tape");
+        assert_eq!(decision_tape_as_trace.code(), "bad_tape");
     }
 
     #[test]

@@ -25,6 +25,9 @@ Iron law: NO FIX WITHOUT ROOT CAUSE FIRST. Finish phase 1 before any edit. Every
 **3-strikes stop.** After 3 failed fixes, stop and question the design. No fourth fix without a new design question.
 A second identical failure ends the step: one row in `docs/BLOCKERS.md`, never green (AGENTS.md).
 
+Words that mean stop: "quick fix", "just try", "probably X", "one more attempt", "I do not fully understand but". Each one sends you back to phase 1.
+Two changes in one rerun is not an experiment. A third patch on the same cause needs a design question, not patch four.
+
 Report line: component, where, evidence, hypothesis, fix, fresh proof.
 
 A hash or replay divergence has its own method: skill `determinism-debug`. A red gate or link error: skill `github-check`.
@@ -56,17 +59,4 @@ Use this when three or more errors arrive together. Do it before any fix.
 
 ## 5. Writing a bug report
 
-A `docs/BLOCKERS.md` row or a bug row on the board carries these fields. Write facts, not opinions or fixes.
-
-| field | rule |
-|---|---|
-| Title | one line: platform, area, symptom. Not "broken". |
-| Row | the open board row id, if one exists |
-| Failing command | the exact command with crate and filter. Not "run tests". |
-| Build | build hash, date, OS and device. Not "latest". |
-| Expected / actual | one line each |
-| Steps | numbered, one action each, with preconditions |
-| Proof | a capture or log plus repro rate x/5 (not 1/1) |
-| Severity | by player impact. Leave priority to the owner. |
-
-Do not write "must fix" in the report.
+Facts, not opinions or fixes. The field table for a `docs/BLOCKERS.md` row or a bug row is in `reference.md`. Do not write "must fix" in the report.

@@ -71,7 +71,10 @@ export function auditRecords(repo = REPO) {
   for (const { cells } of provenanceRows(readFileSync(join(arena, "sources", "PROVENANCE.md"), "utf8"))) {
     for (const kind of ["base", "normal", "orm"]) {
       const file = `${cells[6].split(" ")[0]}_${kind}.ktx2`;
-      add(`content/arena/cooked/${file}`, { url: cells[1], author: AMBIENTCG }, fileDigest(join(arena, "cooked", file))?.sha256 ?? "", join(arena, "cooked", file));
+      // Poly Haven names the site as the set's publisher on the page (the artist
+    // per set sits in that set's LICENCE.txt); ambientCG credits the site only.
+    const author = /polyhaven\.com/.test(cells[1]) ? "Poly Haven" : AMBIENTCG;
+    add(`content/arena/cooked/${file}`, { url: cells[1], author }, fileDigest(join(arena, "cooked", file))?.sha256 ?? "", join(arena, "cooked", file));
     }
   }
   // CT80: the studio HDRI is pinned by the sidecar next to the Q1 copy; the arena copy is the same bytes.
