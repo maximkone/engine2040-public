@@ -141,7 +141,7 @@ struct SunFwdU {
     texel: f32,
     normal_offset: f32,
     slope_scale: f32,
-    _pad0: f32,
+    uv_scale: f32,
     _pad1: f32,
     _pad2: f32,
 };
@@ -230,14 +230,60 @@ fn sun_bias(n: vec3<f32>) -> f32 {
     let tan_theta = sqrt(max(1.0 - no_l * no_l, 0.0)) / max(no_l, 0.05);
     return sun_fwd.bias + sun_fwd.slope_scale * tan_theta;
 }
+// Sun-shadow compare filter, one pipeline per tier (SW92): 0 = 3x3 grid,
+// 1 = four corners rotated by the 4x4 Bayer angle, 2 = two taps on one fixed
+// diagonal (the web arm: no per-pixel noise to survive a missing TAA pass).
+override SHADOW_FILTER: u32 = 0u;
+// 4x4 Bayer matrix, the same table `lod_dither.wgsl` carries: its value turns
+// the rotated kernel by a stable, TAA-friendly angle per texel.
+const SHADOW_BAYER4: array<u32, 16> = array<u32, 16>(
+    0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u,
+);
+// One compare tap at `off` texels from `base`, sharing the caller's bias.
+fn sun_compare(base: vec2<f32>, off: vec2<f32>, frag_depth: f32, bias: f32) -> f32 {
+    return textureSampleCompare(
+        sun_shadow_map, sun_shadow_sampler, (base + off) * sun_fwd.uv_scale, frag_depth - bias,
+    );
+}
 fn sun_shadow_pcf(uv: vec2<f32>, frag_depth: f32, bias: f32) -> f32 {
+    // `uv` and `texel` live in the live map's own space (0..1 over `edge`
+    // texels); a tier below the texture's size draws into its low corner, so
+    // the sample position scales by `uv_scale` (1 when the map fills it).
     let texel = vec2<f32>(max(sun_fwd.texel, 1.0 / 4096.0));
     let base = vec2<f32>(snap_texel(uv.x, texel.x), snap_texel(uv.y, texel.y));
+    // Bayer cell of the base texel: the rotation is a property of the texel,
+    // not the frame, so the pattern never crawls.
+    let cell = vec2<u32>(
+        u32(max(floor(base.x / texel.x), 0.0)) & 3u,
+        u32(max(floor(base.y / texel.y), 0.0)) & 3u,
+    );
+    let bayer = f32(SHADOW_BAYER4[cell.y * 4u + cell.x]);
+    let angle = (bayer + 0.5) * 0.39269908; // 2*PI/16 per row
+    let c = cos(angle);
+    let s = sin(angle);
+    if (SHADOW_FILTER == 2u) {
+        // Two taps on the fixed diagonal: a gradient across the contact, no
+        // per-pixel rotation (the web arm has no history to average noise).
+        let a = sun_compare(base, vec2<f32>(-0.5, -0.5) * texel, frag_depth, bias);
+        let b = sun_compare(base, vec2<f32>(0.5, 0.5) * texel, frag_depth, bias);
+        return (a + b) * 0.5;
+    }
+    if (SHADOW_FILTER == 1u) {
+        // Four corners of a 1x1 texel box, rotated: 9 compares become 4.
+        var lit = 0.0;
+        for (var i = 0; i < 4; i = i + 1) {
+            let cx = select(-0.5, 0.5, (i & 1) == 1);
+            let cy = select(-0.5, 0.5, (i & 2) == 2);
+            let off = vec2<f32>(cx * c - cy * s, cx * s + cy * c) * texel;
+            lit += sun_compare(base, off, frag_depth, bias);
+        }
+        return lit * 0.25;
+    }
     var lit = 0.0;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let off = vec2<f32>(f32(x), f32(y)) * texel;
-            lit += textureSampleCompare(sun_shadow_map, sun_shadow_sampler, base + off, frag_depth - bias);
+            lit += sun_compare(base, off, frag_depth, bias);
         }
     }
     return lit / 9.0;
@@ -366,6 +412,16 @@ fn ibl_diffuse(n: vec3<f32>, albedo: vec3<f32>, metallic: f32) -> vec3<f32> {
     // Scaled by occlusion in `fs`; mirrors CPU `ambient_occluded`.
     return (1.0 - metallic) * albedo * ibl_irradiance(n) / 3.141592653589793;
 }
+// RL47 A1: the multiple-scatter gain `1 + F0 * (1 / E - 1)` (Filament 9.5)
+// both specular lobes share. E is the lobe's directional albedo at F0 = 1; a
+// valid table holds E >= 0.31, so the floor only bites a degenerate texel and
+// caps the gain at 3 instead of 10000. CPU twin: `ibl::spec_lobe::ms_gain`
+// (`ibl::energy_compensation` calls it); the device test
+// `ms_gain_wgsl_matches_the_cpu_twin` runs this very function.
+const MS_E_FLOOR: f32 = 0.25;
+fn ms_gain(f0: vec3<f32>, e: f32) -> vec3<f32> {
+    return vec3<f32>(1.0) + f0 * (1.0 / max(e, MS_E_FLOOR) - 1.0);
+}
 fn ibl_specular(n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roughness: f32) -> vec3<f32> {
     // EG12: open specular only (prefilter times BRDF scale plus bias).
     // Never scaled by occlusion; mirrors CPU `shade_ibl_occluded`.
@@ -395,7 +451,11 @@ fn ibl_specular(n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roughness: f32) -> ve
     let p1 = ibl_prefilter_level(l1 * 6, face, uu, vv);
     let pre = mix(p0, p1, t);
     let fab = ibl_brdf_pair(ndotv, roughness);
-    return pre * (f0 * fab.x + vec3<f32>(fab.y, fab.y, fab.y)) * ibl_gain();
+    // RL47: multiple-scatter gain (Filament 9.5, the same factor
+    // `specular_term` puts on the direct lobe): E is this lobe's directional
+    // albedo, so a roughness-1 white metal returns its light instead of 0.31.
+    let comp = ms_gain(f0, fab.x + fab.y);
+    return pre * (f0 * fab.x + vec3<f32>(fab.y, fab.y, fab.y)) * comp * ibl_gain();
 }
 fn ibl_sample(n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roughness: f32, albedo: vec3<f32>, metallic: f32) -> vec3<f32> {
     return ibl_diffuse(n, albedo, metallic) + ibl_specular(n, v, f0, roughness);
@@ -636,6 +696,31 @@ fn look_guard(value: f32, floor: f32, analytic: bool) -> f32 {
     return out;
 }
 
+// RL47 A2: geometric specular anti-aliasing (Kaplanyan 2016; Tokuyoshi and
+// Kaplanyan 2019; the constants and the form of O3DE `SpecularAA.azsli`). A
+// normal that turns fast across one pixel spreads the half vectors the pixel
+// integrates, which a point-sampled sharp lobe misses and shows as a sparkle
+// that crawls on armour. The kernel (the squared alpha one pixel adds) comes
+// from the screen derivatives of the shading normal in `fs`; both lobes (the
+// sun's and the IBL's, prefilter mip and BRDF table included) then read the
+// raised roughness. `fs_display` and `fs_skinned` take no derivative and keep
+// a zero kernel, which leaves their roughness bit for bit. CPU twins:
+// `ibl::spec_lobe::spec_aa_kernel` and `spec_aa_perceptual`; the device test
+// `spec_aa_wgsl_matches_the_cpu_twin` runs these very functions.
+const SPEC_AA_VARIANCE: f32 = 0.25;
+const SPEC_AA_THRESHOLD: f32 = 0.18;
+var<private> spec_aa_k: f32 = 0.0;
+fn spec_aa_kernel(dn_dx: vec3<f32>, dn_dy: vec3<f32>) -> f32 {
+    let variance = SPEC_AA_VARIANCE * (dot(dn_dx, dn_dx) + dot(dn_dy, dn_dy));
+    return min(2.0 * variance, SPEC_AA_THRESHOLD);
+}
+// Perceptual roughness p gives alpha = p^2; the kernel adds to alpha^2.
+fn spec_aa_perceptual(perceptual: f32, kernel: f32) -> f32 {
+    let alpha = perceptual * perceptual;
+    let raised = sqrt(sqrt(clamp(alpha * alpha + kernel, 0.0, 1.0)));
+    return select(raised, perceptual, kernel <= 0.0);
+}
+
 // PORT(bevyengine/bevy@v0.15.0:crates/bevy_pbr/src/render/pbr_lighting.wgsl): perceptualRoughnessToRoughness.
 fn perceptual_roughness_to_roughness(p: f32) -> f32 {
     let c = clamp(look_guard(p, LOOK_ROUGHNESS_FLOOR, false), 0.0, 1.0);
@@ -698,7 +783,7 @@ fn f0_term(base_color: vec3<f32>, metallic: f32) -> vec3<f32> {
 // PORT(bevyengine/bevy@v0.15.0:crates/bevy_pbr/src/render/pbr_lighting.wgsl): specular_multiscatter (Filament 9.5).
 fn specular_term(d: f32, v: f32, f: vec3<f32>, f0: vec3<f32>, fab: vec2<f32>) -> vec3<f32> {
     var fr = (d * v) * f;
-    fr *= 1.0 + f0 * (1.0 / (fab.x + fab.y) - 1.0);
+    fr *= ms_gain(f0, fab.x + fab.y);
     return fr;
 }
 
@@ -714,6 +799,54 @@ const SKIN_SUBSURFACE_TINT: vec3<f32> = vec3<f32>(1.0, 0.55, 0.45);
 // LF8 metal: anisotropic roughness floor, the alpha twin of
 // LOOK_ROUGHNESS_FLOOR (Filament's MIN_ROUGHNESS role).
 const LOOK_ANISO_MIN_ROUGHNESS: f32 = 0.089 * 0.089;
+
+// SW51: the rim and the backlight, the two arms Godot's
+// `scene_forward_lights_inc.glsl` takes (`LIGHT_RIM_USED`,
+// `LIGHT_BACKLIGHT_USED`). The Rust owner is `crate::rim_light`, which pins the
+// same numbers. Both ride the existing kind word: no uniform word, binding or
+// cook byte changed.
+const RIM_EXPONENT_SCALE: f32 = 16.0;
+const RIM_BASE_FLOOR: f32 = 1e-4;
+const RIM_DEFAULT: f32 = 0.35;
+const RIM_TINT: f32 = 0.5;
+
+// The rim strength one kind asks for: skin and cloth carry it, stone (sand and
+// rock) and metal do not, so their frame is byte-equal to the one before SW51.
+fn rim_strength(kind: u32) -> f32 {
+    if (kind == KIND_SKIN || kind == KIND_CLOTH) {
+        return RIM_DEFAULT;
+    }
+    return 0.0;
+}
+
+// How much body a kind passes to the backlight; the skin lobe's own parameter
+// word stays the thickness, so this is the kind's floor.
+fn backlight_thickness(kind: u32) -> f32 {
+    if (kind == KIND_SKIN) {
+        return 0.35;
+    }
+    if (kind == KIND_CLOTH) {
+        return 0.15;
+    }
+    return 0.0;
+}
+
+// The rim share of one light: `pow(max(1e-4, 1 - n.v), max(0, (1 - r) * 16))`
+// times the kind's rim. A grazing normal approaches the rim strength, a facing
+// one falls under 1e-4.
+fn rim_share(ndot_v: f32, perceptual_roughness: f32, kind: u32) -> f32 {
+    let base = max(1.0 - ndot_v, RIM_BASE_FLOOR);
+    let exponent = max(0.0, (1.0 - perceptual_roughness) * RIM_EXPONENT_SCALE);
+    return pow(base, exponent) * rim_strength(kind);
+}
+
+// Light through the body: only where the light sits behind the surface, so a
+// lit side is exactly zero.
+fn backlight_share(ndot_l_raw: f32, kind: u32) -> f32 {
+    let behind = max(-ndot_l_raw, 0.0);
+    let thickness = clamp(backlight_thickness(kind), 0.0, 1.0);
+    return behind * (0.5 + 0.5 * thickness);
+}
 
 // LF8 metal: anisotropic GGX (Burley 2012 via Filament `D_GGX_Anisotropic`).
 // `at`/`ab` are the alpha roughness along the tangent and bitangent.
@@ -762,25 +895,36 @@ fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, tangent: vec4<f32>, al
     let l = normalize(light.dir_to_light);
     let h = normalize(l + v);
     let ndot_l = clamp(dot(n, l), 0.0, 1.0);
+    // SW51: the unclamped cosine, so the backlight sees the light behind.
+    let ndot_l_raw = dot(n, l);
     let ndot_v = look_guard(max(dot(n, v), 0.0001), LOOK_MIN_HALF_NORMAL, true);
     let ndot_h = clamp(dot(n, h), 0.0, 1.0);
     let ldot_h = clamp(dot(l, h), 0.0, 1.0);
 
-    let perceptual = clamp(mat.roughness * orm_scale.y, 0.0, 1.0);
+    let perceptual = spec_aa_perceptual(clamp(mat.roughness * orm_scale.y, 0.0, 1.0), spec_aa_k);
     let metallic = clamp(mat.metallic * orm_scale.z, 0.0, 1.0);
     let roughness = perceptual_roughness_to_roughness(perceptual);
     let diffuse = diffuse_color_term(albedo, metallic)
         * fd_burley(roughness, ndot_v, ndot_l, ldot_h);
+    // SW51: the diffuse BRDF's `n.l` factor, which the backlight subtracts from
+    // the 1/PI leg so light through the body never doubles the front term.
+    let brdf_nl = fd_burley(roughness, ndot_v, ndot_l, ldot_h);
     let f0 = f0_term(albedo, metallic);
     let sun_shadow = sun_contact_factor(world_pos) * sun_vis;
 
     if (mat.kind == KIND_CLOTH) {
         // Cloth: Charlie sheen specular with F fixed at the dielectric 0.04;
-        // the diffuse lobe keeps Burley and is not Fresnel-multiplied.
+        // the diffuse lobe keeps Burley and is not Fresnel-multiplied. SW51 adds
+        // the rim on the grazing edge and the backlight through the weave.
         let d = d_charlie(roughness, ndot_h);
         let vv = v_neubelt(ndot_v, ndot_l);
         let spec = vec3<f32>(0.04) * d * vv;
-        return (diffuse + spec) * ndot_l * light.light_color * sun_shadow;
+        let rim = rim_share(ndot_v, perceptual, KIND_CLOTH)
+            * mix(vec3<f32>(1.0), albedo, vec3<f32>(RIM_TINT));
+        let through = max(1.0 / 3.141592653589793 - brdf_nl, 0.0)
+            * backlight_share(ndot_l_raw, KIND_CLOTH);
+        return ((diffuse + spec + rim) * ndot_l + albedo * through) * light.light_color
+            * sun_shadow;
     }
     let f = fresnel_term(f0, ldot_h);
     let fab = f_ab_term(perceptual, ndot_v);
@@ -798,7 +942,14 @@ fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, tangent: vec4<f32>, al
         let d = d_ggx(roughness, ndot_h);
         let vv = v_smith_ggx_correlated(roughness, ndot_v, ndot_l);
         let spec = specular_term(d, vv, f, f0, fab);
-        return (scatter + (diffuse + spec) * ndot_l) * light.light_color * sun_shadow;
+        // SW51: the rim rides the grazing edge, and the backlight moves the
+        // sunset through the body on the side away from the light.
+        let rim = rim_share(ndot_v, perceptual, KIND_SKIN)
+            * mix(vec3<f32>(1.0), albedo, vec3<f32>(RIM_TINT));
+        let through = max(1.0 / 3.141592653589793 - brdf_nl, 0.0)
+            * backlight_share(ndot_l_raw, KIND_SKIN);
+        return (scatter + (diffuse + spec + rim) * ndot_l + albedo * through)
+            * light.light_color * sun_shadow;
     }
     if (mat.kind == KIND_METAL) {
         // Metal: anisotropic GGX over the mesh tangent frame. The tangent is
@@ -911,6 +1062,31 @@ fn eg12_world_normal(geom_n: vec3<f32>, tangent: vec4<f32>, map_n: vec3<f32>) ->
     return out / sqrt(ol2);
 }
 
+// RL47 A3: Lagarde specular occlusion (Lagarde and de Rousiers 2014, "Moving
+// Frostbite to PBR"; Filament `SpecularAO_Lagarde`). The occlusion field
+// darkens the reflection by what the lobe can see: a smooth lobe at a normal
+// view reflects the open sky above a cavity, at a grazing view it reflects the
+// cavity wall, and a rough lobe averages the whole hemisphere (the result
+// tends to `ao`). `alpha` is the lobe's alpha (perceptual roughness squared),
+// the argument Filament passes. At ao = 1 the result is 1 for every view and
+// roughness. CPU twin: `ibl::spec_lobe::specular_ao`.
+fn spec_occlusion(ndotv: f32, ao: f32, alpha: f32) -> f32 {
+    return clamp(pow(ndotv + ao, exp2(-16.0 * alpha - 1.0)) - 1.0 + ao, 0.0, 1.0);
+}
+// RL47 A4: multi-bounce ambient occlusion (Jimenez et al. 2016, "Practical
+// Realtime Strategies for Accurate Indirect Occlusion", the fit Filament ships
+// as `gtaoMultiBounce`). Light bounces between the walls of a cavity, so a
+// bright surface keeps more of its ambient than the plain field says, tinted
+// by its own albedo. Never darker than `ao`, never brighter than open (the fit
+// reads 1.0005 at ao = 1 for white, so the top is clamped and an open pixel
+// stays exactly 1). CPU twin: `ibl::spec_lobe::multi_bounce_ao`.
+fn multi_bounce_ao(ao: f32, albedo: vec3<f32>) -> vec3<f32> {
+    let a = 2.0404 * albedo - vec3<f32>(0.3324);
+    let b = -4.7951 * albedo + vec3<f32>(0.6417);
+    let c = 2.7552 * albedo + vec3<f32>(0.6903);
+    return min(max(vec3<f32>(ao), ((a * ao + b) * ao + c) * ao), vec3<f32>(1.0));
+}
+
 // The occlusion field at one fragment: an exact texel load (the field is
 // full resolution and unfilterable). A fragment outside the field reads
 // 1.0 (open) rather than a zero texel, so a frame that never runs the
@@ -922,6 +1098,142 @@ fn ao_at(frag_xy: vec2<f32>) -> f32 {
         return 1.0;
     }
     return textureLoad(ao_tex, at, 0).r;
+}
+
+// ---------------------------------------------------------------------------
+// RL51 surface detail: sand and walls without a visible repeat. The stone
+// kind's parameter word names the detail per mesh (`crate::hextile::
+// SurfaceDetail`: 0 none, 1 floor, 2 wall); every other kind and every draw
+// the presenter never named keeps the plain taps. Hex tiling after Mikkelsen's
+// "Practical Real-Time Hex-Tiling" (JCGT 2022), translation only: each of the
+// three triangle-grid taps is the tile shifted by a hash of its vertex, so the
+// ripples and the mortar lines keep their direction and no normal is rotated.
+// The CPU twin in `hextile.rs` pins the hash, the grid and the weights. The
+// macro terms break the tile the texture cannot: value noise over the world
+// position, plus dust on a wall's foot, so a wall is lit by its own history.
+// ---------------------------------------------------------------------------
+const DETAIL_FLOOR: u32 = 1u;
+const DETAIL_WALL: u32 = 2u;
+// Triangle-grid scale: 2 * sqrt(3) cells per tile edge.
+const HEX_GRID_SCALE: f32 = 3.4641016;
+// The weights are raised to this power (6) before they are normalized, so a
+// fragment is mostly one tap and the blend band stays thin: the blend of two
+// unrelated taps halves the local contrast, so the band is kept narrow.
+fn hex_sharpen(w: vec3<f32>) -> vec3<f32> {
+    let w2 = w * w;
+    let k = w2 * w2 * w2;
+    return k / (k.x + k.y + k.z);
+}
+
+fn surface_detail() -> u32 {
+    if (mat.kind != 0u) {
+        return 0u;
+    }
+    return u32(max(mat.param, 0.0) + 0.5);
+}
+
+// PCG2D (Jarzynski and Olano 2020, "Hash Functions for GPU Rendering"): an
+// integer hash, so every adapter gives the same offsets (no sin() hash).
+fn pcg2d(v_in: vec2<u32>) -> vec2<u32> {
+    var v = v_in * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    return v;
+}
+
+// The tile shift of one triangle-grid vertex, in tile units, in 0..1.
+fn hex_offset(v: vec2<i32>) -> vec2<f32> {
+    return vec2<f32>(pcg2d(bitcast<vec2<u32>>(v))) * (1.0 / 4294967296.0);
+}
+
+struct HexCell {
+    st1: vec2<f32>,
+    st2: vec2<f32>,
+    st3: vec2<f32>,
+    w: vec3<f32>,
+};
+
+// The three taps and their weights for one tile coordinate.
+fn hex_cell(st: vec2<f32>) -> HexCell {
+    let g = st * HEX_GRID_SCALE;
+    let skew = vec2<f32>(g.x, -0.57735027 * g.x + 1.1547005 * g.y);
+    let base = floor(skew);
+    let fr = skew - base;
+    let z = 1.0 - fr.x - fr.y;
+    let s = select(0.0, 1.0, z <= 0.0);
+    let s2 = 2.0 * s - 1.0;
+    let w = vec3<f32>(-z * s2, s - fr.y * s2, s - fr.x * s2);
+    let bi = vec2<i32>(base);
+    let si = i32(s);
+    var cell: HexCell;
+    cell.st1 = st + hex_offset(bi + vec2<i32>(si, si));
+    cell.st2 = st + hex_offset(bi + vec2<i32>(si, 1 - si));
+    cell.st3 = st + hex_offset(bi + vec2<i32>(1 - si, si));
+    cell.w = hex_sharpen(w);
+    return cell;
+}
+
+// One hex-tiled map tap: three gradient samples (the gradient is the plain
+// coordinate's, so the mip level matches the untiled draw) blended by weight.
+fn hex_sample(tex: texture_2d<f32>, smp: sampler, cell: HexCell, dx: vec2<f32>, dy: vec2<f32>) -> vec3<f32> {
+    return textureSampleGrad(tex, smp, cell.st1, dx, dy).rgb * cell.w.x
+        + textureSampleGrad(tex, smp, cell.st2, dx, dy).rgb * cell.w.y
+        + textureSampleGrad(tex, smp, cell.st3, dx, dy).rgb * cell.w.z;
+}
+
+// One value in 0..1 per integer lattice point, from the same PCG2D.
+fn lattice_noise(c: vec2<i32>) -> f32 {
+    return f32(pcg2d(bitcast<vec2<u32>>(c)).x >> 8u) * (1.0 / 16777216.0);
+}
+
+// Smooth value noise over a plane, 0..1.
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let u = f * f * (3.0 - 2.0 * f);
+    let c = vec2<i32>(i);
+    let a = lattice_noise(c);
+    let b = lattice_noise(c + vec2<i32>(1, 0));
+    let d = lattice_noise(c + vec2<i32>(0, 1));
+    let e = lattice_noise(c + vec2<i32>(1, 1));
+    return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
+}
+
+// Sand: patches of dry bright sand and trampled damp sand, 3 m and 1 m wide,
+// a few percent of tone and a hair of warmth either way.
+fn floor_macro(wp: vec3<f32>) -> vec3<f32> {
+    let n = 0.6 * value_noise(wp.xz * 0.23) + 0.4 * value_noise(wp.xz * 0.9 + vec2<f32>(17.0, 3.0));
+    let lum = mix(0.86, 1.1, n);
+    let tint = mix(vec3<f32>(0.97, 0.95, 1.0), vec3<f32>(1.03, 1.01, 0.96), n);
+    return vec3<f32>(lum) * tint;
+}
+
+// Stone: weathering streaks that run down the face, blotches over it, and
+// sand kicked up on the foot of the wall (the first 1.8 m, darker and browner)
+// so a wall stands in its sand instead of floating over it.
+fn wall_macro(wp: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let up = smoothstep(0.5, 0.9, abs(n.y));
+    let along = wp.x * abs(n.z) + wp.z * abs(n.x);
+    let q = mix(vec2<f32>(along, wp.y), wp.xz, up);
+    let streak = value_noise(vec2<f32>(q.x * 0.9, mix(q.y * 0.18, q.y * 0.9, up)));
+    let blotch = value_noise(q * 0.31 + vec2<f32>(5.0, 9.0));
+    let lum = mix(0.82, 1.08, 0.55 * streak + 0.45 * blotch);
+    let dust = (1.0 - smoothstep(0.0, 1.8, wp.y)) * (0.45 + 0.55 * blotch);
+    return vec3<f32>(lum) * mix(vec3<f32>(1.0), vec3<f32>(0.74, 0.62, 0.48), dust * 0.55);
+}
+
+fn surface_macro(detail: u32, wp: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    if (detail == DETAIL_FLOOR) {
+        return floor_macro(wp);
+    }
+    if (detail == DETAIL_WALL) {
+        return wall_macro(wp, n);
+    }
+    return vec3<f32>(1.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -969,7 +1281,26 @@ fn fog_factor_infinite(fog: FogFwdU, eye: vec3<f32>, dir: vec3<f32>) -> f32 {
 @fragment
 fn fs(in: VOut) -> FsOut {
     contact_live = contact_from_feet(in.world_pos);
-    let albedo = mat.base_color * textureSample(base_map, base_smp, in.uv).rgb;
+    // RL51: a mesh the presenter named for surface detail takes the hex-tiled
+    // taps of all three maps (the one grid, the one gradient) and the macro
+    // terms over its albedo; every other draw keeps its three plain taps.
+    let detail = surface_detail();
+    var base_texel: vec3<f32>;
+    var map_texel: vec3<f32>;
+    var orm: vec3<f32>;
+    if (detail != 0u) {
+        let dx = dpdx(in.uv);
+        let dy = dpdy(in.uv);
+        let cell = hex_cell(in.uv);
+        base_texel = hex_sample(base_map, base_smp, cell, dx, dy);
+        map_texel = hex_sample(normal_map, normal_smp, cell, dx, dy);
+        orm = hex_sample(orm_map, normal_smp, cell, dx, dy);
+    } else {
+        base_texel = textureSample(base_map, base_smp, in.uv).rgb;
+        map_texel = textureSample(normal_map, normal_smp, in.uv).rgb;
+        orm = textureSample(orm_map, normal_smp, in.uv).rgb;
+    }
+    let albedo = mat.base_color * base_texel * surface_macro(detail, in.world_pos, normalize(in.world_n));
     // EG11b: the live sun depth map is the shadow. The old view-distance
     // cascade dim is gone: the map says where the sun is blocked, so no
     // band has to pretend.
@@ -977,16 +1308,18 @@ fn fs(in: VOut) -> FsOut {
     // EG12 slice c: mapped normal from the bound normal map through the
     // tangent frame (handedness in tangent.w); degenerate tangents keep
     // the geometric normal inside `eg12_world_normal`.
-    let map_texel = textureSample(normal_map, normal_smp, in.uv).rgb;
     let map_n = eg12_decode_normal(map_texel, normalize(in.world_n));
     let mapped_n = eg12_world_normal(normalize(in.world_n), in.tangent, map_n);
     let n_ibl = normalize(mapped_n);
     let v_ibl = normalize(cam.camera_pos - in.world_pos);
-    // VR2: the ORM texel scales the roughness and metallic factors and
-    // carries the baked occlusion (R) that dims the ambient diffuse below.
-    let orm = textureSample(orm_map, normal_smp, in.uv).rgb;
+    // VR2: the ORM texel (sampled above) scales the roughness and metallic
+    // factors and carries the baked occlusion (R) that dims the ambient
+    // diffuse below.
     orm_scale = orm;
-    let rough_eff = clamp(mat.roughness * orm.y, 0.0, 1.0);
+    // RL47 A2: the pixel's footprint roughens both lobes; the derivatives
+    // stay in uniform control flow, at the top of the entry.
+    spec_aa_k = spec_aa_kernel(dpdx(n_ibl), dpdy(n_ibl));
+    let rough_eff = spec_aa_perceptual(clamp(mat.roughness * orm.y, 0.0, 1.0), spec_aa_k);
     let metal_eff = clamp(mat.metallic * orm.z, 0.0, 1.0);
     let f0_ibl = f0_term(albedo, metal_eff);
     // EG12: AO scales the baked diffuse only; specular stays open
@@ -1000,7 +1333,13 @@ fn fs(in: VOut) -> FsOut {
     // direct sun and the torches keep their own light, so a sunlit open
     // texel does not move when the field comes on.
     let ao = ao_at(in.clip.xy);
-    let lit = direct_light(in.world_pos, mapped_n, in.tangent, albedo, sun_vis) + ibl_diffuse_term * ao * occlusion * orm.x + ibl_spec_term + torch_frame_sum(in.world_pos, mapped_n, albedo);
+    // RL47 A3 and A4: the field and the baked occlusion together darken the
+    // reflection by what the lobe can see, and lift the ambient diffuse in a
+    // cavity by the light that bounces between its walls. The direct sun and
+    // the torches keep their own light, as before.
+    let ao_all = ao * orm.x;
+    let spec_ao = spec_occlusion(clamp(dot(n_ibl, v_ibl), 0.0, 1.0), ao_all, rough_eff * rough_eff);
+    let lit = direct_light(in.world_pos, mapped_n, in.tangent, albedo, sun_vis) + ibl_diffuse_term * multi_bounce_ao(ao_all, albedo) * occlusion + ibl_spec_term * spec_ao + torch_frame_sum(in.world_pos, mapped_n, albedo);
     let radiance = max(lit * mat.exposure, vec3<f32>(0.0));
     let fog_f = fog_factor_finite(fog_fwd, cam.camera_pos, in.world_pos);
     var out: FsOut;
