@@ -1,10 +1,10 @@
 {
   "_note": "Per-crate line-coverage floors read by tools/coverage-gate.mjs (the `floor` job in .github/workflows/coverage.yml). `measured` is the number one real run printed; `lines` is that number minus a one-point band, because the run below was measured on Windows and the job runs on Linux, where cfg-gated lines differ. A floor moves down only with a fresh measured run in the same commit.",
-  "_how": "cargo llvm-cov -p engine-core -p engine-proof --lib --json --summary-only --output-path target/reports/coverage-core-proof.json -- --skip online_soak --skip chaos --skip hour_ --skip crowd_20k --skip overhead_probe --skip every_pinned_row_matches_its_owner_source",
+  "_how": "cargo llvm-cov -p engine-core -p engine-proof -p engine-endpoint --features engine-endpoint/mcp --lib --json --summary-only --output-path target/reports/coverage.json -- --skip online_soak --skip chaos --skip hour_ --skip crowd_20k --skip overhead_probe --skip loopback_serves_two_readers --skip spatial_delta_stays_cheap",
   "_measured": "2026-10-24",
-  "_pending": "engine-endpoint: its leg needs --features mcp and did not build on 2026-10-24 (crates/editor/src/lib.rs, then crates/render/src/lib.rs: other seats' uncommitted files, not this seat's). The floor job still measures it and prints the number with no floor until a clean run fills it in.",
   "packages": {
     "engine-core": { "dir": "crates/core", "measured": 92.9, "lines": 91.9 },
-    "engine-proof": { "dir": "crates/proof", "measured": 81.1, "lines": 80.1 }
+    "engine-proof": { "dir": "crates/proof", "measured": 81.1, "lines": 80.1 },
+    "engine-endpoint": { "dir": "crates/endpoint", "measured": 91.3, "lines": 90.3 }
   }
 }

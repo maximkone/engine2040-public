@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, parseTestModules, sourceFilesUnder, romeSourceAudit, romeSourceViolations, romeContentFiles, codexRefsNamed, codexRefList, unwiredModulesLine, LAYERS, SIMULATION_CRATES, PRESENTATION_CRATES, PLATFORM_CRATES, GPU_BOUNDARY_LEGACY, layerEdgeViolations, gpuBoundaryFindings, ioBoundaryFindings } from "./workspace-check.mjs";
+import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, parseTestModules, sourceFilesUnder, romeSourceAudit, romeSourceViolations, romeContentFiles, codexRefsNamed, codexRefList, unwiredModulesLine, unusedDepsLine, macheteRun, parseMachete, LAYERS, SIMULATION_CRATES, PRESENTATION_CRATES, PLATFORM_CRATES, GPU_BOUNDARY_LEGACY, layerEdgeViolations, gpuBoundaryFindings, ioBoundaryFindings } from "./workspace-check.mjs";
 import { mentions, pathTokens, tokensMention, rowsWithReason, summaryLine, scan as scanUnwired } from "./unwired-code-gate.mjs";import { parseBoard, needsOf } from "./board-slice.mjs";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -389,8 +389,10 @@ test("module reachability: an include!() names the file it pulls in (E51)", () =
   const names = parseIncludedFiles([
     'include!("editor/commands_coalesce.rs");',
     'include!("plain.rs");',
+    '#[path = "presenter_skin_window_tests.rs"]',
+    'mod skin_window_tests;',
   ].join("\n"));
-  assert.deepEqual([...names].sort(), ["commands_coalesce", "plain"]);
+  assert.deepEqual([...names].sort(), ["commands_coalesce", "plain", "presenter_skin_window_tests"]);
 });
 
 test("the shared source list is the wiring file set: tests directories stay out (E51)", () => {
@@ -797,4 +799,41 @@ test("the layer map and the audit agree on the crates (PW52)", () => {
   assert.match(gate, /WARN gpu boundary: \$\{gpu\.offenders\.length\} files outside present\/ name wgpu:: \(report-only\)/);
   assert.match(gate, /PASS gpu boundary: no new file outside present\/ names wgpu::/);
   assert.match(gate, /PASS io boundary: no simulation crate does IO outside its tests/);
+});
+
+// ---- AF6: unused dependencies, report-only ----
+
+test("parseMachete counts the dependency lines cargo-machete prints, and reads a clean run as 0", () => {
+  const clean = "Analyzing dependencies of crates in this directory...\ncargo-machete didn'\''t find any unused dependencies in this directory. Good job!\n";
+  assert.equal(parseMachete(clean), 0);
+  const found = [
+    "Analyzing dependencies of crates in this directory...",
+    "cargo-machete found the following unused dependencies in this directory:",
+    "engine-perf -- .\\crates\\perf\\Cargo.toml:",
+    "\tengine-net",
+    "engine-workspace-hack -- .\\crates\\workspace-hack\\Cargo.toml:",
+    "\timage",
+    "\tserde",
+    "",
+    "If you believe cargo-machete has detected an unused dependency incorrectly,",
+  ].join("\n");
+  assert.equal(parseMachete(found), 3, "one tab-indented line per dependency, never the pkg -- path header");
+  assert.equal(parseMachete(""), 0);
+  assert.equal(parseMachete("cargo-machete found the following unused dependencies in this directory:"), 0, "a header with no rows counts nothing");
+});
+
+test("unusedDepsLine prints one number, and a fault as its first line rather than a throw", () => {
+  assert.equal(unusedDepsLine(() => "cargo-machete didn'\''t find any unused dependencies in this directory."), "WARN unused deps (report-only): 0");
+  assert.equal(unusedDepsLine(() => "cargo-machete found the following unused dependencies in this directory:\nx -- y:\n\tserde\n"), "WARN unused deps (report-only): 1");
+  assert.equal(
+    unusedDepsLine(() => { throw new Error("no cargo-machete in .tools/bin\nsecond line"); }),
+    "WARN unused deps (report-only): check failed: no cargo-machete in .tools/bin",
+  );
+});
+
+test("the live tree has 0 unused dependencies, so the AF6 count is a real 0 and not a suppression list", {
+  skip: ["cargo-machete.exe", "cargo-machete"].some((n) => existsSync(new URL(`../.tools/bin/${n}`, import.meta.url))) ? false : "no cargo-machete in .tools/bin on this machine",
+}, () => {
+  const line = unusedDepsLine(macheteRun(join(dirname(fileURLToPath(import.meta.url)), "..")));
+  assert.equal(line, "WARN unused deps (report-only): 0", `${line}\nA crate that must keep a dependency pins it under [package.metadata.cargo-machete] ignored with its reason.`);
 });

@@ -25,6 +25,12 @@ pub use behavior::{tick, Behavior, Status};
 pub mod bout;
 /// Versioned integer trees for bout bots; the bout harness ticks these.
 pub mod bt;
+/// Running memory for the reactive composites: the child each one waits on,
+/// and the halt that resets a subtree when its guard flips.
+pub mod bt_reactive;
+/// The AI decision debugger: a bounded, off-by-default ring of per-node tree
+/// rows (status, reads, utility lanes), text renderers and canonical bytes.
+pub mod bt_trace;
 /// Off-by-default ring of AI decisions: canonical bytes, show text and the
 /// first divergent tick between two tapes.
 pub mod decision_log;
@@ -69,6 +75,8 @@ pub mod opponent;
 /// Squad orders as validated recorded actions: the typed vocabulary, its
 /// versioned tape bytes and the per-squad replay book.
 pub mod orders;
+/// SW85: what the AI can see, one reaction beat late: pose only, no intent.
+pub mod perception;
 pub mod personality;
 pub mod reaction_delay;
 pub use personality::Personality;
