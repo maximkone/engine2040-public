@@ -22,17 +22,7 @@ Run lines: `node tools/gh-check.mjs cargo test ...` (skill `github-check`). Loca
 
 ## 2. Captures: pixels, never counts
 
-| # | check | flag |
-|---|---|---|
-| 1 | The shot copies the presented framebuffer (crate game). | An offscreen CPU raster labelled as the window. A manifest trusted for the picture. |
-| 2 | Each shot is written to a fixed folder with a date and time in the name (game). | Overwrites the last good shots. Two runs share a name. |
-| 3 | SSIM and colour deltas run on decoded RGBA bytes (playtest). | Similarity over PNG bytes: one pixel looks huge, a wrong frame looks close. |
-| 4 | A fighter-colour pixel count above a floor on every checked frame (playtest). | A gate that passes on file counts while the frame shows no fighter. |
-| 5 | A blank set fails the gate and a real capture set passes it (playtest). | A gate that cannot say no. |
-| 6 | Capture options name HUD on or off and debug lines on or off (render). | A look verdict polluted by HUD quads, or missing the overlay it claims. |
-| 7 | The resolution is stated. Quad tiles only when high-res is asserted (render). | A tiled combine with a shifted projection. A resolution statement with no pixels. |
-| 8 | A motion statement is backed by a frame-rate sequence, not one still (game). | A frozen frame sold as smooth play. |
-| 9 | A test where blank frames fail and staged captures pass, with node and cargo green (playtest). | Synthetic frames only. The window path never runs in any gate. |
+The nine-point capture checklist (presented framebuffer, fixed folder with a timestamp, SSIM on decoded RGBA, a fighter-colour floor, a blank set that fails, HUD flags named, resolution stated, motion backed by a frame-rate sequence) is in `reference.md`. Every point is a gate: a capture that cannot say no is not a gate.
 
 Eyes rule (every visual, render and content check; other skills link here):
 
@@ -46,6 +36,7 @@ Eyes rule (every visual, render and content check; other skills link here):
 
 ## 3. Rust test shape
 
+- **Red first.** A new behavior starts with a test that fails for the right reason. Run it before the code exists: `node tools/gh-check.mjs --remote-only --only <paths> cargo test -p <crate> --lib <filter>`. The tail must show the assertion you expect, not `0 tests` (fix the filter, never the test). A test that passes on the first run tests old behavior: change the test. Code written before its test is deleted, not kept "for reference".
 - Unit tests sit in `src` in a `#[cfg(test)]` module. A helper only a test uses is not compiled into the ship build.
 - Equality with `assert_eq!` or `assert_ne!` so failure prints both sides. Put a message with the actual value in each assert. No test named `it_works`.
 - Error cases: `#[should_panic(expected = "...")]` pinned to the right guard. A bare `should_panic` passes on any panic. A test that can fail with `Err` returns `Result` and uses `?`.
@@ -74,9 +65,24 @@ Example: `EVIDENCE: node --test tools/fnv1a64.test.mjs | exit 0 | sha <64 hex> |
 - Keep these levels apart in every report: implemented, compiled, unit-tested, integrated, GPU-run, visually reviewed. Never mark a stub as passing (AGENTS.md).
 - The hash is a replay aid: anyone can rerun the command and compare.
 
-## 5. Repo facts
+## 5. Claim to proof
 
-- `crates/game/src/bin/arena.rs::main` installs the crash hook first (`crash::install_run_hook`). `crates/game/tests/crash_hook.rs` is the forced-panic test (it sets `E2040_TEST_PANIC_AT_TICK`). A new binary must do the same (rule 6).
-- The arena window has `--require-framing` and writes its status into `target/logs/arena-<UTC>.log` and `crash-<UTC>.toml`.
+Run the proof in this turn. An earlier run, a plan or a promise does not count.
+
+| Claim | Proves it | Does not prove it |
+|---|---|---|
+| Tests pass | a run with 0 failures and the passed count | an earlier run, "should pass" |
+| It compiles | exit 0 from the gh-check cargo line | clippy passing |
+| Bug fixed | the original failing test now passes | the code changed |
+| Subagent finished | the diff shows its files | the subagent's own report |
+| Requirement met | a line-by-line check of the row's Accept | tests passing |
+
+Banned in a result line: should, probably, seems to, looks correct, "just this once". Partial proof counts as nothing.
+
+A subagent's success report is a claim, not evidence. Check it: `node tools/gh-check.mjs --remote-only --only <paths> cargo check -p <crate> --tests`.
+
+## 6. Repo facts
+
+The crash-hook rule in practice, and where the arena window writes its status: `reference.md`.
 
 Sources: Finska, Modern Game Testing, ch. 8; Gregory, Game Engine Architecture 2nd ed., ch. 9.1.5 and 9.7 (book `geaen`); Klabnik et al., The Rust Programming Language 3rd ed., ch. 11.

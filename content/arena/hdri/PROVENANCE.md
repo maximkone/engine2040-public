@@ -25,8 +25,27 @@ What changed: nothing else. Geometry, textures, placement and the generator
 are untouched; only the three `hdri/*.hdr` byte blobs (plus these previews
 and `manifest.json` hashes) changed.
 
-Verification (2026-09-27, node stdlib only):
-- All three decode as `#?RADIANCE`, `FORMAT=32-bit_rle_rgbe`, 4096x2048.
+## Potato tier: the same three skies at 1K (2026-10-24)
+
+Fetched with `node tools/fetch-content.mjs content/fetch-potato.list` (md5 of the
+served bytes recorded in that list, re-checked on disk after the copy). Same source
+pages, same author, same CC0 licence line as the 4K rows above; 1024x512 instead of
+4096x2048, so the potato tier keeps three skies in VRAM at a sixteenth of the bytes
+(1.3-1.7 MB against 22.4-28.0 MB). The 4K slots stay the comfortable tier; nothing
+was replaced or renamed.
+
+| Slot (`hdri/`) | Source | Author | File | SHA-256 | Bytes |
+|---|---|---|---|---|---|
+| `arena_day_1k.hdr` | https://polyhaven.com/a/goegap (midday desert) | Greg Zaal | `goegap_1k.hdr` (`HDRIs/hdr/1k/`) | `56bb97ac7fcbfcbc91116adfb96e26b9da54475dabb7ec2c442f41bf99cda085` | 1361485 |
+| `arena_sunset_1k.hdr` | https://polyhaven.com/a/venice_sunset (sunset) | Greg Zaal | `venice_sunset_1k.hdr` (`HDRIs/hdr/1k/`) | `92fe2b29b1957828fb8925a57633540bbba5bf380d9285ed553443e834249352` | 1440400 |
+| `arena_night_1k.hdr` | https://polyhaven.com/a/moonlit_golf (night) | Greg Zaal | `moonlit_golf_1k.hdr` (`HDRIs/hdr/1k/`) | `cff71a58efa0c06e06b54046ee877c933d74e7292be1d71511aca1a36749d60c` | 1725527 |
+
+Direct downloads used (all HTTP 200 on 2026-10-24):
+`https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/<file>`. No consumer picks a
+tier yet: the pick is the open rows QA7 (IBL mip and bytes receipt for the arena HDRI)
+and QW4 (web: coarse first, HDRI out of the wasm); BV11/RL40 wire the sky itself.
+
+Verification (2026-09-27, node stdlib only):- All three decode as `#?RADIANCE`, `FORMAT=32-bit_rle_rgbe`, 4096x2048.
 - Every texel finite: day mean 1.472/1.422/1.420 (hard sun), sunset mean
   0.404/0.416/0.573 (golden horizon), night mean 0.335/0.289/0.281 (moon).
 - `preview_day/sunset/night.png` (this dir) are Reinhard+gamma tonemaps of
@@ -38,3 +57,29 @@ Verification (2026-09-27, node stdlib only):
   Radiance HDR (existing `hdri_loads_*` tests green); window-build load and
   before/after window captures are UNVERIFIED here (no display server) and
   ride with the captures pilot (Q1/RA14).
+
+## The real Colosseum morning sky (SW120, 2026-10-24)
+
+A fourth sky for the establishing view: the Colosseum at morning (Rome,
+41.8904 N / 12.4936 E), so the bowl is lit by the sky the building actually
+stands under instead of a synthetic preset. Licence read live 2026-10-24:
+https://polyhaven.com/license says CC0 for every Poly Haven HDRI (commercial
+use, redistribution and no attribution required; we credit anyway). Download:
+
+    https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/colosseum_2k.hdr
+
+2K tier (2048x1024) because the arena env never needs 4K detail, and it keeps
+VRAM clear of the 6 GB tier ceiling; the potato tier keeps `arena_day_1k.hdr`
+as its fallback, so this slot is the comfortable tier only. EVS cap 22, white
+balance 5400 K as the source states.
+
+| Slot (`hdri/`) | Source | Author | File | SHA-256 | Bytes |
+|---|---|---|---|---|---|
+| `arena_rome_2k.hdr` | https://polyhaven.com/a/colosseum (morning sun, Rome) | Greg Zaal (HDRI) / Rico Cilliers (backplates) | `colosseum_2k.hdr` (`HDRIs/hdr/2k/`) | `c5db7e22eec13ea08c089605727e0f4ad2e4c7b4ae74d78b48f00594c9b26eda` | 6090156 |
+
+Fetched once with `Invoke-WebRequest` on 2026-10-24; the served bytes matched
+the Poly Haven API md5 `660eb20813279a49ca70605e89f3a108` and decoded as
+2048x1024 on the first read. Consumer: `crates/render/src/ibl_arena_env.rs`
+(`ArenaSky::Rome`, `ARENA_ROME_HDRI`, `bake_arena_sky`); the test
+`rome_hdri_parses_to_2048x1024_and_its_sha_matches_the_row` decodes the bytes
+and recomputes this table's sha256, so the file and the row cannot drift apart.

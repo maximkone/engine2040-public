@@ -416,8 +416,14 @@ mod tests {
             &policy_for(&url),
             &ProviderCapabilities::remote_http(),
         );
-        assert_eq!(outcome.result, Err(AiError::Unavailable));
-        assert!(AiError::Unavailable.retryable());
+        // A refused loopback dial: Windows retries it for about 2 s, so the dial's
+        // own timeout can answer first there; both are retryable refusals.
+        assert!(
+            matches!(outcome.result, Err(AiError::Unavailable | AiError::Timeout)),
+            "{:?}",
+            outcome.result
+        );
+        assert!(AiError::Unavailable.retryable() && AiError::Timeout.retryable());
         assert_eq!(adapter.socket_attempts(), 1);
         assert_eq!(adapter.transport_calls(), 0, "no exchange completed");
         assert!(!outcome.mutated);

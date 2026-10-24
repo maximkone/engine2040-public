@@ -1,9 +1,11 @@
-//! arena_cook bin: cook the five CC0 arena texture sets (content/arena/sources) into
+//! arena_cook bin: cook the CC0 arena texture sets (content/arena/sources) into
 //! block-compressed KTX2 files (content/arena/cooked) with `ktx2_cook`.
 //!
 //! Usage: `cargo run -p engine-assets --features import --bin arena_cook -- [--root content/arena] [--max-dim 1024]`
 //! Output per set: `<name>_base.ktx2` (BC7 sRGB), `<name>_normal.ktx2` (BC5, GL), `<name>_orm.ktx2`
 //! (BC7 linear: R occlusion, G roughness, B metallic) and one `cook.json` receipt with sizes and PSNR.
+//! Eight sets: the five ambientCG ones, `marble_01` and `marble_tiles` (SW122) and
+//! Poly Haven `dense_sand` (SW124), whose `arm` image packs AO/rough/metal.
 //! The same sources and cap give the same bytes (run it twice and diff).
 
 #[cfg(feature = "import")]
@@ -20,14 +22,112 @@ fn main() {
     std::process::exit(2);
 }
 
-/// (set directory, cooked name, has an AO map).
+/// One source set: no directory, cooked name, and the map files it ships.
+/// `arm` is the packed AO/roughness/metal one image (Poly Haven), `ao` +
+/// `metal` are the separate ambientCG images, and `has_ao` picks the shape.
 #[cfg(feature = "import")]
-const SETS: [(&str, &str, bool); 5] = [
-    ("Bricks097", "stone", true),
-    ("Ground093C", "sand", true),
-    ("Planks039", "wood", true),
-    ("Metal046B", "iron", false),
-    ("PavingStones150", "floor", true),
+struct Set {
+    dir: &'static str,
+    name: &'static str,
+    /// `1K-JPG` style middles, per map lane.
+    color: &'static str,
+    normal: &'static str,
+    rough: &'static str,
+    ao: Option<&'static str>,
+    metal: Option<&'static str>,
+    /// Ambient occlusion, roughness and metalness in R, G, B of one image.
+    arm: Option<&'static str>,
+}
+
+/// The arena's CC0 texture sets, in cook order. The five ambientCG sets came
+/// first (AC naming); `marble_01` and `marble_tiles` (SW122) keep the AC names,
+/// and `dense_sand` (SW124) is Poly Haven's `_diff_1k` / `_nor_gl_1k` /
+/// `_arm_1k` / `_rough_1k` naming, so each set names its own files.
+#[cfg(feature = "import")]
+const SETS: [Set; 8] = [
+    Set {
+        dir: "Bricks097",
+        name: "stone",
+        color: "Color",
+        normal: "NormalGL",
+        rough: "Roughness",
+        ao: Some("AmbientOcclusion"),
+        metal: None,
+        arm: None,
+    },
+    Set {
+        dir: "Ground093C",
+        name: "sand",
+        color: "Color",
+        normal: "NormalGL",
+        rough: "Roughness",
+        ao: Some("AmbientOcclusion"),
+        metal: None,
+        arm: None,
+    },
+    Set {
+        dir: "Planks039",
+        name: "wood",
+        color: "Color",
+        normal: "NormalGL",
+        rough: "Roughness",
+        ao: Some("AmbientOcclusion"),
+        metal: None,
+        arm: None,
+    },
+    Set {
+        dir: "Metal046B",
+        name: "iron",
+        color: "Color",
+        normal: "NormalGL",
+        rough: "Roughness",
+        ao: None,
+        metal: Some("Metalness"),
+        arm: None,
+    },
+    Set {
+        dir: "PavingStones150",
+        name: "floor",
+        color: "Color",
+        normal: "NormalGL",
+        rough: "Roughness",
+        ao: Some("AmbientOcclusion"),
+        metal: None,
+        arm: None,
+    },
+    Set {
+        dir: "marble_01",
+        name: "marble",
+        color: "Color",
+        normal: "NormalGL",
+        rough: "Roughness",
+        ao: Some("AmbientOcclusion"),
+        metal: None,
+        arm: None,
+    },
+    Set {
+        dir: "marble_tiles",
+        name: "marble_tiles",
+        color: "Color",
+        normal: "NormalGL",
+        rough: "Roughness",
+        ao: Some("AmbientOcclusion"),
+        metal: None,
+        arm: None,
+    },
+    // Poly Haven naming: `dense_sand_diff_1k.jpg`, `_nor_gl_1k`, `_arm_1k`,
+    // `_rough_1k`. The arm image carries AO/rough/metal in R/G/B, so no
+    // separate AO or metal file is read for this set.
+    Set {
+        dir: "dense_sand",
+        name: "sand_dense",
+        color: "diff_1k",
+        normal: "nor_gl_1k",
+        rough: "rough_1k",
+        ao: None,
+        metal: None,
+        arm: Some("arm_1k"),
+    },
 ];
 
 #[cfg(feature = "import")]
@@ -63,9 +163,19 @@ fn run() -> Result<(), String> {
     receipt.push_str(",\n  \"maps\": [\n");
     let mut first = true;
     let (mut total_cooked, mut total_rgba, mut total_src) = (0usize, 0usize, 0usize);
-    for (dir, name, has_ao) in SETS {
+    for set in &SETS {
+        let dir = set.dir;
+        let name = set.name;
         let src = root.join("sources").join(dir);
-        let file = |suffix: &str| src.join(format!("{dir}_1K-JPG_{suffix}.jpg"));
+        // AmbientCG sets name their maps `<dir>_1K-JPG_<Map>.jpg`; Poly Haven
+        // sets name them `<dir>_<map>_1k.jpg`, so the middle carries the shape.
+        let file = |suffix: &str| {
+            if suffix.ends_with("_1k") {
+                src.join(format!("{dir}_{suffix}.jpg"))
+            } else {
+                src.join(format!("{dir}_1K-JPG_{suffix}.jpg"))
+            }
+        };
         let load = |path: &std::path::Path| -> Result<(image::RgbaImage, usize), String> {
             let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
             if bytes.starts_with(b"version https://git-lfs") {
@@ -78,30 +188,66 @@ fn run() -> Result<(), String> {
                 image::load_from_memory(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
             Ok((img.to_rgba8(), bytes.len()))
         };
-        let (color, color_bytes) = load(&file("Color"))?;
-        let (normal, normal_bytes) = load(&file("NormalGL"))?;
-        let (rough, rough_bytes) = load(&file("Roughness"))?;
+        let (color, color_bytes) = load(&file(set.color))?;
+        let (normal, normal_bytes) = load(&file(set.normal))?;
+        let (rough, rough_bytes) = load(&file(set.rough))?;
         let (w, h) = color.dimensions();
         if normal.dimensions() != (w, h) || rough.dimensions() != (w, h) {
             return Err(format!("{dir}: map sizes disagree"));
         }
-        let (ao, ao_bytes) = if has_ao {
-            let (img, n) = load(&file("AmbientOcclusion"))?;
-            (Some(img), n)
-        } else {
-            (None, 0)
+        let (ao, ao_bytes) = match set.ao {
+            Some(lane) => {
+                let (img, n) = load(&file(lane))?;
+                (Some(img), n)
+            }
+            None => (None, 0),
         };
-        let (metal, metal_bytes) = if has_ao {
-            (None, 0)
-        } else {
-            let (img, n) = load(&file("Metalness"))?;
-            (Some(img), n)
+        let (metal, metal_bytes) = match set.metal {
+            Some(lane) => {
+                let (img, n) = load(&file(lane))?;
+                (Some(img), n)
+            }
+            None => (None, 0),
+        };
+        // Poly Haven packs AO/rough/metal into one `arm` image; its R and B
+        // stand in for the missing AO and metal maps, its G is checked against
+        // the separate rough lane so the two cannot drift.
+        let (arm, arm_bytes) = match set.arm {
+            Some(lane) => {
+                let (img, n) = load(&file(lane))?;
+                if img.dimensions() != (w, h) {
+                    return Err(format!("{dir}: arm map size disagrees"));
+                }
+                (Some(img), n)
+            }
+            None => (None, 0),
         };
         let mut orm = vec![255u8; (w * h * 4) as usize];
         for p in 0..(w * h) as usize {
-            orm[p * 4] = ao.as_ref().map_or(255, |a| a.as_raw()[p * 4]);
+            orm[p * 4] = ao.as_ref().map_or_else(
+                || arm.as_ref().map_or(255, |a| a.as_raw()[p * 4]),
+                |a| a.as_raw()[p * 4],
+            );
             orm[p * 4 + 1] = rough.as_raw()[p * 4];
-            orm[p * 4 + 2] = metal.as_ref().map_or(0, |m| m.as_raw()[p * 4]);
+            orm[p * 4 + 2] = metal.as_ref().map_or_else(
+                || arm.as_ref().map_or(0, |a| a.as_raw()[p * 4 + 2]),
+                |m| m.as_raw()[p * 4],
+            );
+        }
+        if let Some(arm) = &arm {
+            // The arm's green lane and the separate rough JPG carry the same
+            // roughness; JPEG quantisation moves single texels, so the guard is
+            // the mean drift, not the worst texel (measured 1.29 on dense_sand).
+            let total: u64 = arm
+                .as_raw()
+                .chunks_exact(4)
+                .zip(rough.as_raw().chunks_exact(4))
+                .map(|(a, r)| u64::from(a[1].abs_diff(r[0])))
+                .sum();
+            let texels = u64::try_from(arm.as_raw().len() / 4).unwrap_or(u64::MAX / 8);
+            if total > 4 * texels {
+                return Err(format!("{dir}: arm green and rough drift apart"));
+            }
         }
         let maps: [(&str, MapKind, &[u8], usize); 3] = [
             ("base", MapKind::BaseColor, color.as_raw(), color_bytes),
@@ -110,7 +256,7 @@ fn run() -> Result<(), String> {
                 "orm",
                 MapKind::Orm,
                 &orm,
-                rough_bytes + ao_bytes + metal_bytes,
+                rough_bytes + ao_bytes + metal_bytes + arm_bytes,
             ),
         ];
         for (suffix, kind, rgba, src_bytes) in maps {
