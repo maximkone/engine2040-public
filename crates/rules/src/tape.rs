@@ -474,7 +474,7 @@ pub fn record(
     let mut cursor = 0;
     for tick in 0..ticks {
         for (at, source) in installs.iter().filter(|(at, _)| *at == tick) {
-            let receipt = rules.set(source, *at)?;
+            let receipt = rules.set_allowing_no_op(source, *at, true)?;
             library.add(source);
             scripts.push(ScriptSwap {
                 tick: *at,

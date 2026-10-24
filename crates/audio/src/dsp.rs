@@ -96,10 +96,14 @@ impl BusMixer {
             g_master: db_to_linear(crate::GAIN_MASTER_DB),
         }
     }
-    /// One frame: gained sum + master, hard-clipped to [-1,1] (rodio clip).
+    /// One frame: gained sum + master, then the soft ceiling (SW110). The
+    /// old hard clamp turned every sample past full scale into a square edge;
+    /// [`crate::limiter::soft_ceiling`] bends the last 5 % below -0.1 dBFS
+    /// instead, stateless, so the block and scalar paths stay bit-identical.
     pub fn render_frame(&self, sfx: f32, music: f32, dlg: f32) -> f32 {
-        ((sfx * self.g_sfx + music * self.g_music + dlg * self.g_dlg) * self.g_master)
-            .clamp(-1.0, 1.0)
+        crate::limiter::soft_ceiling(
+            (sfx * self.g_sfx + music * self.g_music + dlg * self.g_dlg) * self.g_master,
+        )
     }
     /// Mix three equal-or-longer buses into master; length = shortest input.
     /// The plain loop stays because a measured 4-wide blocked spike with
@@ -121,6 +125,11 @@ impl BusMixer {
         for i in 0..n {
             out.push(self.render_frame(sfx[i], music[i], dlg[i]));
         }
+        // SW110: every frame already passed the soft ceiling in
+        // `render_frame`, and the block path must stay bit-identical to this
+        // one (`pf5_block_matches_scalar_bit_identical`), so no stateful
+        // limiter runs here: the lookahead stage belongs to the device block,
+        // where it can carry its delay and gain across buffers.
     }
     /// Mix three buses into a new master buffer. Allocates: offline use
     /// only, the callback reuses a buffer through [`Self::mix_into`].

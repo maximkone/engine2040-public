@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-engine-assets = { path = "C:/engine2040/crates/assets", features = ["import", "registry"] }
-engine-anim = { path = "C:/engine2040/crates/anim" }
-engine-scene = { path = "C:/engine2040/crates/scene" }
+engine-assets = { path = "../../../../crates/assets", features = ["import", "registry"] }
+engine-anim = { path = "../../../../crates/anim" }
 gltf = "1"
 
 [[bin]]

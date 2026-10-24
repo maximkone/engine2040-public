@@ -21,10 +21,10 @@ mod worker;
 pub(crate) use verbs::RulesSlot;
 #[cfg(feature = "rules")]
 pub use verbs::{
-    RulesExplainArgs, RulesExplainOutput, RulesExplainTool, RulesGetArgs, RulesGetTool,
-    RulesScriptOutput, RulesSetArgs, RulesSetOutput, RulesSetTool, RulesTestArgs, RulesTestOutput,
-    RulesTestTool, RulesUndoArgs, RulesUndoTool, TOOL_RULES_EXPLAIN, TOOL_RULES_GET,
-    TOOL_RULES_SET, TOOL_RULES_TEST, TOOL_RULES_UNDO,
+    set_approval_hash, RulesApproval, RulesExplainArgs, RulesExplainOutput, RulesExplainTool,
+    RulesGetArgs, RulesGetTool, RulesScriptOutput, RulesSetArgs, RulesSetOutput, RulesSetTool,
+    RulesTestArgs, RulesTestOutput, RulesTestTool, RulesUndoArgs, RulesUndoTool,
+    TOOL_RULES_EXPLAIN, TOOL_RULES_GET, TOOL_RULES_SET, TOOL_RULES_TEST, TOOL_RULES_UNDO,
 };
 
 /// Pack name.
@@ -55,7 +55,7 @@ pub fn pack() -> Result<PackDef, PackError> {
         pack.add(VerbSpec::of::<RulesSetTool>(
             TOOL_RULES_SET,
             PACK,
-            CapabilityCard::Observe,
+            CapabilityCard::Commit,
         )?);
         pack.add(VerbSpec::of::<RulesTestTool>(
             TOOL_RULES_TEST,
