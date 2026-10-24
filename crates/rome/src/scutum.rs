@@ -28,6 +28,12 @@ use crate::{int, only, LoadError, Measure};
 
 /// The condition of a whole part of a shield, in per mille.
 const WHOLE: u32 = 1000;
+/// Most letters one boss takes: the row's cap of 24 strokes (KIT4).
+pub const MAX_PUNCH_LETTERS: usize = 24;
+/// Magic of a shield's save image (`SCUT`).
+const SAVE_MAGIC: [u8; 4] = *b"SCUT";
+/// Version of the save image's layout: a reader must know it.
+const SAVE_VERSION: u16 = 1;
 
 /// How the plank layers of a shield are joined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,6 +352,21 @@ pub enum ShieldError {
     },
     /// The boards are split: the shield is lost and no cover saves it.
     Split,
+    /// A stroke carried a byte outside the Latin capitals and the space.
+    NotALatinCapital {
+        /// The byte the punch was handed.
+        letter: u8,
+    },
+    /// The boss is full: the cap of letters is already punched in.
+    InscriptionFull {
+        /// How many strokes one boss takes.
+        cap: usize,
+    },
+    /// Save bytes that carry no shield.
+    BadSave {
+        /// The byte the reader stopped at.
+        at: usize,
+    },
 }
 
 impl fmt::Display for ShieldError {
@@ -355,6 +376,13 @@ impl fmt::Display for ShieldError {
                 write!(f, "the work needs {needed} {}, {held} at hand", part.name())
             }
             Self::Split => write!(f, "the boards are split: the shield is lost"),
+            Self::NotALatinCapital { letter } => {
+                write!(f, "{letter} is not a Latin capital")
+            }
+            Self::InscriptionFull { cap } => {
+                write!(f, "the boss is full: {cap} letters")
+            }
+            Self::BadSave { at } => write!(f, "the save carries no shield at byte {at}"),
         }
     }
 }
@@ -443,6 +471,95 @@ pub struct Shield {
     hits: u32,
     marks: Vec<Mark>,
     split: bool,
+    inscription: Punched,
+}
+
+/// The letters punched into a shield's boss, one stroke per letter, no heap:
+/// the owner's name, as on the Tyne boss of Junius Dubitatus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Punched {
+    letters: [u8; MAX_PUNCH_LETTERS],
+    len: u8,
+}
+
+impl Punched {
+    /// No stroke yet: a shield out of the workshop carries no name.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            letters: [0; MAX_PUNCH_LETTERS],
+            len: 0,
+        }
+    }
+
+    /// How many strokes are punched in.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        usize::from(self.len)
+    }
+
+    /// No stroke is punched in.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The letters as text, in the order they were punched.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // Only Latin capitals and the space are written, so the slice is UTF-8.
+        core::str::from_utf8(&self.letters[..self.len()]).unwrap_or("")
+    }
+
+    /// Punch one letter: one stroke of the hammer.
+    ///
+    /// Latin capitals `A..=Z` and the space take. The space is a stroke of its
+    /// own, as the word gap in a boss name was punched like a letter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ShieldError::NotALatinCapital`] for any other byte and
+    /// [`ShieldError::InscriptionFull`] once [`MAX_PUNCH_LETTERS`] strokes are
+    /// in. A refused stroke leaves the boss as it was.
+    pub fn punch(&mut self, letter: u8) -> Result<(), ShieldError> {
+        if !(letter.is_ascii_uppercase() || letter == b' ') {
+            return Err(ShieldError::NotALatinCapital { letter });
+        }
+        let len = usize::from(self.len);
+        if len >= MAX_PUNCH_LETTERS {
+            return Err(ShieldError::InscriptionFull {
+                cap: MAX_PUNCH_LETTERS,
+            });
+        }
+        self.letters[len] = letter;
+        self.len = u8::try_from(len + 1).unwrap_or(u8::MAX);
+        Ok(())
+    }
+}
+
+/// Take `count` bytes at the cursor, moving it; a cut-short image refuses.
+fn take<'b>(bytes: &'b [u8], at: &mut usize, count: usize) -> Result<&'b [u8], ShieldError> {
+    let end = at
+        .checked_add(count)
+        .ok_or(ShieldError::BadSave { at: *at })?;
+    let slice = bytes
+        .get(*at..end)
+        .ok_or(ShieldError::BadSave { at: *at })?;
+    *at = end;
+    Ok(slice)
+}
+
+/// One little-endian `u32` field at the cursor.
+fn word(bytes: &[u8], at: &mut usize) -> Result<u32, ShieldError> {
+    let field = take(bytes, at, 4)?;
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(field);
+    Ok(u32::from_le_bytes(buf))
+}
+
+/// One byte field at the cursor.
+fn byte(bytes: &[u8], at: &mut usize) -> Result<u8, ShieldError> {
+    Ok(take(bytes, at, 1)?[0])
 }
 
 impl Shield {
@@ -470,6 +587,7 @@ impl Shield {
             hits: 0,
             marks: Vec::new(),
             split: false,
+            inscription: Punched::empty(),
         })
     }
 
@@ -564,6 +682,105 @@ impl Shield {
         &self.marks
     }
 
+    /// Punch one letter into the boss: one stroke per letter.
+    ///
+    /// # Errors
+    ///
+    /// As [`Punched::punch`]: a byte outside the Latin capitals and the space,
+    /// or a stroke past [`MAX_PUNCH_LETTERS`].
+    pub fn punch(&mut self, letter: u8) -> Result<(), ShieldError> {
+        self.inscription.punch(letter)
+    }
+
+    /// The owner's name on the boss, in the order the strokes were made. The
+    /// look draws it; this module holds it.
+    #[must_use]
+    pub fn inscription(&self) -> &str {
+        self.inscription.as_str()
+    }
+
+    /// The shield as save bytes: magic, version, the wear and the hits, the
+    /// split, the punched letters, then every mark. The same shield writes the
+    /// same bytes, and [`Shield::from_bytes`] gives the shield back.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&SAVE_MAGIC);
+        out.extend_from_slice(&SAVE_VERSION.to_le_bytes());
+        out.extend_from_slice(&self.cover.to_le_bytes());
+        out.extend_from_slice(&self.boards.to_le_bytes());
+        out.extend_from_slice(&self.hits.to_le_bytes());
+        out.push(u8::from(self.split));
+        out.push(self.inscription.len);
+        out.extend_from_slice(&self.inscription.letters[..self.inscription.len()]);
+        let count = u32::try_from(self.marks.len()).unwrap_or(u32::MAX);
+        out.extend_from_slice(&count.to_le_bytes());
+        for mark in &self.marks {
+            out.extend_from_slice(&mark.cell.to_le_bytes());
+            out.push(match mark.kind {
+                MarkKind::Tear => 0,
+                MarkKind::Gash => 1,
+                MarkKind::Split => 2,
+            });
+        }
+        out
+    }
+
+    /// Read a shield back from [`Shield::to_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ShieldError::BadSave`] when the bytes are no shield: a wrong
+    /// magic or version, a field cut short, a stroke the punch would refuse, a
+    /// mark kind it does not know, or bytes left over at the end.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ShieldError> {
+        let mut at = 0usize;
+        if take(bytes, &mut at, SAVE_MAGIC.len())? != SAVE_MAGIC {
+            return Err(ShieldError::BadSave { at: 0 });
+        }
+        if take(bytes, &mut at, 2)? != SAVE_VERSION.to_le_bytes() {
+            return Err(ShieldError::BadSave { at: 4 });
+        }
+        let cover = word(bytes, &mut at)?;
+        let boards = word(bytes, &mut at)?;
+        let hits = word(bytes, &mut at)?;
+        let split = byte(bytes, &mut at)? != 0;
+        let len = usize::from(byte(bytes, &mut at)?);
+        if len > MAX_PUNCH_LETTERS {
+            return Err(ShieldError::BadSave { at: at - 1 });
+        }
+        let mut inscription = Punched::empty();
+        let strokes = at;
+        for letter in take(bytes, &mut at, len)? {
+            if inscription.punch(*letter).is_err() {
+                return Err(ShieldError::BadSave { at: strokes });
+            }
+        }
+        let count = word(bytes, &mut at)?;
+        let mut marks = Vec::new();
+        for _ in 0..count {
+            let cell = word(bytes, &mut at)?;
+            let kind = match byte(bytes, &mut at)? {
+                0 => MarkKind::Tear,
+                1 => MarkKind::Gash,
+                2 => MarkKind::Split,
+                _ => return Err(ShieldError::BadSave { at: at - 1 }),
+            };
+            marks.push(Mark { cell, kind });
+        }
+        if at != bytes.len() {
+            return Err(ShieldError::BadSave { at });
+        }
+        Ok(Self {
+            cover,
+            boards,
+            hits,
+            marks,
+            split,
+            inscription,
+        })
+    }
+
     /// The drawn shield: the marks a renderer paints.
     #[must_use]
     pub fn drawing(&self, spec: &Scutum<'_>) -> Drawing {
@@ -588,6 +805,8 @@ impl Shield {
         hasher.write_u32(self.boards);
         hasher.write_u32(self.hits);
         hasher.write_bool(self.split);
+        hasher.write_len(self.inscription.len());
+        hasher.write_str(self.inscription.as_str());
         for mark in &self.marks {
             hasher.write_u32(mark.cell);
             hasher.write_len(mark.kind.as_str().len());
@@ -939,5 +1158,95 @@ mod tests {
         let text = Scutum::SHIPPED.replace("plank_layers = 2", "plank_layer = 2");
         let error = Scutum::parse(&text).expect_err("a key the crate does not read");
         assert!(error.to_string().contains("plank_layer"), "{error}");
+    }
+
+    /// The owner's name on the Tyne boss of Junius Dubitatus, one stroke per letter.
+    const TYNE_BOSS: &str = "IVL DVBITATI";
+
+    #[test]
+    fn punch_strokes_spell_the_tyne_boss_name() {
+        let scutum = spec();
+        let (mut shield, _parts) = shield(&scutum);
+        assert_eq!(shield.inscription(), "", "a new shield carries no mark");
+        assert_eq!(
+            TYNE_BOSS.len(),
+            12,
+            "the boss name is 12 strokes, the space one of them"
+        );
+        for (stroke, letter) in TYNE_BOSS.bytes().enumerate() {
+            assert!(
+                shield.punch(letter).is_ok(),
+                "stroke {stroke} ({letter}) must take"
+            );
+        }
+        assert_eq!(
+            shield.inscription(),
+            TYNE_BOSS,
+            "the strokes spell the name"
+        );
+    }
+
+    #[test]
+    fn punch_refuses_a_letter_outside_latin_capitals() {
+        let scutum = spec();
+        let (mut shield, _parts) = shield(&scutum);
+        for letter in [b'i', b'1', b'.', 0xC3, b'@', b'\n'] {
+            assert!(
+                matches!(
+                    shield.punch(letter),
+                    Err(ShieldError::NotALatinCapital { letter: seen }) if seen == letter
+                ),
+                "{letter} is outside the Latin capitals"
+            );
+        }
+        assert_eq!(shield.inscription(), "", "a refused stroke punches nothing");
+        shield.punch(b'A').expect("a Latin capital takes");
+        assert_eq!(shield.inscription(), "A", "the refusals were the letters");
+    }
+
+    #[test]
+    fn punch_refuses_the_twenty_fifth_letter() {
+        let scutum = spec();
+        let (mut shield, _parts) = shield(&scutum);
+        for _ in 0..MAX_PUNCH_LETTERS {
+            shield.punch(b'I').expect("the cap of letters fits");
+        }
+        assert_eq!(shield.inscription().len(), MAX_PUNCH_LETTERS, "24 strokes");
+        assert!(
+            matches!(
+                shield.punch(b'I'),
+                Err(ShieldError::InscriptionFull { cap }) if cap == MAX_PUNCH_LETTERS
+            ),
+            "the 25th stroke is refused by the cap"
+        );
+        assert_eq!(
+            shield.inscription().len(),
+            MAX_PUNCH_LETTERS,
+            "the refused stroke punched nothing"
+        );
+    }
+
+    #[test]
+    fn punch_save_round_trips_byte_equal() {
+        let scutum = spec();
+        let (mut shield, _parts) = shield(&scutum);
+        for letter in TYNE_BOSS.bytes() {
+            shield.punch(letter).expect("the name takes");
+        }
+        shield.hit(&scutum);
+        shield.hit(&scutum);
+        let bytes = shield.to_bytes();
+        let loaded = Shield::from_bytes(&bytes).expect("the save reads back");
+        assert_eq!(
+            loaded, shield,
+            "the save keeps the wear, the marks and the name"
+        );
+        assert_eq!(loaded.inscription(), TYNE_BOSS, "the name rides the save");
+        assert_eq!(loaded.to_bytes(), bytes, "the save round-trips byte equal");
+        assert_eq!(loaded.hash(), shield.hash(), "the digest rides the save");
+        assert!(
+            Shield::from_bytes(&bytes[..bytes.len() - 1]).is_err(),
+            "a truncated save is refused"
+        );
     }
 }

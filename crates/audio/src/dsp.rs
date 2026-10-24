@@ -96,10 +96,15 @@ impl BusMixer {
             g_master: db_to_linear(crate::GAIN_MASTER_DB),
         }
     }
-    /// One frame: gained sum + master, hard-clipped to [-1,1] (rodio clip).
+    /// One frame: gained sum + master, then the soft ceiling (SW110). The
+    /// old hard clamp turned every sample past full scale into a square edge;
+    /// [`crate::limiter::soft_ceiling`] bends the last 20 % below -0.1 dBFS
+    /// instead, and the block limiter in [`Self::mix_into_scalar`] holds the
+    /// ceiling over a burst.
     pub fn render_frame(&self, sfx: f32, music: f32, dlg: f32) -> f32 {
-        ((sfx * self.g_sfx + music * self.g_music + dlg * self.g_dlg) * self.g_master)
-            .clamp(-1.0, 1.0)
+        crate::limiter::soft_ceiling(
+            (sfx * self.g_sfx + music * self.g_music + dlg * self.g_dlg) * self.g_master,
+        )
     }
     /// Mix three equal-or-longer buses into master; length = shortest input.
     /// The plain loop stays because a measured 4-wide blocked spike with
@@ -121,6 +126,12 @@ impl BusMixer {
         for i in 0..n {
             out.push(self.render_frame(sfx[i], music[i], dlg[i]));
         }
+        // SW110: the block limiter over the summed master. It is created per
+        // block so a replay of the same block is the same bytes; the units
+        // above the ceiling are held by the lookahead and the gain recovers
+        // over its release, so eight fighters plus the crowd do not crack.
+        let mut limiter = crate::limiter::Limiter::new(self.sample_rate);
+        limiter.process(out.as_mut_slice());
     }
     /// Mix three buses into a new master buffer. Allocates: offline use
     /// only, the callback reuses a buffer through [`Self::mix_into`].
