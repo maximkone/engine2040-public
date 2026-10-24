@@ -77,6 +77,13 @@ pub(super) fn forward_sun_enabled() -> bool {
     FORWARD_SUN_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Flip the sun depth switch and return the value it held (the undo value).
+/// Caller: `Presenter::set_pass` (`sun_shadow`), the door's render steer.
+/// Units boolean in and out. Presentation only, never hashed.
+pub(super) fn set_forward_sun_enabled(on: bool) -> bool {
+    FORWARD_SUN_ENABLED.swap(on, core::sync::atomic::Ordering::Relaxed)
+}
+
 /// How `encode_forward` draws the sky for one frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SkyPlan {
@@ -337,6 +344,13 @@ impl Presenter {
         &mut self,
         frame: &FrameCamera,
     ) -> Result<LookPassReceipt, PresentError> {
+        // Each submitter below times its own submit plus readback wait, and a
+        // queue still holding the last frame's draws makes the first of them
+        // read that frame's GPU time as its own (2026-10-24: sky=16 ms for a
+        // few-KB copy). Drain once so every probe row times only itself. A
+        // probe frame blocks by design, so the drain costs nothing extra.
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        self.frame_waits.waits = self.frame_waits.waits.saturating_add(1);
         let frame_uniform = self.look_frame();
         let cam = self.look_cam();
         // RL8: the RA1 skybox plus the RL2 ambient read the same bound
@@ -366,6 +380,7 @@ impl Presenter {
         )
         .map_err(layer_err)?;
         self.particles.step(particles_gpu::TICK_DT);
+        self.set_vfx_camera(frame);
         // QL12: the pool's live set is staged as flipbook instances under the
         // frame camera; the frame records the draw into its HDR pass
         // (`encode_forward`), so the particle row is a device pass instead of
@@ -808,6 +823,14 @@ impl Presenter {
             None
         };
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // The sprite and ribbon passes fade against this depth (group 1):
+        // rebuilt with the targets, never per frame.
+        self.particle_sub
+            .bind_depth(crate::vfx_soft::vfx_depth_bind(&self.device, &depth_view));
+        self.trail_sub
+            .bind_depth(crate::vfx_soft::vfx_depth_bind(&self.device, &depth_view));
+        self.creates.bind_group();
+        self.creates.bind_group();
         let gtao = self
             .gtao_gpu
             .sized(&self.device, &depth_view, &ao_view, width, height);
@@ -841,6 +864,8 @@ impl Presenter {
         // and neutral uniform written above), so the fog-off branches
         // below need no reset upload until a tranche dirties the pair.
         self.fog_pair_dirty = false;
+        // SW150: the outline chain sizes with the frame, beside these targets.
+        self.ensure_outline(width, height);
     }
 
     /// Pick each draw's forward bind group for the frame: its resident
@@ -980,6 +1005,7 @@ impl Presenter {
         self.material_scratch.clear();
         for (index, item) in list.items.iter().enumerate() {
             let kind = self.material_kind(item.mesh);
+            let param = self.material_param(item.mesh, kind);
             let mat_u =
                 v1::build_material(&item.material).map_err(|e| PresentError::InvalidDraw {
                     index,
@@ -996,7 +1022,7 @@ impl Presenter {
             // encoded.
             self.require_draw_textures(item, index)?;
             self.material_scratch
-                .extend_from_slice(&mat_u.to_array_with_kind(kind, kind.default_param()));
+                .extend_from_slice(&mat_u.to_array_with_kind(kind, param));
             self.material_scratch
                 .resize((index + 1) * MATERIAL_STRIDE, 0);
         }
@@ -1179,8 +1205,15 @@ impl Presenter {
         } else {
             resolve_sky_plan(capture_sky_decision(), look.sky, msaa_pair.is_some())
         };
+        // The sprite and ribbon passes read the stored depth to fade softly
+        // against bodies and the floor; the 4x path keeps no 1x depth, so
+        // they draw without the fade there (see `vfx_soft`).
+        let vfx_reads_depth = msaa_pair.is_none()
+            && ((look.particles && self.particle_sub.staged_count() > 0)
+                || self.trail_sub.has_draw());
         let keep_depth = debug.is_some()
             || look.keep_depth
+            || vfx_reads_depth
             || (self.decal_sub.has_splat_draw() && msaa_pair.is_none());
         let depth_store = if debug.is_some() || forward_depth_should_store(keep_depth, sky_plan) {
             wgpu::StoreOp::Store
@@ -1333,6 +1366,16 @@ impl Presenter {
         if debug.is_some() {
             return false;
         }
+        // RL64: the staged impostor crowd records into this pass, after the
+        // meshes and before the sky; the pass shape picks the pipeline.
+        if look.draws {
+            let shape = if msaa_pair.is_some() {
+                crate::impostor_gpu::PassShape::ForwardMsaa
+            } else {
+                crate::impostor_gpu::PassShape::Forward1x
+            };
+            self.impostor_sub.encode_draw(&mut rp, shape);
+        }
         if sky_plan == SkyPlan::InPass {
             // The sky entries read only the fog uniform; any forward bind
             // group carries it (the dynamic material offset is unused).
@@ -1362,14 +1405,95 @@ impl Presenter {
         // HDR load pass, so the quads land in the picture the blit and the
         // capture read. A frame that staged no batch records nothing.
         if look.particles && self.particle_sub.staged_count() > 0 {
+            self.particle_sub
+                .set_depth_valid(&self.queue, msaa_pair.is_none());
             self.encode_particle_pass(enc, targets, look.particle_timestamps);
         }
         // LF14: the sword ribbon composites in its own HDR load pass after the
         // sparks; a frame that staged no strip records nothing.
         if self.trail_sub.has_draw() {
+            self.trail_sub
+                .set_depth_valid(&self.queue, msaa_pair.is_none());
             self.encode_trail_pass(enc, targets);
         }
+        // SW150: the locked target's screen-space x-ray outline over the depth
+        // this frame just wrote, so a fighter behind the sand berm still reads as
+        // a dim warm edge. A frame with no target, the potato tier, or a debug
+        // capture records nothing.
+        if debug.is_none() {
+            self.encode_outline(enc, targets, list);
+        }
         sky_timed
+    }
+
+    /// SW150: (re)build the outline chain when the frame size or the quality
+    /// tier changed; `None` on the potato tier, which draws no outline. Called
+    /// from [`Self::ensure_targets`], so both the live and the capture path
+    /// size it once per resize.
+    pub(super) fn ensure_outline(&mut self, width: u32, height: u32) {
+        let plan = crate::outline::outline_plan(self.quality, width, height, 1);
+        let stale = self
+            .outline
+            .as_ref()
+            .is_none_or(|chain| chain.mask_size() != plan.mask_size);
+        if !plan.enabled || !stale {
+            return;
+        }
+        self.outline =
+            crate::outline::gpu::OutlineGpu::new(&self.device, self.quality, width, height);
+        if let Some(chain) = self.outline.as_ref() {
+            chain.upload_mesh(&self.queue);
+        }
+    }
+
+    /// SW150: encode the locked target's outline over `targets`' depth. Nothing
+    /// happens until a target is locked through [`Self::set_outline_target`].
+    pub(super) fn encode_outline(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        list: &DrawList,
+    ) {
+        let (Some(chain), Some(target)) = (self.outline.as_ref(), self.outline_target) else {
+            return;
+        };
+        let eye = list.camera.pos_m;
+        let target_point = [
+            eye[0] + list.camera.forward[0],
+            eye[1] + list.camera.forward[1],
+            eye[2] + list.camera.forward[2],
+        ];
+        let Some(view) = crate::outline::OutlineView::new(
+            eye,
+            target_point,
+            list.camera.fov_y_rad,
+            list.camera.aspect,
+            list.camera.near_m,
+            list.camera.far_m,
+        ) else {
+            return;
+        };
+        chain.encode(
+            &self.device,
+            &self.queue,
+            enc,
+            &crate::outline::gpu::OutlineFrame {
+                view: &view,
+                prefill: &targets.depth_view,
+                prefill_size: [targets.width, targets.height],
+                targets: &[target],
+            },
+        );
+    }
+
+    /// Lock (or clear) the fighter the outline draws: the render side's one
+    /// input for SW150. `None` records no outline on the next frame.
+    pub fn set_outline_target(&mut self, target: Option<crate::outline::OutlineTarget>) {
+        self.outline_target = target;
+        // A lock after a tier change gets the tier's chain, and the potato tier
+        // gets none at all.
+        let (width, height) = self.swap.size();
+        self.ensure_outline(width, height);
     }
 
     /// The staged sword ribbon as its own render pass after forward: loads the
@@ -3068,6 +3192,9 @@ mod forward_id_attachment_tests {
 
 #[cfg(test)]
 mod sun_live_tests;
+
+#[cfg(test)]
+mod blit_live_tests;
 
 #[cfg(test)]
 mod eg8_capture_sky_tests {

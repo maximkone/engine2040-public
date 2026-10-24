@@ -38,17 +38,20 @@ use engine_game::arena_kit::{
 };
 use engine_game::break_window::BreakScene;
 use engine_game::camera::{free_cam_step, CameraMode, DirectorParams};
+use engine_game::camera_frame::framing::Framing;
 use engine_game::camera_wish::{ground_forward, world_wish};
 use engine_game::capture;
 use engine_game::console::DevConsole;
 use engine_game::crash;
 use engine_game::feel_view::FeelView;
+#[cfg(feature = "live")]
+use engine_game::live_knobs::LiveKnobs;
 use engine_game::fight_ring::{ring_prop_row, ring_wall_row};
 use engine_game::fighter_look::{look_down_deg, shot_for_frame, CamFollow, FighterLook, LookFrame};
 use engine_game::flow::{Flow, FlowEvent};
 use engine_game::fps_view::{LegionaryKit, LegionaryView};
 use engine_game::input::{map_key, map_mouse};
-use engine_game::lock_on::nearest_rival_facing;
+use engine_game::lock_on::{lock_on_forward, nearest_rival_facing, LOCK_ON_RANGE_M};
 use engine_game::modes::{rank_modes, validate_request, AdapterMode, DisplayMode, SwapRequest};
 use engine_game::mouse_raw::MouseRaw;
 use engine_game::practice::PracticeSwap;
@@ -122,9 +125,14 @@ static NV_OPTIMUS_ENABLEMENT: u32 = 1;
 static AMD_POWER_XPRESS_REQUEST_HIGH_PERFORMANCE: u32 = 1;
 
 mod arena_args;
+mod arena_audit;
 mod arena_capture;
+mod arena_fight_keys;
 mod arena_frame;
 mod arena_net;
+/// The window's scene desk: the seat's `scene` and `steer` lines (rows SP62, EG35).
+#[path = "arena_frame/scene.rs"]
+mod arena_scene;
 mod arena_winit;
 mod frame_timing;
 mod headless;
@@ -134,7 +142,8 @@ use arena_capture::capture::{
     setup_capture, split_chart_args, split_reference_args, CaptureSlot,
 };
 use frame_timing::{
-    check_exit_wall_deadline, duration_us, frame_pacer, frame_trace_path, write_frame_times_csv,
+    check_exit_wall_deadline, duration_us, frame_pacer, frame_trace_path, probe_cadence,
+    probes_for_frame, report_frame_budget, write_frame_times_csv,
 };
 use headless::split_plain_headless;
 
@@ -187,6 +196,10 @@ const SPEAR_FLAG: &str = "--spear";
 /// `--spear-demo`: `--spear` plus a script for the human slot that walks at the nearest
 /// fighter and throws whenever the spear is ready (captures, trying the grapple hands-off).
 const SPEAR_DEMO_FLAG: &str = "--spear-demo";
+/// `--showcase`: the tour of every system the arena plays (`docs/plan/showcase.md`): spear
+/// and height armed, a script drives the human slot station by station against a training
+/// dummy, the title carries each station's caption and the exit prints the grades.
+const SHOWCASE_FLAG: &str = "--showcase";
 /// `--speed-demo`: fly or drive ever faster over a generated terrain and cut towers in half
 /// with a giant sword (docs/SPRINT-33-speed-demo.md). Presentation only.
 const SPEED_DEMO_FLAG: &str = "--speed-demo";
@@ -202,13 +215,10 @@ const LEGIONARY_FLAG: &str = "--legionary";
 /// The key that swaps the legionary mode between the eye and the fight
 /// camera: V (the view key). Presentation only; the simulation never reads it.
 const LEGIONARY_VIEW_KEY: winit::keyboard::KeyCode = winit::keyboard::KeyCode::KeyV;
-/// The eye's own-body rule: the near clip of the first person camera, in
-/// meters. The wearer's own head and shoulders sit inside this radius, so
-/// the clip keeps the body out of the picture instead of showing the inside
-/// of the skull. The table-driven rule (hide distance and near clip from one
-/// table) belongs to the no-clip view row; this constant is the coarse
-/// version that lets the mode be watched today.
-const LEGIONARY_EYE_NEAR_M: f32 = 0.30;
+/// The near clip of the first person camera, in meters. The wearer's own head is hidden from its
+/// own eye (`FighterLook::set_pov_slot`), so the plane no longer has to stand past it; the view law
+/// (`ViewLaws::note_frame_pov`) fails the run when the plane still cuts own geometry.
+const LEGIONARY_EYE_NEAR_M: f32 = engine_game::fps_view::pov::EYE_NEAR_M;
 /// Prefix of the one line [`VIEW_LINE_FLAG`] prints, mirrored by
 /// `engine_endpoint`'s view host.
 const VIEW_LINE_PREFIX: &str = "arena view-line: ";
@@ -225,6 +235,8 @@ const HOT_RELOAD_POLL_EVERY_FRAMES: u16 = 30;
 /// Flag that fails the run when any presented frame shows no fighter (the
 /// camera once looked at bare sand for half a perf run, 2026-10-11).
 const REQUIRE_FRAMING_FLAG: &str = "--require-framing";
+/// Fails an `--exit` run whose p99 frame interval is over the potato budget.
+const POTATO_BUDGET_FLAG: &str = "--potato-budget";
 
 /// `--no-break-look`: the center crate stays out of the picture (no whole crate, no debris).
 /// The sim breaks it either way; presentation only (RZ4w).
@@ -236,97 +248,6 @@ const NO_RAGDOLL_FLAG: &str = "--no-ragdoll";
 
 /// The exact stop line a smoke greps: `paused tick=<N>`, no other tokens.
 const PAUSE_LINE_PREFIX: &str = "paused tick=";
-
-/// What the fight camera showed over a run: frames tallied, frames with no
-/// fighter in the picture (and the first), the fewest fighters seen, the
-/// steepest look down and how many drawn bodies wore the hit tint (a red
-/// strobe at the start of an 8-fighter run, 2026-10-11). Tallied only while
-/// the fighter look draws.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Framing {
-    frames: u32,
-    empty: u32,
-    first_empty: Option<u32>,
-    fewest: usize,
-    steepest_deg: f32,
-    bodies: u32,
-    tinted: u32,
-    /// Fighters in the match the tally was taken over (`0` until counted).
-    fighters: usize,
-    /// Fewest fighters the look had folded at any tallied frame.
-    fewest_seen: usize,
-}
-
-impl Default for Framing {
-    fn default() -> Self {
-        Self {
-            frames: 0,
-            empty: 0,
-            first_empty: None,
-            fewest: usize::MAX,
-            steepest_deg: f32::MIN,
-            bodies: 0,
-            tinted: 0,
-            fighters: 0,
-            fewest_seen: usize::MAX,
-        }
-    }
-}
-
-impl Framing {
-    fn note(&mut self, frame: u32, in_view: usize, down_deg: f32) {
-        self.frames += 1;
-        if in_view == 0 {
-            self.empty += 1;
-            self.first_empty.get_or_insert(frame);
-        }
-        self.fewest = self.fewest.min(in_view);
-        self.steepest_deg = self.steepest_deg.max(down_deg);
-    }
-
-    /// One frame's `(tinted, drawn)` bodies from the look.
-    fn note_tint(&mut self, (tinted, drawn): (usize, usize)) {
-        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-        self.tinted = self.tinted.saturating_add(count(tinted));
-        self.bodies = self.bodies.saturating_add(count(drawn));
-    }
-
-    /// One frame's denominator: the fighters in the match and how many of
-    /// them the look had folded, so `fewest_in_view` reads against a count.
-    fn note_count(&mut self, fighters: usize, seen: usize) {
-        self.fighters = self.fighters.max(fighters);
-        self.fewest_seen = self.fewest_seen.min(seen);
-    }
-
-    /// The `arena framing:` receipt line; `None` when nothing was tallied.
-    /// `fighters=` and `seen=` ride only once counted: `fewest_in_view` of 2
-    /// is fine out of 2 and a fault out of 8.
-    fn line(&self) -> Option<String> {
-        (self.frames > 0).then(|| {
-            let first = self.first_empty.map_or_else(|| "-".to_string(), |f| f.to_string());
-            let share = f64::from(self.tinted) / f64::from(self.bodies.max(1));
-            let counted = if self.fighters > 0 {
-                format!(" fighters={} seen={}", self.fighters, self.fewest_seen)
-            } else {
-                String::new()
-            };
-            format!(
-                "arena framing: frames={}{counted} empty={} first_empty={first} fewest_in_view={} steepest_down_deg={:.1} tinted_share={share:.2}",
-                self.frames, self.empty, self.fewest, self.steepest_deg
-            )
-        })
-    }
-
-    /// Why `--require-framing` fails this run; `None` when every tallied
-    /// frame showed a fighter.
-    fn failure(&self) -> Option<String> {
-        let first = self.first_empty?;
-        Some(format!(
-            "{} of {} frames showed no fighter (first at frame {first})",
-            self.empty, self.frames
-        ))
-    }
-}
 
 /// Steps to run this frame: the accumulator count, plus one warmup tick on
 /// the first shown frame. The first redraw buffers about 12 ms for 0 steps,
@@ -494,13 +415,16 @@ fn observe_tick_with_sim(
     hp: &[u16],
     cues: &[FightCue],
     lands: &[engine_arena::FallLanding],
+    press: (&[u8], &engine_arena::LiveMatch),
 ) {
     // FEEL7: the views are the tick's pre-step positions, so the authority's
     // landing row starts the squash on the very tick the fall table charged;
     // the view tracking still catches any landing the row does not name.
     look.observe_landings(tick, views);
     look.observe_landing_rows(tick, lands);
-    look.observe_tick(tick, views, hp, cues);
+    // EG19c: the swing clip starts on the press tick (`AttackStarted`) and its
+    // impact frame meets the blow; the match supplies each weapon's startup.
+    look.observe_tick_pressed(tick, views, hp, cues, press.0, Some(press.1));
 }
 
 /// Deterministic draw order for the submit: opaque draws sort by mesh then
@@ -665,11 +589,13 @@ fn run(raw: &[String]) -> i32 {
     let (staged, raw) = split_staged_flag(raw);
     let (look_probes, raw) = arena_args::split_flag(&raw, LOOK_PROBES_FLAG);
     let (require_framing, raw) = arena_args::split_flag(&raw, REQUIRE_FRAMING_FLAG);
+    let (potato_budget, raw) = arena_args::split_flag(&raw, POTATO_BUDGET_FLAG);
     let (no_break_look, raw) = arena_args::split_flag(&raw, NO_BREAK_LOOK_FLAG);
     let (no_ragdoll, raw) = arena_args::split_flag(&raw, NO_RAGDOLL_FLAG);
     let (play, raw) = arena_args::split_flag(&raw, PLAY_FLAG);
     let (spear, raw) = arena_args::split_flag(&raw, SPEAR_FLAG);
     let (spear_demo, raw) = arena_args::split_flag(&raw, SPEAR_DEMO_FLAG);
+    let (showcase, raw) = arena_args::split_flag(&raw, SHOWCASE_FLAG);
     let (speed_demo, raw) = arena_args::split_flag(&raw, SPEED_DEMO_FLAG);
     let (nyc, raw) = arena_args::split_flag(&raw, "--nyc");
     let (height, raw) = arena_args::split_flag(&raw, HEIGHT_FLAG);
@@ -695,7 +621,12 @@ fn run(raw: &[String]) -> i32 {
             tell!("arena: {VIEW_LINE_FLAG} folds a bout; {AGENT_SEAT_FLAG} plays a window; they do not mix");
             return 2;
         }
-        let fold = engine_game::fighter_look::FighterLook::view_run_detail(seed, ticks, fighters);
+        // `--showcase` folds the window's own tour (spear, height, kit world, the dummy).
+        let fold = if showcase {
+            engine_game::fighter_look::FighterLook::view_run_showcase_detail(seed, ticks)
+        } else {
+            engine_game::fighter_look::FighterLook::view_run_detail(seed, ticks, fighters)
+        };
         return match fold {
             Ok((line, pop)) => {
                 say!("{VIEW_LINE_PREFIX}{line}");
@@ -727,6 +658,17 @@ fn run(raw: &[String]) -> i32 {
                 2
             }
         };
+    }
+    // Scene report flags (rows SP62, EG35): `--scene-report` plays a bout with no window.
+    let (scene_flags, raw) = match arena_scene::split_flags(&raw) {
+        Ok(split) => split,
+        Err(err) => {
+            tell!("arena: {err}");
+            return 2;
+        }
+    };
+    if let Some(request) = scene_flags.report {
+        return arena_scene::run_report(request, showcase, agent_seat.is_some(), scene_flags.shot);
     }
     // A seat has no Enter key: arming one starts the bout, like `--play`.
     // The legionary mode starts the duel too: the player is slot 0 and the
@@ -764,6 +706,15 @@ fn run(raw: &[String]) -> i32 {
             return 2;
         }
     };
+    // RL40: the time of day, set before the presenter bakes its sky.
+    let (sun_elev, raw) = match arena_args::split_sun_elev(&raw) {
+        Ok(split) => split,
+        Err(err) => {
+            tell!("arena: {err}");
+            return 2;
+        }
+    };
+    engine_render::arena_day::set_sun_elevation_override(sun_elev);
     let (reference_args, raw) = match split_reference_args(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -790,13 +741,14 @@ fn run(raw: &[String]) -> i32 {
     if agent_seat.is_some()
         && (staged
             || spear_demo
+            || showcase
             || net.is_some()
             || capture_flags
                 .as_ref()
                 .is_some_and(|flags| flags.tape.is_some()))
     {
         tell!(
-            "arena: {AGENT_SEAT_FLAG} owns slot 0; --staged-fight, --spear-demo, --tape and --host/--join do not mix"
+            "arena: {AGENT_SEAT_FLAG} owns slot 0; --staged-fight, --spear-demo, --showcase, --tape and --host/--join do not mix"
         );
         return 2;
     }
@@ -827,8 +779,10 @@ fn run(raw: &[String]) -> i32 {
     // human slot: no staged script, no spear demo, no capture tape.
     let (config, spear) = match net.as_ref().map(|net| net.session(config, spear)) {
         None => (config, spear),
-        Some(_) if staged || spear_demo => {
-            tell!("arena: --host/--join play live; --staged-fight and --spear-demo do not mix");
+        Some(_) if staged || spear_demo || showcase => {
+            tell!(
+                "arena: --host/--join play live; --staged-fight, --spear-demo and --showcase do not mix"
+            );
             return 2;
         }
         Some(Ok(session)) => session,
@@ -842,8 +796,14 @@ fn run(raw: &[String]) -> i32 {
     }
     // `--headless`: play the plain session with no window, or refuse a flag
     // whose promise needs the window (the helper owns the message).
-    let window_only =
-        play || staged || spear_demo || speed_demo || spear || height || view_brief.is_some();
+    let window_only = play
+        || staged
+        || spear_demo
+        || showcase
+        || speed_demo
+        || spear
+        || height
+        || view_brief.is_some();
     if let Some(code) = headless_gate(headless, window_only, config, &args, &capture_flags) {
         return code;
     }
@@ -898,6 +858,7 @@ fn run(raw: &[String]) -> i32 {
     };
     app.staged = staged.then(StagedTally::default);
     app.pause_at_tick = pause_at_tick;
+    app.desk.scene_at = scene_flags.at;
     app.step_mode = step_mode;
     for key in held_keys {
         app.set_pressed(key, true);
@@ -906,12 +867,14 @@ fn run(raw: &[String]) -> i32 {
         return code;
     }
     app.look_probes = Presenter::look_probes_for_capture(look_probes, app.capture.is_some());
+    app.look_probes_flag = look_probes;
     app.require_framing = require_framing;
-    if play && app.flow == Flow::Title {
+    app.potato_budget = potato_budget;
+    if (play || showcase) && app.flow == Flow::Title {
         app.flow = app.flow.on(FlowEvent::Start);
         app.last = Instant::now();
     }
-    if let Err(err) = app.enable_spear(spear, spear_demo, height) {
+    if let Err(err) = app.enable_spear(spear || showcase, spear_demo, height || showcase) {
         tell!("arena: {SPEAR_FLAG}/{HEIGHT_FLAG}: {err}");
         return 2;
     }
@@ -929,11 +892,15 @@ fn run(raw: &[String]) -> i32 {
     }
     // A script that owns slot 0 must say so: the keys are read but ignored, and
     // without the line the bout looks like a broken controller.
-    app.scripted = match (spear_demo, staged) {
-        (true, _) => Some("script plays you (--spear-demo)"),
-        (false, true) => Some("script plays you (--staged-fight)"),
-        (false, false) => None,
+    app.scripted = match (spear_demo, staged, showcase) {
+        (true, _, _) => Some("script plays you (--spear-demo)"),
+        (false, true, _) => Some("script plays you (--staged-fight)"),
+        (false, false, true) => Some("the showcase tour plays you (--showcase)"),
+        (false, false, false) => None,
     };
+    if showcase && !spear_demo && !staged {
+        app.showcase = Some(engine_game::showcase::Showcase::new(app.config.half_extent_m));
+    }
     if let Some(script) = app.scripted {
         say!("arena: {script}; the keyboard is ignored in this run");
     }
@@ -1070,6 +1037,9 @@ struct ArenaApp {
     legionary: Option<LegionaryMode>,
     /// The first-person eye's trauma: the player's own blows only, decaying between them.
     eye_trauma: engine_game::fps_view::EyeTrauma,
+    /// The first-person eye's mount spring (row POV2): the picture rides the head's eye point,
+    /// the aim ray never does. Presentation only.
+    pov_rig: engine_game::fps_view::pov::PovRig,
     /// Free-fly view pose (view code only: never hashed, never sim input).
     free_cam: DirectorParams,
     /// Raw mouse deltas for the free camera: presentation only.
@@ -1127,8 +1097,10 @@ struct ArenaApp {
     /// Wall us of `fighters_us` spent on the GPU upload half (`v1::upload_mesh`
     /// plus `Presenter::upload_mesh` per part). Zero until a skinned tick lands.
     fighters_upload_us: u64,
-    /// `--look-probes`: run the blocking look probes in the window.
+    /// Probes armed: `--look-probes` or a capture (the sidecar needs sky_ms).
     look_probes: bool,
+    /// `--look-probes` itself; a capture alone probes only the frames it saves.
+    look_probes_flag: bool,
     /// VS7: the night preset is on (the moonlit rig, the torches burn).
     /// Off by default, so the day frame stays byte-equal.
     night: bool,
@@ -1137,6 +1109,8 @@ struct ArenaApp {
     torch_actors: Option<Vec<engine_game::arena_kit::KitActor>>,
     /// `--require-framing`: a frame with no fighter in the picture fails.
     require_framing: bool,
+    /// `--potato-budget`: a p99 interval over the budget fails the run.
+    potato_budget: bool,
     /// What the fight camera showed (the `arena framing:` line).
     framing: Framing,
     /// The drawn bodies' view laws (the `arena view:` line).
@@ -1163,6 +1137,8 @@ struct ArenaApp {
     window_focused: bool,
     /// Whether the window was occluded at the last frame.
     window_occluded: bool,
+    /// The pad layer: focus loss cuts its motors and pauses a pulled pad (UIX14).
+    pad_state: engine_game::pad::PadState,
     /// How the window fills the screen (F11 flips it). Presentation only:
     /// the sim, the tape and the state hash never see it.
     window_mode: arena_frame::WindowMode,
@@ -1187,6 +1163,11 @@ struct ArenaApp {
     /// Feel flow (GF2/GF3): hit-stop, slow-mo and camera shake from the
     /// tick cues, stepped once per presented frame (presentation only).
     feel: FeelView,
+    /// Live tuning (SW32): the dev's rebuilt knob dylib, polled on the content
+    /// poll's 30-frame boundary and applied to this frame's camera. Off unless
+    /// `E2040_LIVE_TUNE` names a built artifact; presentation only.
+    #[cfg(feature = "live")]
+    live: LiveKnobs,
     /// The spear grapple: on or off, scripted or not, and its picture.
     spear: SpearMode,
     /// The speed demo (`--speed-demo`): its world, movers, sword and cut pieces.
@@ -1196,6 +1177,8 @@ struct ArenaApp {
     /// Set when a script owns the human slot (`--spear-demo`, `--staged-fight`):
     /// the title says so, because the keys then do nothing.
     scripted: Option<&'static str>,
+    /// The showcase tour (`--showcase`): owns the human slot and the rival dummy.
+    showcase: Option<engine_game::showcase::Showcase>,
     /// Which way the live camera looks on the floor (unit `[x, z]`), as the last presented frame
     /// left it: W walks along it ([`engine_game::camera_wish`]). `None` before the first frame,
     /// so the keys keep their world axes until a camera exists. View-side only: the sim sees
@@ -1208,6 +1191,8 @@ struct ArenaApp {
     /// The agent seat of `--agent-seat <PORT>`: a loopback client authors the
     /// human slot and reads each fixed tick's hash. `None` keeps the keyboard.
     seat: Option<Seat>,
+    /// The scene desk: camera pin, steer undo stack, `--scene-at` ticks.
+    desk: arena_scene::Desk,
     /// The presentation pacer: the window presents one frame per slot, so
     /// it never outruns the display.
     pacer: arena_frame::FixedDtPacer,
@@ -1223,7 +1208,7 @@ struct ArenaApp {
 fn live_session(config: GameConfig, spear: bool, height: bool) -> Result<App, WinError> {
     let mut app = App::with_world(config, kit_match_world_or_empty())?.into_duel()?;
     if spear {
-        app = app.into_spear()?;
+        app = app.into_spear()?.into_noose()?;
     }
     Ok(if height { app.into_height()? } else { app })
 }
@@ -1322,6 +1307,8 @@ impl ArenaApp {
             cam_mode: CameraMode::Director,
             legionary: None,
             eye_trauma: engine_game::fps_view::EyeTrauma::default(),
+            pov_rig: engine_game::fps_view::pov::PovRig::new(Default::default())
+                .map_err(|err| WinError::Render(format!("first person rig: {err:?}")))?,
             free_cam: DirectorParams::arena(),
             mouse_raw: MouseRaw::new(),
             result_announced: false,
@@ -1348,6 +1335,7 @@ impl ArenaApp {
             fighters_pose_us: 0,
             fighters_upload_us: 0,
             look_probes: Presenter::look_probes_for_capture(false, capture_armed),
+            look_probes_flag: false,
             night: engine_game::windowed::night_enabled(
                 std::env::var(engine_game::windowed::NIGHT_ENV)
                     .ok()
@@ -1355,6 +1343,7 @@ impl ArenaApp {
             ),
             torch_actors: engine_game::arena_kit::kit_actors().ok(),
             require_framing: false,
+            potato_budget: false,
             framing: Framing::default(),
             view: ViewLaws::default(),
             view_brief: None,
@@ -1366,6 +1355,7 @@ impl ArenaApp {
             frame_trace_path: frame_trace_path(),
             window_focused: true,
             window_occluded: false,
+            pad_state: engine_game::pad::PadState::new(),
             window_mode: arena_frame::WindowMode::Windowed,
             last_frame_split: arena_frame::FrameSplit::default(),
             // OPT27: the 4 GB, 32-layer local model at 60 Hz. A refused
@@ -1384,14 +1374,18 @@ impl ArenaApp {
             practice: PracticeSwap::new(),
             bout_tape: Vec::new(),
             feel: FeelView::new(),
+            #[cfg(feature = "live")]
+            live: LiveKnobs::from_env(),
             spear: SpearMode::default(),
             speed: None,
             height: false,
             scripted: None,
+            showcase: None,
             view_forward: None,
             title_hint: None,
             net: None,
             seat: None,
+            desk: arena_scene::Desk::default(),
             pacer: frame_pacer(args.fixed_dt_ms),
             fixed_dt_ticks: args.fixed_dt_ms.is_some(),
         };
@@ -1450,26 +1444,6 @@ impl ArenaApp {
         }
     }
 
-    /// The input with the throw bits set while the spear keys are held and the grapple is on. Q
-    /// throws at the fighters; Q with E throws at the world, so the spear passes them and sticks
-    /// in arena geometry (the wall swing). The sim masks both bits when the match was built
-    /// without a spear, so this never changes an old match.
-    fn with_spear_key(&self, mut input: FighterInput) -> FighterInput {
-        let q = PhysicalButton::Key(engine_input::map::Key::Q.0);
-        if self.spear.on && self.pressed.contains(&q) {
-            let e = PhysicalButton::Key(engine_input::map::Key::E.0);
-            let world = if self.pressed.contains(&e) {
-                engine_input::fighter::THROW_SPEAR_WORLD
-            } else {
-                0
-            };
-            input.buttons = engine_input::Buttons(
-                input.buttons.0 | engine_input::fighter::THROW_SPEAR | world,
-            );
-        }
-        input
-    }
-
     /// Swap the staged leg onto its receipt session (empty world under rules
     /// v1, what `staged_fight.exe` builds) so the window replays its pinned
     /// fight. Reports a rebuild failure; `None` when not staged or it landed.
@@ -1521,6 +1495,18 @@ impl ArenaApp {
         tell!("arena: {err}");
         self.failure = Some(code);
         event_loop.exit();
+    }
+
+    /// One presented frame of the feel flow. The feel runs on its own fixed
+    /// 60 Hz clock, so a stop lasts the same wall time on any monitor; a
+    /// fixed-dt run steps it once per frame.
+    fn step_feel(&mut self, elapsed_ms: f64) {
+        let feel_ms = if self.pause_at_tick.is_some() || self.fixed_dt_ticks {
+            WIN_FIXED_DT_S * 1000.0
+        } else {
+            elapsed_ms
+        };
+        self.feel.step_ms(feel_ms);
     }
 
     /// Fixed ticks owed for `elapsed_ms` of wall time. A window that cannot
@@ -1671,7 +1657,7 @@ impl ArenaApp {
         if let Some(err) = self.net_fatal() {
             return self.fail(event_loop, err, 2);
         }
-        self.feel.step();
+        self.step_feel(elapsed_ms);
         self.refresh_title_hint();
         if self.ticks_done >= self.config.ticks {
             self.flow = self.flow.on(FlowEvent::MatchOver);
@@ -1752,6 +1738,9 @@ impl ArenaApp {
         self.report_speed_demo();
         if let Some(line) = self.view.line() {
             say!("{line}");
+            if let Some(pov) = self.view.pov_line() {
+                say!("{pov}");
+            }
             // The worst pop of the run, named: which slot, which joint, when,
             // and how far the joint missed its prediction (AM24).
             if let Some(pop) = self.view.pop_detail() {
@@ -1801,6 +1790,20 @@ impl ArenaApp {
         }
     }
 
+    /// The spear, showcase and break scenes' exit receipt lines, when each ran.
+    fn report_scenes(&self) {
+        if let Some(scene) = self.spear.scene.as_ref() {
+            say!("{}", scene.look().receipt_line());
+        }
+        if let Some(show) = self.showcase.as_ref() {
+            say!("{}", show.receipt_line());
+        }
+        if let Some(scene) = self.break_scene.as_ref() {
+            say!("{}", scene.receipt_line());
+            say!("{}", scene.stats().receipt_line());
+        }
+    }
+
     /// Exit-run receipts: smoke line, timed lines, capture manifest plus
     /// per-pass sidecar, staged-fight receipt, then leave the loop.
     fn finish_exit(&mut self, event_loop: &ActiveEventLoop) {
@@ -1846,18 +1849,14 @@ impl ArenaApp {
             }
         }
         say!("{}", self.frame_split_line());
+        let probed = self.look_probes_flag;
+        report_frame_budget(&self.interval_us, probed, self.potato_budget, &mut self.failure);
         say!("{}", self.feel.line());
         if let Some(line) = self.framing.line() {
             say!("{line}");
         }
         self.report_view();
-        if let Some(scene) = self.spear.scene.as_ref() {
-            say!("{}", scene.look().receipt_line());
-        }
-        if let Some(scene) = self.break_scene.as_ref() {
-            say!("{}", scene.receipt_line());
-            say!("{}", scene.stats().receipt_line());
-        }
+        self.report_scenes();
         if let Some(mut out) = self.view_brief.take() {
             if let Err(err) = out.flush() {
                 tell!("arena: {VIEW_BRIEF_FLAG}: {err}");
@@ -1870,6 +1869,9 @@ impl ArenaApp {
             self.failure = Some(1);
         }
         if let Some(line) = self.per_pass_line() {
+            say!("{line}");
+        }
+        if let Some(line) = self.presenter.as_ref().and_then(Presenter::upscale_receipt) {
             say!("{line}");
         }
         if let Some(code) = self.report_waits() {
@@ -1914,6 +1916,21 @@ impl ArenaApp {
         matches!(err, PresentError::Validation(msg) if msg == "surface acquire failed")
     }
 
+    /// Live tuning (SW32): one poll of the knob dylib on the same 30-frame
+    /// boundary as the content poll, so a rebuild costs one `fs::metadata` per
+    /// poll and shows within half a second. A fresh generation logs its knobs
+    /// and drives this frame's camera; a refused one keeps last-good and logs
+    /// its reason once. Presentation only: the sim never reads a knob.
+    #[cfg(feature = "live")]
+    fn poll_live_tune(&mut self) {
+        if self.live.poll().is_some() {
+            say!("arena live tune applied {}", self.live.line());
+        }
+        if let Some(reason) = self.live.take_error() {
+            say!("arena live tune kept last-good reason={reason}");
+        }
+    }
+
     /// Hot reload (EG29 slice 1): poll the watcher every
     /// [`HOT_RELOAD_POLL_EVERY_FRAMES`] presented frames and settle staged
     /// generations at this boundary with the tick stamped.
@@ -1929,6 +1946,8 @@ impl ArenaApp {
         {
             return;
         }
+        #[cfg(feature = "live")]
+        self.poll_live_tune();
         let events = self.watcher.poll();
         let frame = self.frames_presented;
         let report = settle_paths(
@@ -2031,6 +2050,11 @@ impl ArenaApp {
         // VS7: the night preset drops the sun and the placement's torch
         // actors burn, so the torches carry the picture. Off by default: the
         // day frame keeps the built-in light pair and stays byte-equal.
+        if !self.night {
+            // RL40: the day rig's sun (direction, colour, strength) in place
+            // of the default scene's, so the light and the sky agree.
+            engine_game::arena_kit::torch_feed::apply_day_sun(&mut list);
+        }
         if self.night {
             if let Some(presenter) = self.presenter.as_mut() {
                 if let Some(actors) = self.torch_actors.as_ref() {
@@ -2058,18 +2082,22 @@ impl ArenaApp {
         self.fighters_us = self
             .fighters_us
             .saturating_add(duration_us(fighters_started.elapsed()));
-        // Free-fly overrides the fight camera while the mode is on: the look
-        // clears and re-aims `list.camera`, so this must run after it. View
-        // only; the default director run leaves the camera untouched.
-        if let Some(scene) = self.spear.scene.as_ref() {
-            scene.frame(&mut list.camera);
+        // The tethered pair is framed by the fight camera itself (`camera_frame`), however high
+        // the rope throws it; nothing here moves the camera but the hit shake and the live boom.
+        #[cfg(feature = "live")]
+        {
+            let tune = self.live.tune();
+            list.camera.eye = tune
+                .boom_eye(list.camera.eye.to_array(), list.camera.target.to_array())
+                .into();
+            self.feel.set_shake_scale(tune.shake_scale);
         }
         self.feel.shake_camera(&mut list.camera);
         // The legionary mode: the player's eye takes the frame while the first
         // person view is on. It runs before the walking heading is read, so
         // WASD walks where the player looks. Presentation only; the sim never
         // reads the camera.
-        self.aim_legionary_eye(&mut list);
+        let pov_view = self.aim_legionary_eye(&mut list);
         // WASD walk where the camera looks: the heading of the shot the player
         // sees, read before the free-fly override (that one inspects, it does
         // not steer).
@@ -2078,6 +2106,7 @@ impl ArenaApp {
             cursor::take_look(&mut self.mouse_raw, &mut self.free_cam);
             self.aim_free_cam(&mut list);
         }
+        self.apply_pin(&mut list);
         self.push_speed_demo(&mut list);
         // The debug-draw knob (C13): the live fighters' hurt capsules plus a
         // facing line under the final camera. Off stages nothing, so the
@@ -2088,6 +2117,7 @@ impl ArenaApp {
         // listener, so a blow on the left of the picture sounds on the left.
         self.audio_space
             .follow_camera(list.camera.eye.to_array(), list.camera.target.to_array());
+        self.serve_desk(&list);
         let receipt = {
             let Some(presenter) = self.presenter.as_mut() else {
                 self.fail(
@@ -2110,6 +2140,11 @@ impl ArenaApp {
                 // C13 hud phase: overlay rows and HP bars staged before submit.
                 let _span = span(Phase::Hud);
                 engine_game::console::overlay::stage_hud(presenter, &overlay, &self.console, bars);
+                if pov_view {
+                    // The first person's centre reticle, over the bars.
+                    let _ =
+                        engine_game::fps_view::pov::stage_reticle(presenter, list.camera.aspect);
+                }
             }
             // PQ18 stage three: the frame submits its present call now. Only a
             // frame with an accepted tick stamps, so an idle frame never reads
@@ -2117,6 +2152,15 @@ impl ArenaApp {
             if self.latency.is_waiting() {
                 self.latency.note_present_submitted(Instant::now());
             }
+            // A capture-only run probes just the frame it saves.
+            let capture_due = self.capture.as_ref().is_some_and(|slot| {
+                slot.sink.should_capture(self.frames_presented.saturating_add(1))
+            });
+            presenter.set_look_probes(probes_for_frame(
+                self.look_probes_flag,
+                self.capture.is_some(),
+                capture_due,
+            ));
             // C13 present phase: the submit and the present call for this
             // frame, through the receipt handling below.
             let _present_span = span(Phase::Present);
@@ -2212,11 +2256,11 @@ impl ArenaApp {
             let frame = LookFrame {
                 fighters: usize::from(self.config.fighters),
                 alpha: self.last_alpha,
-                shot: shot_for_frame(
+                shot: self.desk.steer.director_shot().unwrap_or(shot_for_frame(
                     self.frames_presented,
                     self.args.frames,
                     self.args.camera_path.is_some(),
-                ),
+                )),
                 frame: self.frames_presented,
             };
             // Reuse the last skinned draws when the pose tick is unchanged:
@@ -2271,6 +2315,7 @@ impl ArenaApp {
                 self.framing
                     .note_count(frame.fighters, look.fighters_seen(frame.fighters));
                 self.framing.note_tint(look.tinted(frame.fighters));
+                self.framing.note_shot(look.frame_verdict(&self.cam_follow, &list.camera, &frame));
             }
             let t = look.sim_time(frame.alpha);
             // Frame fields (camera, bounds, sand, cover) are per present; joint
@@ -2370,16 +2415,8 @@ impl ArenaApp {
                 let Some(png) = out.png.as_ref() else {
                     return;
                 };
-                if let Some(slot) = self.capture.as_mut() {
-                    let (sink, tap) = (&mut slot.sink, &mut slot.look_tap);
-                    if let Err(err) = sink.write_frame_with_hook(
-                        tick,
-                        hash,
-                        png,
-                        Some(&mut |bytes| tap.note(bytes)),
-                    ) {
-                        self.fail(event_loop, WinError::Render(capped(&err.to_string())), 1);
-                    }
+                if let Err(err) = arena_audit::write_frame(self, tick, hash, png, &list.camera) {
+                    self.fail(event_loop, WinError::Render(capped(&err.to_string())), 1);
                 }
             }
             Err(err) => self.fail(event_loop, WinError::Present(err), 1),
@@ -2467,7 +2504,13 @@ impl ArenaApp {
     /// by the camera's heading. Buttons, facing, tick and slot pass through,
     /// and with no heading yet the whole input does.
     fn camera_relative(&self, input: FighterInput) -> FighterInput {
-        let Some(forward) = self.view_forward else {
+        // In a fight (fight camera on, a living rival within LOCK_ON_RANGE_M) the keys turn by
+        // the line to the rival, not the shot: the director's cuts flipped them ("left is right").
+        let (me, app) = (input.fighter.0, &self.app);
+        let locked = (self.cam_mode != CameraMode::Free)
+            .then(|| lock_on_forward(me, app.fighter_views(), app.hp(), LOCK_ON_RANGE_M))
+            .flatten();
+        let Some(forward) = locked.or(self.view_forward) else {
             return input;
         };
         let (mx, mz) = world_wish(forward, (input.mx, input.mz));
@@ -2500,7 +2543,9 @@ impl ArenaApp {
             .then(|| arena_frame::rival_hint(self.app.fighter_views(), self.app.human_slot()))
             .flatten();
         let mut parts = Vec::new();
-        if let Some(script) = self.scripted {
+        if let Some(show) = self.showcase.as_ref() {
+            parts.push(show.caption().to_string());
+        } else if let Some(script) = self.scripted {
             parts.push(script.to_string());
         }
         if let Some(speed) = speed_label(self.clock.speed_permille()) {
@@ -2585,68 +2630,6 @@ impl ArenaApp {
         mode.view = mode.view.toggled();
         let line = mode.line();
         say!("{line}");
-    }
-
-    /// Aim the frame at the player's eye while the legionary mode plays in
-    /// first person: the eye pose over the human slot's feet, the eye-space
-    /// trauma kick folded in and the render camera built from it. The lens
-    /// and the far plane stay the ones of the frame it replaces, so the
-    /// third person toggle changes the place and nothing else.
-    /// Presentation only: the simulation, the tape and every hash are
-    /// untouched. Returns `true` when the frame camera moved to the eye.
-    fn aim_legionary_eye(&mut self, list: &mut DrawList) -> bool {
-        if self.cam_mode == CameraMode::Free {
-            return false;
-        }
-        let Some(mode) = self.legionary.as_ref() else {
-            return false;
-        };
-        if mode.view != LegionaryView::Eye {
-            return false;
-        }
-        let slot = self.app.human_slot();
-        let Some(view) = self.app.fighter_views().iter().find(|one| one.slot == slot) else {
-            return false;
-        };
-        // Only the blows the player is in, decaying between ticks: every cue in the arena for
-        // one tick snapped the view in a crowded fight (see `EyeTrauma`).
-        let trauma = self
-            .eye_trauma
-            .feed(self.ticks_done, &self.tick_scratch.cues, slot);
-        let eye = match engine_game::fps_view::legionary_eye(
-            view.pos_m,
-            view.yaw,
-            trauma,
-            self.ticks_done,
-        ) {
-            Ok(eye) => eye,
-            Err(err) => {
-                tell!("arena: legionary eye: {err}");
-                return false;
-            }
-        };
-        let mut camera = match engine_game::fps_view::camera_for_eye(
-            &eye,
-            list.camera.fov_y,
-            list.camera.aspect,
-        ) {
-            Ok(camera) => camera,
-            Err(err) => {
-                tell!("arena: legionary camera: {err}");
-                return false;
-            }
-        };
-        // The near clip sits past the wearer's own head, so the body never
-        // shows from the inside, and the far plane stays the one of the frame
-        // this camera replaces.
-        camera.near = LEGIONARY_EYE_NEAR_M;
-        camera.far = list.camera.far;
-        if let Err(err) = camera.validate() {
-            tell!("arena: legionary camera: {err}");
-            return false;
-        }
-        list.camera = camera;
-        true
     }
 
     /// The presentation camera keys: C flies the free camera, V swaps the
@@ -2734,16 +2717,13 @@ impl ArenaApp {
         ) {
             Ok(mut presenter) => {
                 // The live frame never waits on the GPU: fog is a fragment
-                // function and the probes are off. `--look-probes` or an
-                // armed capture brings the blocking probes back, spaced out
-                // so they hitch rarely; the capture sidecar needs measured
-                // sky_ms on the reference 300-frame run.
-                presenter.set_look_probes(Presenter::look_probes_for_capture(
-                    self.look_probes,
-                    self.capture.is_some(),
-                ));
-                presenter.set_probe_every(LOOK_PROBE_EVERY);
-                presenter.set_fog_every(LIVE_FOG_EVERY);
+                // function. `--look-probes` brings the blocking probes back,
+                // spaced out; a capture alone probes only the frames it saves.
+                presenter.set_look_probes(self.look_probes_flag);
+                let (probe, fog) =
+                    probe_cadence(self.look_probes_flag, LOOK_PROBE_EVERY, LIVE_FOG_EVERY);
+                presenter.set_probe_every(probe);
+                presenter.set_fog_every(fog);
                 // EG13/LF5d: 4x MSAA ships on (the calmer sand-edge pick);
                 // `E2040_MSAA=0` is the explicit 1x opt-out and `1` repeats
                 // the default.
@@ -4041,7 +4021,7 @@ mod tests {
     /// The live arena session (seed 2040, two fighters, the kit world) with
     /// the host's pad out of the picture, room for a few seconds of play and
     /// tick 0 already run idle (the fighters' places exist after a tick).
-    fn walking_session() -> ArenaApp {
+    pub(crate) fn walking_session() -> ArenaApp {
         let args = WinArgs::parse(&strings(&["arena", "--frames", "400", "--exit"]))
             .expect("smoke args parse");
         let config = GameConfig {
@@ -4060,7 +4040,7 @@ mod tests {
         app.app.fighter_views()[usize::from(slot)].pos_m
     }
 
-    fn key(code: engine_input::map::Key) -> PhysicalButton {
+    pub(crate) fn key(code: engine_input::map::Key) -> PhysicalButton {
         PhysicalButton::Key(code.0)
     }
 
@@ -4285,42 +4265,6 @@ mod tests {
         assert_ne!(old.stuck.first(), Some(&Some(1)), "and it misses the rival");
         assert_eq!(old.tethered, None, "so no tether forms with them");
     }
-    #[test]
-    fn q_throws_at_the_rival_and_q_with_e_aims_the_world() {
-        // The aim: a duel can reach a wall behind the enemy. Q keeps the lock-on throw, Q+E sets
-        // the world bit (the sim flies past fighters), and without the grapple neither bit leaves
-        // the window.
-        use engine_input::fighter::{THROW_SPEAR, THROW_SPEAR_WORLD};
-        use engine_input::map::Key;
-        let mut app = walking_session();
-        app.enable_spear(true, false, false).expect("the grapple turns on");
-        let human = app.human().expect("human slot");
-        app.set_pressed(key(Key::Q), true);
-        let plain = app.human_input(0, human);
-        assert_eq!(plain.buttons.0 & THROW_SPEAR, THROW_SPEAR, "Q throws");
-        assert_eq!(
-            plain.buttons.0 & THROW_SPEAR_WORLD,
-            0,
-            "Q alone aims the foe"
-        );
-        app.set_pressed(key(Key::E), true);
-        let aimed = app.human_input(1, human);
-        assert_eq!(
-            aimed.buttons.0 & (THROW_SPEAR | THROW_SPEAR_WORLD),
-            THROW_SPEAR | THROW_SPEAR_WORLD,
-            "Q+E carries both bits"
-        );
-        let mut off = walking_session();
-        off.set_pressed(key(Key::Q), true);
-        off.set_pressed(key(Key::E), true);
-        let none = off.human_input(0, human);
-        assert_eq!(
-            none.buttons.0 & (THROW_SPEAR | THROW_SPEAR_WORLD),
-            0,
-            "no grapple, no spear bits"
-        );
-    }
-
     #[test]
     fn the_lock_on_sets_only_the_facing_and_the_free_camera_leaves_it_alone() {
         let mut app = walking_session();

@@ -28,6 +28,24 @@ pub(super) fn ibl_cut_word(ibl_on: bool) -> f32 {
     }
 }
 
+/// RL47 A9: the unit direction toward the sun in a frame's 32-byte light
+/// image (`LightU`: `dir_to_light` in the first three words), or `None` for a
+/// short image or a direction with no length. The look tranche (GTAO, decals,
+/// the fog tint, the skybox sample) reads this one sun, so it never lights a
+/// frame from a sun the picture does not have. Pure. Caller:
+/// `write_frame_uniforms`.
+#[must_use]
+pub(super) fn sun_from_light_bytes(light: &[u8]) -> Option<[f32; 3]> {
+    let word = |i: usize| {
+        light
+            .get(i * 4..i * 4 + 4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let d = [word(0)?, word(1)?, word(2)?];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    (len.is_finite() && len > 1e-6).then(|| [d[0] / len, d[1] / len, d[2] / len])
+}
+
 /// What one look-toggle set switches in the window's live frame besides the
 /// sky (`live_sky_should_draw` owns that row), one field per look pass the
 /// live encode can really remove. A pass with no field (decals, particles,
@@ -225,8 +243,77 @@ impl Presenter {
 
 #[cfg(test)]
 mod live_look_tests {
-    use super::{ibl_cut_word, LiveLook, IBL_CUT_OFFSET};
+    use super::{ibl_cut_word, sun_from_light_bytes, LiveLook, IBL_CUT_OFFSET};
     use crate::pass_truth::LookToggles;
+
+    fn light_image(dir: [f32; 3]) -> Vec<u8> {
+        let mut bytes: Vec<u8> = dir.iter().flat_map(|c| c.to_le_bytes()).collect();
+        bytes.resize(32, 0);
+        bytes
+    }
+
+    #[test]
+    fn the_sun_of_a_light_image_is_its_unit_direction_or_nothing() {
+        // Caller: `write_frame_uniforms`. Behavior: the real arena sun comes
+        // back at unit length; a short image or a zero direction is refused so
+        // the last good sun stays.
+        let real = crate::arena_day::ARENA_DAY_SUN_DIR;
+        let sun = sun_from_light_bytes(&light_image(real)).expect("the arena sun reads");
+        let len = (sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]).sqrt();
+        assert!((len - 1.0).abs() < 1e-6, "unit length, got {len}");
+        let real_len = (real[0] * real[0] + real[1] * real[1] + real[2] * real[2]).sqrt();
+        for c in 0..3 {
+            assert!(
+                (sun[c] - real[c] / real_len).abs() < 1e-6,
+                "axis {c}: {sun:?}"
+            );
+        }
+        assert_eq!(sun_from_light_bytes(&light_image([0.0; 3])), None);
+        assert_eq!(sun_from_light_bytes(&[0u8; 8]), None, "short image");
+        assert_eq!(
+            sun_from_light_bytes(&light_image([f32::NAN, 0.0, 1.0])),
+            None
+        );
+    }
+
+    #[test]
+    fn the_look_tranche_reads_the_sun_the_last_frame_was_lit_by() {
+        // Caller: `look_frame` (GTAO, decals, fog tint, skybox sample). Behavior:
+        // before any frame it is the arena day sun at unit length, not the old
+        // [0.3, 1.0, 0.2]; after a frame is staged it is that frame's light.
+        let mut presenter = match super::Presenter::init_offscreen() {
+            Ok(p) => p,
+            Err(super::PresentError::NoAdapter) => {
+                crate::test_gpu::note_skip(
+                    "the_look_tranche_reads_the_sun_the_last_frame_was_lit_by",
+                    "no wgpu adapter on this machine",
+                );
+                return;
+            }
+            Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
+        };
+        let day = crate::arena_day::ARENA_DAY_SUN_DIR;
+        let day_len = (day[0] * day[0] + day[1] * day[1] + day[2] * day[2]).sqrt();
+        let first = presenter.look_frame().sun_dir;
+        for c in 0..3 {
+            assert!(
+                (first[c] - day[c] / day_len).abs() < 1e-6,
+                "start {first:?}"
+            );
+        }
+        presenter.write_frame_uniforms(&[0u8; 80], &light_image([2.0, 0.0, 0.0]), true);
+        let after = presenter.look_frame().sun_dir;
+        assert!(
+            (after[0] - 1.0).abs() < 1e-6 && after[1].abs() < 1e-6 && after[2].abs() < 1e-6,
+            "the staged light's direction, unit: {after:?}"
+        );
+        presenter.write_frame_uniforms(&[0u8; 80], &light_image([0.0; 3]), true);
+        assert_eq!(
+            presenter.look_frame().sun_dir,
+            after,
+            "a light with no direction leaves the last sun"
+        );
+    }
 
     #[test]
     fn each_look_row_flips_only_its_own_live_switch() {

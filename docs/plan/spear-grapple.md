@@ -76,7 +76,7 @@ render, audio, HUD) reads only what is listed under "What presentation reads".
 | `SPEAR_RANGE` | 12000 | max flight length (20 ticks) |
 | `THROW_COOLDOWN` | 90 | ticks from the throw until the next throw |
 | `TETHER_COOLDOWN` | 60 | cooldown restarted when a tether ends |
-| `HIT_DAMAGE` | 30 | permille at impact on an enemy (stick) |
+| `HIT_DAMAGE` | 5 | permille at impact on an enemy (stick); low on purpose, the pull is the payoff (steal #12: Overwatch cut its hook from 30 to 5) |
 | `REST` | 1600 | latch distance between the two bodies |
 | `REEL_ACCEL` | 20 | thrower accel toward the enemy before the latch |
 | `CARRY_ACCEL` | 12 | accel of the latched pair toward the goal |
@@ -154,7 +154,7 @@ SpearEvent::Missed   { thrower, why: MissWhy }                         // Range 
 SpearEvent::Deflected{ thrower, victim, parried: bool }
 SpearEvent::TetherPull { thrower, victim: Option<u8>, speed: u16 }     // every 6th tether tick
 SpearEvent::TetherEnd  { thrower, victim: Option<u8>, why: EndWhy, damage_permille: u16 }
-EndWhy = Arrived | Wall | Timeout | Released | Guard | Parry | Down
+EndWhy = Arrived | Wall | Timeout | Released | Guard | Parry | Down | Cut
 ```
 
 Presentation maps these onto audio `FightCue`s and VFX; there is no new
@@ -275,6 +275,137 @@ front of the hooker (not on top of them), and a stun long enough for the free hi
   throw cooldown. SG13 (a blade cuts the rope) is the counter once caught.
 - Hash: a yank tether folds one extra byte `0xA7`; a carry folds as before.
 
-Next: SG10 (the look), SG11 laquearius noose, SG12 retiarius net, SG13 rope cut
-(rows in `docs/SPRINT-08-hard-stuff.md`).
+## Rope cut (row SG13)
+
+Steal #8 of `docs/research/grapple-2026-10-24/02-games.md` (the victim needs an
+escape, or a hook is a free kill) and the "universal counter" of the Rome rows. A
+blade that crosses the live rope ends the tether with `EndWhy::Cut`.
+
+- Check: in `pull`, after the `Down` and `Timeout` ends and before the guard and
+  parry checks, so a yank (whose victim is stunned and cannot guard) is cut too.
+- The rope: the planar segment from the thrower to the victim (a carry; a yank:
+  the planted thrower and the reeled victim) or to the world anchor (`anchor_mm`).
+- The blade: the arena's own mapped sweep, `match_wire::sweep_for_attacker` of the
+  swinger's position and `facing_vector` (base 200 mm to reach 1500 mm along the
+  octant sign), planar. Live while `is_attacking` with `attack_age` from the impact
+  tick (`heft::startup`) for `CUT_LIVE_TICKS` (4) ticks, and only for a swinger that
+  is up (hp above zero, no `react`: the fight cancels the swing of a stunned fighter).
+- Who: every fighter but the thrower (the victim escaping a carry, or a third
+  fighter; a yank victim is stunned, so only a bystander cuts a yank). The thrower
+  has the release press.
+- Geometry: integer segment-to-segment gap, a cut when it is at most the blade half
+  thickness plus 60 mm (`ROPE_HALF_MM`).
+- On the cut: `TetherEnd { why: Cut, damage 0 }`, the spear drops, the throw cooldown
+  restarts, bodies keep their drift (a yank victim stops dead, as on any end).
+- Presentation: `window_audio_space::spear_cue` plays `sever`; `spear_look` drops the
+  spear on any `TetherEnd`; `feel_view` shows nothing for a zero-damage end.
+- Hash: no new bytes (the phase just goes idle). Spear off runs none of this; the
+  golden and every spear-off digest are untouched.
+- Proofs in `crate::spear::tests`: `a_victims_swing_across_the_rope_cuts_a_carry`,
+  `a_third_fighter_cuts_a_yank`, `a_swing_that_misses_the_rope_does_not_cut_it`,
+  `the_throwers_own_swing_does_not_cut_its_rope`,
+  `rope_geometry_crossing_touching_and_missing`.
+
+## Laquearius noose (row SG11)
+
+Isidore (Etymologies 18.56, read in the Latin in `docs/research/grapple-2026-10-24/03-rome.md`)
+has the laquearii throw a noose over men fleeing in the arena, tangle them, then chase them
+down and knock them over with the shield boss. Whether it was a full bout class or a comic
+type is debated; the game takes the text as written. The noose is the second rope weapon of the
+arena: a cord that holds a man in place instead of carrying him, with the fight's own boss push
+as the finisher.
+
+- Opt in: `MatchSpec::noose` (`with_noose()`), independent of `MatchSpec::spear`; the spec
+  identity folds byte `0x4E` only when it is on. Input bit `THROW_NOOSE = 0x80` in the same
+  buttons byte (`0x08` stays unknown: many fixtures use it as the illegal bit). A match without
+  the noose masks the bit out of the latched buttons (`leg_pool`), so a stray press cannot reach
+  the hash, and every digest from before is byte-identical (golden `d57b5c8ae3096614`, the
+  spear-on and spear-off tapes). Window: `Ctrl` throws the noose when the grapple is on
+  (`arena_frame/grapple.rs`); `live_session` arms it with the spear (`App::into_noose`).
+  `Sim::set_noose` refuses past tick 0 and on the Rapier `sim` leg, like the spear.
+- It rides the spear's machinery: one `SpearState`, one phase per slot, one cooldown (90, then
+  60 after an end), the same events, the same `rope_cut`. A loop in the air is a `Flight` with
+  `noose` set; a snare is a `Tether` with `noose` set; a new `EndWhy::Toppled`. A noose-only
+  match (`with_noose()` without `with_spear()`) throws no spears. A second press of the button
+  that threw releases that cord (`Released`).
+- Fold: `0x4E` after a noose flight or snare (a snare adds its cord length), plus one noose block
+  `0x4F` (per-slot press edge and pending push) only while the noose is armed. A spear-only
+  match folds exactly what it did.
+
+Constants (mm, ticks, mm per tick):
+
+| name | value | meaning |
+| --- | --- | --- |
+| `NOOSE_SPEED` / `NOOSE_MAX_TICKS` | 500 / 12 | the loop flies 6 m (spawns 400 ahead, same drop as a spear) |
+| `LOOP_MM` | 150 | the open loop adds this to the body radius (400) when it closes; spear tip 80 on top |
+| `CHASE_MM` | 250 | more on a man whose wish points away from the thrower (wish dot offset > 0) |
+| `SNARE_TICKS` | 90 | ticks before the cord slips off (`Timeout`) |
+| `WALK_PERCENT` | 40 | share of the walk wish a snared man keeps |
+| `SLACK_MM` / `MIN_ROPE_MM` | 100 / 900 | cord = catch gap + slack; never tightens below the floor (outside the 700 mm push reach) |
+| `TUG_MM` / `DRAG_MAX_MM` | 12 / 160 | the pull on a man at the end of the cord; most in one tick |
+| `CATCH_HITSTOP` | 3 | freeze on the catch, ticks |
+
+Rules, per tick, in slot order:
+
+1. Press (rising edge of `THROW_NOOSE`), idle, cooldown 0 (or airborne), can act: a loop leaves
+   the hand along the facing (`Thrown`).
+2. Flight: candidates are the spear's (living, not the thrower, not a teammate, no dodge
+   i-frames) minus any man a cord already holds. Each is cast as the body capsule widened by
+   `LOOP_MM`, and by `CHASE_MM` more when the man is running from the thrower. The nearest wins.
+   A guard facing the thrower turns the loop (`Deflected`, a parry staggers the thrower) through
+   the spear's own check. Geometry stops the loop (`Missed`, nothing anchors); range ends it.
+3. Catch: no damage, hit-stop 3, `Hit` is emitted, the cord is the gap plus 100 mm, and the man
+   keeps his drift at zero.
+4. Before the fight step each tick (`SpearState::prepare`, in the merged row so the hash carries
+   it): a snared man's `DODGE` bit is stripped and his wish scaled to 40 percent. He may block,
+   swing and walk; a guard or a parry does not end a snare (the cord stays on him).
+5. Snare tick (after the down, timeout and cut checks of `tether_ends`): the cord tightens to
+   `min(cord, gap + slack)`, floored at 900. A man whose gap reaches the cord is hauled toward
+   the thrower by what he pulled out plus the tug, at most 160 a tick (`TetherPull` every sixth
+   hauling tick). The thrower is never moved: it walks, closes and fights.
+6. Ends: `Timeout` at 90 snare ticks, `Down` when either side is out, `Released` by a second
+   press, `Cut` when a blade crosses the cord (every fighter but the thrower, the victim too:
+   SG13, the one-slash counter), `Toppled` below. The man stops dead, the cooldown restarts.
+7. A shield push on a snared man: the boss push (rules v2: `ATTACK` + `BLOCK` with a weapon row)
+   reports its landing on `FightState::balance_impulse_q8`, a channel that clears when the next
+   fight step starts, so `prepare` reads it first and remembers it through the push's freeze.
+   When the freeze ends the man is knocked down (`knockdown` set from the tables, attack, dodge
+   and block cleared), the cord comes off (`Toppled`) and `Sim::step_with` appends a real
+   `FightEvent::Knockdown { attacker: thrower, victim }` to the tick's events: the log, the hash,
+   the balance fall and the window's knockdown path treat him like any other. The same push on a
+   free man only staggers him.
+
+Counters: any slash across the cord (SG13), a second press, or close the distance and fight (the
+cord is slack inside its length; the thrower is as free as the victim). A shield held up turns the
+loop before the catch, not after.
+
+Not here: the Rapier `sim` leg refuses; the spine step does not arm it; a LAN room
+(`NetRules::DuelSpear`) has no noose rules yet, so the key is inert there (the sim masks it).
+The cord is one rope per thrower: a slot in a snare cannot throw a spear.
+
+What presentation reads: the same `spear_events()` and `spear_view()`; `Flight::noose` and
+`Tether::noose` pick the look. `spear_look::noose` draws the cord alone, hand to chest, as long
+as the authority's `Tether::rope_mm` (slack while the man is inside it, straight at its end), no
+spear mesh and no towed ragdoll. The toppled man is an ordinary `FightEvent::Knockdown`.
+
+Proofs: `crate::spear::noose::tests`:
+`the_loop_is_wider_than_a_spear_and_wider_again_on_a_man_running_away`,
+`the_loop_flies_six_metres`, `a_catch_snares_and_the_cord_comes_off_after_ninety_ticks`,
+`a_snared_man_cannot_dodge`, `a_snared_man_walks_at_two_fifths_of_a_free_mans_speed`,
+`the_cord_drags_a_man_back_when_he_pulls_away`,
+`the_cord_tightens_as_the_thrower_closes_and_never_lets_out`,
+`a_blocking_man_cannot_shrug_the_cord_off`, `a_shield_push_on_a_snared_man_is_a_knockdown`,
+`a_man_the_push_topples_is_a_knockdown_event_for_the_log_and_the_balance`,
+`a_slash_across_the_cord_cuts_it`, `a_second_press_lets_the_man_go`,
+`a_guard_facing_the_thrower_turns_the_loop_away`, `each_button_throws_its_own_weapon`,
+`noose_off_ignores_the_button_and_latches_nothing`; `live::noose_tests`:
+`noose_duel_600_ticks_digest_identical_twice_and_across_tape_replay`,
+`noose_off_ignores_the_button_and_keeps_the_old_digest`,
+`noose_matches_have_no_snapshot_and_report_their_view`; `spec::tests`:
+`noose_spec_identity_moves_only_when_on`; input `fighter::tests::throw_spear_bit_is_legal`
+(the noose bit is legal); game `arena_frame::grapple::tests`:
+`ctrl_throws_the_noose_and_only_with_the_grapple_on`; `spear_look::noose::tests`.
+
+Next: SG12 retiarius net (its cord reuses the same cut check and the same
+`SpearState` ride; rows in `docs/SPRINT-08-hard-stuff.md`).
 

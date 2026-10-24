@@ -61,11 +61,11 @@ use crate::match_wire;
 use crate::spear;
 use crate::world::MatchWorld;
 use crate::{
-    brain_wish_to_world, canon_zero, crate_seed, fold_rise, fold_world, hash_state_with_sim,
-    interrupt_for_slot, loco_wish, nearest_chunk, spawn_states, strike_pose, wall_limit,
-    yaw_from_centideg, ArenaConfig, ArenaRules, Checkpoint, FighterId, FighterInput, FighterState,
-    FighterTape, AI_PERIOD_TICKS, BALANCE_BODY_MASS_KG, CRATE_CENTER_M, CRATE_HALF_M, CRATE_PIECES,
-    FIGHTER_RADIUS_M, FIGHT_RULES_V2, JUMP_RISE_MM_TICK, MAX_SLOTS,
+    brain_wish_to_world, canon_zero, crate_seed, fold_rise, fold_world, geometry_rules,
+    hash_state_with_sim, interrupt_for_slot, loco_wish, nearest_chunk, spawn_states, strike_pose,
+    wall_limit, yaw_from_centideg, ArenaConfig, ArenaRules, Checkpoint, FighterId, FighterInput,
+    FighterState, FighterTape, AI_PERIOD_TICKS, BALANCE_BODY_MASS_KG, CRATE_CENTER_M, CRATE_HALF_M,
+    CRATE_PIECES, FIGHTER_RADIUS_M, JUMP_RISE_MM_TICK, MAX_SLOTS,
 };
 
 /// One fixed tick in seconds: `1 / TICK_HZ` (pinned by a test).
@@ -163,7 +163,7 @@ impl Core {
             return false;
         }
         self.rules = rules;
-        if rules.version == FIGHT_RULES_V2 {
+        if geometry_rules(rules.version) {
             for (slot, brain) in self.brains.iter_mut().enumerate() {
                 let id = u8::try_from(slot).unwrap_or(u8::MAX);
                 brain.set_personality(Personality::seeded(self.config.seed, id));
@@ -610,7 +610,7 @@ fn sys_inputs(core: &mut Core, _: &mut Ctx) {
 /// own, then every slot's merged intent lands in the AI column.
 fn sys_ai(core: &mut Core, _: &mut Ctx) {
     let n = core.fighters;
-    let v2 = core.rules.version == FIGHT_RULES_V2;
+    let v2 = geometry_rules(core.rules.version);
     let plan = v2.then(|| {
         engage::Plan::build(
             &core.states,
@@ -691,7 +691,7 @@ fn sys_ai(core: &mut Core, _: &mut Ctx) {
 /// balance, poise and match observer tracks read the tick's outcomes.
 fn sys_rules(core: &mut Core, _: &mut Ctx) {
     let n = core.fighters;
-    if core.rules.version == FIGHT_RULES_V2 {
+    if geometry_rules(core.rules.version) {
         // Rules v2: pre-move poses in integer mm, fixed-point facing from
         // the absolute IN1 facing, one blade per slot along it.
         let mut poses = [strike_pose(0, &core.states[0], &core.row[0], 0); MAX_SLOTS];
@@ -910,7 +910,7 @@ fn after_motion(core: &mut Core, n: usize) {
 /// The tick's landed blades as cuts: V2 only, and the kit's own edge wear
 /// reaches the resolver through the fight state (BG15). V1 never cuts.
 fn extract_cuts(core: &mut Core) -> Vec<Cut> {
-    if core.rules.version != FIGHT_RULES_V2 {
+    if !geometry_rules(core.rules.version) {
         return Vec::new();
     }
     let n = core.fighters;
