@@ -6,6 +6,8 @@
 //! Errors: typed decode and build failures, never panics.
 //! Budget: one decision inside 100 micros; tick allocates nothing.
 
+use crate::bt_reactive::{BtRun, Reactive};
+use crate::bt_trace::{BtTrace, Off, Sink, Tap};
 use engine_core::Fnv64;
 
 /// Tree encoding version. One byte, checked on decode.
@@ -233,6 +235,14 @@ pub enum BtNode {
     Sequence(Vec<BtNode>),
     /// Try children in order; succeed fast, propagate `Running`.
     Selector(Vec<BtNode>),
+    /// Reactive sequence: run every child from the first on each tick. A
+    /// failing guard halts the child the node was waiting on, so the next
+    /// tick restarts at child 0. The memory lives in [`BtRun`]; a plain
+    /// [`BtTree::tick`] carries none and so can never abort.
+    ReactiveSequence(Vec<BtNode>),
+    /// Reactive fallback: the mirror image, where a succeeding guard halts
+    /// the child the node was waiting on.
+    ReactiveFallback(Vec<BtNode>),
 }
 
 impl BtNode {
@@ -245,7 +255,10 @@ impl BtNode {
             | BtNode::SetBb { .. }
             | BtNode::AddBb { .. }
             | BtNode::TickGate { .. } => 1,
-            BtNode::Sequence(kids) | BtNode::Selector(kids) => {
+            BtNode::Sequence(kids)
+            | BtNode::Selector(kids)
+            | BtNode::ReactiveSequence(kids)
+            | BtNode::ReactiveFallback(kids) => {
                 let mut total = 1usize;
                 for kid in kids {
                     total = total.saturating_add(kid.node_count());
@@ -264,7 +277,10 @@ impl BtNode {
             | BtNode::SetBb { .. }
             | BtNode::AddBb { .. }
             | BtNode::TickGate { .. } => 1,
-            BtNode::Sequence(kids) | BtNode::Selector(kids) => {
+            BtNode::Sequence(kids)
+            | BtNode::Selector(kids)
+            | BtNode::ReactiveSequence(kids)
+            | BtNode::ReactiveFallback(kids) => {
                 let mut best = 0usize;
                 for kid in kids {
                     let child = kid.depth();
@@ -379,6 +395,11 @@ const TAG_GATE: u8 = 5;
 const TAG_SEQUENCE: u8 = 16;
 /// Byte tag for selector composites.
 const TAG_SELECTOR: u8 = 17;
+/// Byte tag for reactive sequence composites (additive; no shipped tree
+/// encodes it, so their bytes and hashes are unchanged).
+const TAG_REACTIVE_SEQUENCE: u8 = 18;
+/// Byte tag for reactive fallback composites.
+const TAG_REACTIVE_FALLBACK: u8 = 19;
 /// Condition tag for distance at-or-under.
 const COND_DIST_LE: u8 = 0;
 /// Condition tag for distance above.
@@ -468,9 +489,86 @@ impl BtTree {
     /// blackboard writes leave it alone. Empty sequences succeed and
     /// empty selectors fail. Integer math only, no heap use: the
     /// caller owns `bb` and `out_action` across ticks. Units: ticks.
+    /// Determinism: no memory, so a reactive node here always restarts
+    /// at child 0 and can never abort a branch.
     pub fn tick(&self, state: &BtState, bb: &mut BtBlackboard, out_action: &mut u8) -> BtStatus {
-        tick_node(&self.root, state, bb, out_action)
+        let mut run = BtRun::new();
+        let mut off = Off;
+        let mut scratch = Scratch {
+            state,
+            bb,
+            out_action,
+            run: &mut run,
+            sink: &mut off,
+        };
+        tick_node(&self.root, &mut scratch, 0, 0)
     }
+
+    /// [`tick`](Self::tick) carrying a [`BtRun`] across ticks, so a
+    /// [`BtNode::ReactiveSequence`] or [`BtNode::ReactiveFallback`] can
+    /// remember the child it waits on and halt it when a guard flips.
+    /// The memory is caller-owned, allocates nothing and holds no state
+    /// the tree owns. Units: ticks.
+    pub fn tick_run(
+        &self,
+        state: &BtState,
+        bb: &mut BtBlackboard,
+        out_action: &mut u8,
+        run: &mut BtRun,
+    ) -> BtStatus {
+        let mut off = Off;
+        let mut scratch = Scratch {
+            state,
+            bb,
+            out_action,
+            run,
+            sink: &mut off,
+        };
+        tick_node(&self.root, &mut scratch, 0, 0)
+    }
+
+    /// [`tick`](Self::tick) with an optional decision trace. `None` is the
+    /// plain tick; `Some` files one row per visited node under `slot` and
+    /// still allocates nothing. The walker is the same function either way,
+    /// so the trace cannot change a status, an action or a blackboard slot.
+    /// Units: ticks.
+    pub fn tick_with(
+        &self,
+        state: &BtState,
+        bb: &mut BtBlackboard,
+        out_action: &mut u8,
+        slot: u8,
+        trace: Option<&mut BtTrace>,
+    ) -> BtStatus {
+        match trace {
+            Some(trace) => {
+                let mut run = BtRun::new();
+                let mut tap = Tap { trace, slot };
+                let mut scratch = Scratch {
+                    state,
+                    bb,
+                    out_action,
+                    run: &mut run,
+                    sink: &mut tap,
+                };
+                tick_node(&self.root, &mut scratch, 0, 0)
+            }
+            None => self.tick(state, bb, out_action),
+        }
+    }
+}
+
+/// One tree walk's context: the percept, the blackboard, the output action,
+/// the reactive running memory and the trace sink. Bundled so the walker
+/// keeps a short signature and the reactive arms can call back into it.
+/// Units: millimetres and permille from the state, slots, action ids, node
+/// indices.
+pub(crate) struct Scratch<'a, S: Sink> {
+    pub(crate) state: &'a BtState,
+    pub(crate) bb: &'a mut BtBlackboard,
+    pub(crate) out_action: &'a mut u8,
+    pub(crate) run: &'a mut BtRun,
+    pub(crate) sink: &'a mut S,
 }
 
 /// Check one subtree for bad payloads without counting size. Cold
@@ -499,7 +597,10 @@ fn check_node(node: &BtNode) -> Result<(), BtError> {
                 Ok(())
             }
         }
-        BtNode::Sequence(kids) | BtNode::Selector(kids) => {
+        BtNode::Sequence(kids)
+        | BtNode::Selector(kids)
+        | BtNode::ReactiveSequence(kids)
+        | BtNode::ReactiveFallback(kids) => {
             if kids.len() > MAX_CHILDREN {
                 return Err(BtError::BadChildCount { got: kids.len() });
             }
@@ -564,6 +665,20 @@ fn hash_node(hasher: &mut Fnv64, node: &BtNode) {
         }
         BtNode::Selector(kids) => {
             hasher.write_u8(TAG_SELECTOR);
+            write_len(hasher, kids.len());
+            for kid in kids {
+                hash_node(hasher, kid);
+            }
+        }
+        BtNode::ReactiveSequence(kids) => {
+            hasher.write_u8(TAG_REACTIVE_SEQUENCE);
+            write_len(hasher, kids.len());
+            for kid in kids {
+                hash_node(hasher, kid);
+            }
+        }
+        BtNode::ReactiveFallback(kids) => {
+            hasher.write_u8(TAG_REACTIVE_FALLBACK);
             write_len(hasher, kids.len());
             for kid in kids {
                 hash_node(hasher, kid);
@@ -648,6 +763,20 @@ fn encode_node(node: &BtNode, out: &mut Vec<u8>) {
         }
         BtNode::Selector(kids) => {
             out.push(TAG_SELECTOR);
+            push_len(out, kids.len());
+            for kid in kids {
+                encode_node(kid, out);
+            }
+        }
+        BtNode::ReactiveSequence(kids) => {
+            out.push(TAG_REACTIVE_SEQUENCE);
+            push_len(out, kids.len());
+            for kid in kids {
+                encode_node(kid, out);
+            }
+        }
+        BtNode::ReactiveFallback(kids) => {
+            out.push(TAG_REACTIVE_FALLBACK);
             push_len(out, kids.len());
             for kid in kids {
                 encode_node(kid, out);
@@ -780,7 +909,7 @@ fn decode_node(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<BtNode,
                 Ok(BtNode::TickGate { period })
             }
         }
-        TAG_SEQUENCE | TAG_SELECTOR => {
+        TAG_SEQUENCE | TAG_SELECTOR | TAG_REACTIVE_SEQUENCE | TAG_REACTIVE_FALLBACK => {
             let count_byte = read_u8(bytes, cursor)?;
             let count = usize::from(count_byte);
             if count > MAX_CHILDREN {
@@ -790,10 +919,11 @@ fn decode_node(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<BtNode,
             for _ in 0..count {
                 kids.push(decode_node(bytes, cursor, depth + 1)?);
             }
-            if tag == TAG_SEQUENCE {
-                Ok(BtNode::Sequence(kids))
-            } else {
-                Ok(BtNode::Selector(kids))
+            match tag {
+                TAG_SEQUENCE => Ok(BtNode::Sequence(kids)),
+                TAG_SELECTOR => Ok(BtNode::Selector(kids)),
+                TAG_REACTIVE_SEQUENCE => Ok(BtNode::ReactiveSequence(kids)),
+                _ => Ok(BtNode::ReactiveFallback(kids)),
             }
         }
         other => Err(BtError::BadTag { tag: other }),
@@ -838,20 +968,24 @@ fn decode_cond(bytes: &[u8], cursor: &mut usize) -> Result<BtCond, BtError> {
 
 /// Tick one node. Integer math only, no heap use; the caller owns all
 /// buffers. Sequence fails fast and selector succeeds fast; both pass
-/// `Running` through at once. Units: ticks.
-fn tick_node(
+/// `Running` through at once. A reactive composite re-ticks from child 0 and
+/// halts the child it was waiting on. `scratch.sink` sees each visited node
+/// after it ends (read-only); with [`Off`] the sink code and the index
+/// bookkeeping compile away. `idx` is the node's pre-order index, `depth` its
+/// nesting. Units: ticks.
+pub(crate) fn tick_node<S: Sink>(
     node: &BtNode,
-    state: &BtState,
-    bb: &mut BtBlackboard,
-    out_action: &mut u8,
+    scratch: &mut Scratch<'_, S>,
+    idx: u8,
+    depth: u8,
 ) -> BtStatus {
-    match node {
+    let status = match node {
         BtNode::Action(id) => {
-            *out_action = *id;
+            *scratch.out_action = *id;
             BtStatus::Success
         }
         BtNode::Cond(cond) => {
-            if cond.eval(state, bb) {
+            if cond.eval(scratch.state, scratch.bb) {
                 BtStatus::Success
             } else {
                 BtStatus::Failure
@@ -859,7 +993,7 @@ fn tick_node(
         }
         BtNode::SetBb { slot, value } => {
             let index = usize::from(*slot);
-            if bb.set(index, *value) {
+            if scratch.bb.set(index, *value) {
                 BtStatus::Success
             } else {
                 BtStatus::Failure
@@ -867,7 +1001,7 @@ fn tick_node(
         }
         BtNode::AddBb { slot, delta } => {
             let index = usize::from(*slot);
-            if bb.add(index, *delta) {
+            if scratch.bb.add(index, *delta) {
                 BtStatus::Success
             } else {
                 BtStatus::Failure
@@ -876,33 +1010,57 @@ fn tick_node(
         BtNode::TickGate { period } => {
             if *period == 0 {
                 BtStatus::Failure
-            } else if state.tick.is_multiple_of(*period) {
+            } else if scratch.state.tick.is_multiple_of(*period) {
                 BtStatus::Success
             } else {
                 BtStatus::Running
             }
         }
         BtNode::Sequence(kids) => {
+            let mut result = BtStatus::Success;
+            let mut next = idx.saturating_add(1);
             for kid in kids {
-                match tick_node(kid, state, bb, out_action) {
-                    BtStatus::Failure => return BtStatus::Failure,
-                    BtStatus::Running => return BtStatus::Running,
-                    BtStatus::Success => {}
+                let got = tick_node(kid, scratch, next, depth.saturating_add(1));
+                if got != BtStatus::Success {
+                    result = got;
+                    break;
+                }
+                if S::ON {
+                    next = next.saturating_add(subtree_len(kid));
                 }
             }
-            BtStatus::Success
+            result
         }
         BtNode::Selector(kids) => {
+            let mut result = BtStatus::Failure;
+            let mut next = idx.saturating_add(1);
             for kid in kids {
-                match tick_node(kid, state, bb, out_action) {
-                    BtStatus::Success => return BtStatus::Success,
-                    BtStatus::Running => return BtStatus::Running,
-                    BtStatus::Failure => {}
+                let got = tick_node(kid, scratch, next, depth.saturating_add(1));
+                if got != BtStatus::Failure {
+                    result = got;
+                    break;
+                }
+                if S::ON {
+                    next = next.saturating_add(subtree_len(kid));
                 }
             }
-            BtStatus::Failure
+            result
         }
+        BtNode::ReactiveSequence(kids) => scratch.reactive(Reactive::Sequence, kids, idx, depth),
+        BtNode::ReactiveFallback(kids) => scratch.reactive(Reactive::Fallback, kids, idx, depth),
+    };
+    if S::ON {
+        scratch
+            .sink
+            .visit(node, idx, depth, status, scratch.state, scratch.bb);
     }
+    status
+}
+
+/// Node count of a subtree as a `u8` (trees hold at most [`MAX_NODES`]).
+/// Units: nodes.
+pub(crate) fn subtree_len(node: &BtNode) -> u8 {
+    u8::try_from(node.node_count()).unwrap_or(u8::MAX)
 }
 
 /// Digest one decision for tape chaining. Same inputs give the same
@@ -1084,10 +1242,16 @@ mod tests {
         let write = BtNode::SetBb { slot: 40, value: 1 };
         let idle = state_at(0, 1_000, false);
         let mut out = 9u8;
-        assert_eq!(
-            tick_node(&write, &idle, &mut bb, &mut out),
-            BtStatus::Failure
-        );
+        let mut run = BtRun::new();
+        let mut off = Off;
+        let mut scratch = Scratch {
+            state: &idle,
+            bb: &mut bb,
+            out_action: &mut out,
+            run: &mut run,
+            sink: &mut off,
+        };
+        assert_eq!(tick_node(&write, &mut scratch, 0, 0), BtStatus::Failure);
         assert_eq!(out, 9, "failed writes leave the output alone");
         assert!(BtTree::new(BtNode::Action(9)).is_err());
         assert!(BtTree::new(BtNode::SetBb { slot: 40, value: 1 }).is_err());
