@@ -1712,12 +1712,14 @@ mod tests {
         all
     }
 
-    /// GP29 commit lock, v2 only. Oracle: startup 15 and grace 2, so the
-    /// feint window is ages 0..=12; age 16 (hit tick + 1) is locked and the
-    /// swing ages out through recovery (past 23) on its own clock.
+    /// GP29 commit lock, v2 only. Oracle: startup 30 and grace 2, so the
+    /// feint window is ages 0..=27; age 31 (hit tick + 1) is locked and the
+    /// swing ages out through recovery (past 36) on its own clock. The ages
+    /// are read off `TABLES_V2`, so the next retune moves the test with it.
     #[test]
     fn commit_lock_refuses_late_dodge_under_v2_only() {
         let tables = &TABLES_V2;
+        let (startup, recovery) = (tables.attack_startup_ticks, tables.attack_recovery_ticks);
         let poses = v2_far();
         let mut out = Vec::with_capacity(MAX_EVENTS_PER_TICK);
 
@@ -1758,10 +1760,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            idle_v2(&mut state, &poses, tables, 15).is_empty(),
+            idle_v2(&mut state, &poses, tables, startup).is_empty(),
             "far foe: no impacts"
         );
-        assert_eq!(state.fighters[0].attack_age, 16);
+        assert_eq!(state.fighters[0].attack_age, startup + 1);
         try_step_v2_into(
             &[input(0, DODGE), none(1)],
             &poses,
@@ -1773,7 +1775,7 @@ mod tests {
         assert!(state.fighters[0].is_attacking, "locked swing runs on");
         assert!(!state.fighters[0].is_dodging, "late dodge never starts");
         assert!(out.is_empty(), "a refused cancel emits nothing");
-        assert!(idle_v2(&mut state, &poses, tables, 8).is_empty());
+        assert!(idle_v2(&mut state, &poses, tables, recovery + 2).is_empty());
         assert!(
             !state.fighters[0].is_attacking,
             "recovery ends by the clock"
@@ -1804,7 +1806,7 @@ mod tests {
             let mut e = Vec::new();
             try_step_v2_into(&[input(0, ATTACK), none(1)], &poses, &mut s, tables, &mut o).unwrap();
             e.extend_from_slice(&o);
-            for _ in 0..15 {
+            for _ in 0..startup {
                 try_step_v2_into(&idle_pair(), &poses, &mut s, tables, &mut o).unwrap();
                 e.extend_from_slice(&o);
             }
@@ -1863,14 +1865,15 @@ mod tests {
         );
     }
 
-    /// GP29 commit lock, v2 only. Oracle: startup 15, grace 2 and recovery 8,
-    /// so age 16 (hit tick + 1) is locked past the feint window while the
-    /// chain window opens at 18. A block at 16 never latches; a fresh attack
+    /// GP29 commit lock, v2 only. Oracle: startup 30, grace 2 and recovery 6,
+    /// so age 31 (hit tick + 1) is locked past the feint window while the
+    /// chain window opens at 33. A block at 31 never latches; a fresh attack
     /// there queues and fires as a chain once the window opens. V1 keeps its
     /// old latch and drops every mid-swing tap.
     #[test]
     fn commit_lock_refuses_late_block_and_chains_queued_attack_under_v2() {
         let tables = &TABLES_V2;
+        let (startup, recovery) = (tables.attack_startup_ticks, tables.attack_recovery_ticks);
         let poses = v2_far();
         let mut out = Vec::with_capacity(MAX_EVENTS_PER_TICK);
 
@@ -1885,10 +1888,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            idle_v2(&mut state, &poses, tables, 15).is_empty(),
+            idle_v2(&mut state, &poses, tables, startup).is_empty(),
             "far foe: no impacts"
         );
-        assert_eq!(state.fighters[0].attack_age, 16);
+        assert_eq!(state.fighters[0].attack_age, startup + 1);
         try_step_v2_into(
             &[input(0, BLOCK), none(1)],
             &poses,
@@ -1900,7 +1903,7 @@ mod tests {
         assert!(state.fighters[0].is_attacking, "locked swing runs on");
         assert!(!state.fighters[0].is_blocking, "late block never latches");
         assert!(out.is_empty(), "a refused block emits nothing");
-        assert!(idle_v2(&mut state, &poses, tables, 8).is_empty());
+        assert!(idle_v2(&mut state, &poses, tables, recovery + 2).is_empty());
         assert!(
             !state.fighters[0].is_attacking,
             "recovery ends by the clock"
@@ -1908,7 +1911,7 @@ mod tests {
 
         // A fresh attack at hit tick + 1 is locked past the feint window, so
         // the tap queues; the queue fires as a chain once the recovery
-        // window opens at age 18.
+        // window opens at age 33 (startup + grace + 1).
         let mut state = FightState::new(2).unwrap();
         try_step_v2_into(
             &[input(0, ATTACK), none(1)],
@@ -1919,10 +1922,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            idle_v2(&mut state, &poses, tables, 15).is_empty(),
+            idle_v2(&mut state, &poses, tables, startup).is_empty(),
             "far foe: no impacts"
         );
-        assert_eq!(state.fighters[0].attack_age, 16);
+        assert_eq!(state.fighters[0].attack_age, startup + 1);
         try_step_v2_into(
             &[input(0, ATTACK), none(1)],
             &poses,
@@ -1933,7 +1936,8 @@ mod tests {
         .unwrap();
         assert!(state.fighters[0].is_attacking, "locked swing runs on");
         assert_eq!(
-            state.fighters[0].attack_age, 17,
+            state.fighters[0].attack_age,
+            startup + 2,
             "a press past the feint window never restarts the clock at once"
         );
         assert_eq!(
@@ -1942,10 +1946,10 @@ mod tests {
             "late tap queues in the v2 input buffer"
         );
         assert!(out.is_empty(), "a queued attack emits nothing");
-        // Age 17 is still inside the post-hit grace, so the queue waits; at
-        // age 18 the chain window opens and the queued tap restarts the swing.
+        // Age 32 is still inside the post-hit grace, so the queue waits; at
+        // age 33 the chain window opens and the queued tap restarts the swing.
         try_step_v2_into(&idle_pair(), &poses, &mut state, tables, &mut out).unwrap();
-        assert_eq!(state.fighters[0].attack_age, 18);
+        assert_eq!(state.fighters[0].attack_age, startup + 3);
         assert!(state.fighters[0].is_attacking);
         try_step_v2_into(&idle_pair(), &poses, &mut state, tables, &mut out).unwrap();
         assert_eq!(
@@ -1973,6 +1977,7 @@ mod tests {
     fn recovery_chain_restarts_and_cues_once_under_v2() {
         use super::{AttackStarted, MAX_ATTACK_STARTED_PER_TICK};
         let tables = &TABLES_V2;
+        let startup = tables.attack_startup_ticks;
         let poses = v2_far();
         let mut state = FightState::new(2).unwrap();
         let mut out = Vec::with_capacity(MAX_EVENTS_PER_TICK);
@@ -1987,8 +1992,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cues.len(), 1);
-        assert!(idle_v2(&mut state, &poses, tables, 17).is_empty());
-        assert_eq!(state.fighters[0].attack_age, 18);
+        assert!(idle_v2(&mut state, &poses, tables, startup + 2).is_empty());
+        assert_eq!(state.fighters[0].attack_age, startup + 3);
         try_step_v2_with_cues_into(
             &[input(0, ATTACK), none(1)],
             &poses,
@@ -2192,9 +2197,11 @@ mod tests {
             "parry must sit under startup"
         );
         assert_ne!(v2, TABLES_V1, "v2 must differ from frozen v1");
-        // Only timing moves; every other row matches the frozen base.
+        // Only the swing timing moves (startup, recovery, parry window); every
+        // other row matches the frozen base.
         let mut expected = TABLES_V1;
         expected.attack_startup_ticks = v2.attack_startup_ticks;
+        expected.attack_recovery_ticks = v2.attack_recovery_ticks;
         expected.parry_window_ticks = v2.parry_window_ticks;
         assert_eq!(v2, expected);
         assert_eq!(v2, crate::tables::v2_rows());
@@ -2412,6 +2419,7 @@ mod tests {
         // F2P: far poses miss, so the clock runs with no hit-stop to disturb
         // the cancel assertions; the near pose lands the chained heavy.
         let tables = &TABLES_V2;
+        let startup = tables.attack_startup_ticks;
         let far = v2_far();
         let near = [
             pose(0, 0, 0, (1000, 0), 0),
@@ -2432,9 +2440,9 @@ mod tests {
             state.fighters[0].attack_kind, INPUT_LIGHT,
             "fresh light marks light"
         );
-        // Run to the locked tick past feint (age 16).
-        assert!(idle_v2(&mut state, &far, tables, 15).is_empty());
-        assert_eq!(state.fighters[0].attack_age, 16);
+        // Run to the locked tick past feint (age startup + 1).
+        assert!(idle_v2(&mut state, &far, tables, startup).is_empty());
+        assert_eq!(state.fighters[0].attack_age, startup + 1);
         // Press heavy chord mid-swing: queues, never restarts at once.
         try_step_v2_into(
             &[input(0, ATTACK | BLOCK), none(1)],
@@ -2446,7 +2454,8 @@ mod tests {
         .unwrap();
         assert!(state.fighters[0].is_attacking, "locked swing runs on");
         assert_eq!(
-            state.fighters[0].attack_age, 17,
+            state.fighters[0].attack_age,
+            startup + 2,
             "a locked press never restarts the clock at once"
         );
         assert_eq!(
@@ -2455,9 +2464,9 @@ mod tests {
             "heavy chord queues with its block bit"
         );
         assert!(out.is_empty(), "a queued press emits nothing");
-        // Release block, wait for the chain window: age 17 still locked.
+        // Release block, wait for the chain window: age startup + 2 still locked.
         try_step_v2_into(&idle_pair(), &far, &mut state, tables, &mut out).unwrap();
-        assert_eq!(state.fighters[0].attack_age, 18);
+        assert_eq!(state.fighters[0].attack_age, startup + 3);
         assert!(state.fighters[0].is_attacking);
         // Chain tick idle: the queued heavy fires as a new swing.
         try_step_v2_into(&idle_pair(), &far, &mut state, tables, &mut out).unwrap();
@@ -2471,8 +2480,8 @@ mod tests {
             "press-time kind survives the queue"
         );
         // Wired strike path: run the chained heavy to impact near.
-        assert!(idle_v2(&mut state, &far, tables, 14).is_empty());
-        assert_eq!(state.fighters[0].attack_age, 15);
+        assert!(idle_v2(&mut state, &far, tables, startup - 1).is_empty());
+        assert_eq!(state.fighters[0].attack_age, startup);
         try_step_v2_into(&idle_pair(), &near, &mut state, tables, &mut out).unwrap();
         assert!(
             out.iter().any(|e| matches!(e, FightEvent::Hit { .. })),
@@ -4018,7 +4027,9 @@ mod tests {
         let mut out = Vec::with_capacity(MAX_EVENTS_PER_TICK);
         let mut all = Vec::new();
         let mut impulses = Vec::new();
-        for tick in 0..=TABLES_V2.attack_startup_ticks {
+        // The shove lands on its own 6-tick startup and staggers 12 ticks:
+        // stop 9 ticks after the landing, inside the stagger and the table.
+        for tick in 0..=PUSH_STARTUP_TICKS + 9 {
             let press = if tick == 0 { ATTACK | BLOCK } else { BLOCK };
             let inputs = [input(0, press), input(1, BLOCK)];
             try_step_v2_into(&inputs, poses, &mut state, &TABLES_V2, &mut out)

@@ -22,6 +22,8 @@ use super::{
 use super::{Controller, FIXED_DT};
 #[cfg(not(feature = "sim"))]
 use super::{MatchWorld, FIGHTER_RADIUS_M};
+use crate::spear::SpearState;
+use engine_input::fighter::THROW_NOOSE;
 // Test-only counter of ticks that really fanned the leg out over the pool.
 // Per thread, so a test proves its own sim forked and never reads another
 // test's count.
@@ -354,10 +356,16 @@ fn merge_legs(
         sim.wishes[slot] = [input.mx, input.mz];
         // The spear bit only exists in a spear match; elsewhere it is masked
         // out so a stray press cannot reach the hash.
-        sim.buttons[slot] = if sim.spear.is_some() {
+        let kept = if sim.spear.is_some() {
             input.buttons.0
         } else {
             input.buttons.0 & !THROW_SPEAR
+        };
+        // The noose bit likewise (row SG11): only a noose match latches it.
+        sim.buttons[slot] = if sim.spear.as_ref().is_some_and(SpearState::noose_armed) {
+            kept
+        } else {
+            kept & !THROW_NOOSE
         };
         let out = outs[slot];
         failed |= !out.ok;
