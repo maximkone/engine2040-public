@@ -1,5 +1,5 @@
 //! hit: a blow spreads over the bones near it and adds exactly its impulse (QR11); the joints
-//! then brace and fade to limp in 0.3 s (QR10).
+//! then brace and fade back to the resting tone in 0.3 s (QR10).
 
 use super::hinge::{flexion, hinged, long_axis};
 use super::*;
@@ -62,7 +62,11 @@ fn a_bad_blow_is_refused_and_changes_nothing() {
         Err(Error::OutOfRange(Field::Extent))
     );
     assert_eq!(fx.ragdoll_momentum(0), [0.0; 3]);
-    assert_eq!(fx.ragdoll_strength(0), Some(0.0), "no hit, no bracing");
+    assert_eq!(
+        fx.ragdoll_strength(0),
+        Some(RAGDOLL_TONE),
+        "no hit, no brace: the resting tone"
+    );
     assert_eq!(
         fx.hit_ragdoll(3, CHEST, 0.5, [1.0; 3]),
         Ok(0),
@@ -72,9 +76,13 @@ fn a_bad_blow_is_refused_and_changes_nothing() {
 }
 
 #[test]
-fn strength_goes_from_one_to_zero_over_three_tenths_of_a_second() {
+fn strength_goes_from_one_to_the_tone_over_three_tenths_of_a_second() {
     let mut fx = hung();
-    assert_eq!(fx.ragdoll_strength(0), Some(0.0), "nobody hit it");
+    assert_eq!(
+        fx.ragdoll_strength(0),
+        Some(RAGDOLL_TONE),
+        "nobody hit it: it holds itself at the tone"
+    );
     fx.hit_ragdoll(0, CHEST, 0.5, [10.0, 0.0, 0.0])
         .expect("hit");
     assert_eq!(fx.ragdoll_strength(0), Some(1.0));
@@ -93,10 +101,18 @@ fn strength_goes_from_one_to_zero_over_three_tenths_of_a_second() {
         (curve[ticks / 2 - 1] - 0.5).abs() < 0.01,
         "half way at 0.15 s"
     );
-    assert!(curve[ticks - 1] < 1.0e-5, "limp at 0.3 s");
-    assert!(curve.windows(2).all(|w| w[1] < w[0]), "it only falls");
+    assert!(
+        (curve[ticks - 1] - RAGDOLL_TONE).abs() < 1.0e-5,
+        "back at the tone by 0.3 s"
+    );
+    assert!(curve.windows(2).all(|w| w[1] <= w[0]), "it only falls");
+    assert!(curve.iter().all(|s| *s >= RAGDOLL_TONE), "never under the tone");
     step_n(&mut fx, 10);
-    assert_eq!(fx.ragdoll_strength(0), Some(0.0), "and stays limp");
+    assert_eq!(
+        fx.ragdoll_strength(0),
+        Some(RAGDOLL_TONE),
+        "and stays at the tone, never a sack"
+    );
 }
 
 /// How far the head has moved against the chest, meters, at its most over `ticks` steps after
@@ -152,6 +168,76 @@ fn a_braced_neck_gives_way_less_than_a_limp_one() {
             "a braced neck holds: {braced} against {limp}"
         );
     }
+}
+
+/// How far a ragdoll with `muscle` permille folds away from its spawn shape by falling 1 m and
+/// lying for a second with nobody hitting it: the summed change of every bone's angle to its
+/// parent, radians.
+fn fold_after_a_fall(muscle: u16) -> f32 {
+    let (rig, pose) = humanoid();
+    let rig = rig.with_muscle_permille(muscle).expect("muscle");
+    let mut fx = arena(Tier::Comfort);
+    fx.spawn_ragdoll(0, &rig, &moved(&pose, [0.0, 1.0, 0.0]), [0.0; 3], [0.0; 3])
+        .expect("ragdoll");
+    let bends = |fx: &PhysFx| {
+        let bones = bones_of(fx, 0);
+        BONES
+            .iter()
+            .enumerate()
+            .filter_map(|(at, b)| b.1.map(|parent| (at, parent)))
+            .map(|(at, parent)| {
+                let (a, p) = (long_axis(&bones[at]), long_axis(&bones[parent]));
+                (a[0] * p[0] + a[1] * p[1] + a[2] * p[2]).clamp(-1.0, 1.0).acos()
+            })
+            .collect::<Vec<f32>>()
+    };
+    let spawn = bends(&fx);
+    step_n(&mut fx, 90);
+    bends(&fx)
+        .iter()
+        .zip(&spawn)
+        .map(|(now, was)| (now - was).abs())
+        .sum()
+}
+
+#[test]
+fn a_toned_body_keeps_its_shape_where_a_limp_one_folds() {
+    // The owner's "floppy af": a ragdoll nobody hit used to have no motor at all.
+    let limp = fold_after_a_fall(0);
+    let toned = fold_after_a_fall(900);
+    println!("fold after a 1 m fall: limp {limp:.3} rad, toned {toned:.3} rad");
+    assert!(limp > 0.3, "a sack folds: {limp}");
+    assert!(
+        toned < 0.6 * limp,
+        "the tone holds the body's shape: {toned} against {limp}"
+    );
+}
+
+#[test]
+fn a_held_brace_stays_up_while_asked_and_fades_to_the_tone_after() {
+    let mut fx = hung();
+    let mut held = f32::MAX;
+    for _ in 0..30 {
+        assert!(fx.brace_ragdoll(0, 0.6).is_some());
+        fx.step();
+        held = held.min(fx.ragdoll_strength(0).expect("ragdoll"));
+    }
+    assert!(held > 0.5, "the pin weight holds while asked: {held}");
+    step_n(&mut fx, 20);
+    assert_eq!(fx.ragdoll_strength(0), Some(RAGDOLL_TONE), "then the tone");
+    assert_eq!(fx.brace_ragdoll(3, 0.6), None, "no ragdoll in slot 3");
+    assert_eq!(
+        fx.brace_ragdoll(0, f32::NAN),
+        Some(RAGDOLL_TONE),
+        "a bad weight braces nothing"
+    );
+    // A body with no muscle cannot be braced at all.
+    let (rig, pose) = humanoid();
+    let limp = rig.with_muscle_permille(0).expect("muscle");
+    let mut sack = arena(Tier::Comfort);
+    sack.spawn_ragdoll(0, &limp, &moved(&pose, [0.0, 3.0, 0.0]), [0.0; 3], [0.0; 3])
+        .expect("ragdoll");
+    assert_eq!(sack.brace_ragdoll(0, 0.6), Some(0.0));
 }
 
 #[test]

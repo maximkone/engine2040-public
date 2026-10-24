@@ -80,6 +80,12 @@ impl McpToolError {
         self.retryable
     }
 
+    /// The closed advice code a model branches on (AD26). Read from the one
+    /// table in `advice`, so it is never missing and never guessed.
+    pub fn advice(&self) -> crate::mcp::Advice {
+        crate::mcp::advice_for_code(self.code)
+    }
+
     /// Up to three concrete next moves.
     pub fn suggestions(&self) -> &'static [&'static str] {
         self.suggestions
@@ -91,13 +97,14 @@ impl McpToolError {
     }
 
     /// The payload a client receives: `{code, message, data}` plus the advice
-    /// `{kind, retryable, suggestions, next}`. `next` is written only when the
-    /// code names one, so the long tail carries no empty call.
+    /// `{advice, kind, retryable, suggestions, next}`. `next` is written only
+    /// when the code names one, so the long tail carries no empty call.
     pub fn wire_payload(&self) -> rmcp::serde_json::Value {
         let mut payload = rmcp::serde_json::json!({
             "code": self.code,
             "message": self.message,
             "data": self.data,
+            "advice": self.advice().as_str(),
             "kind": self.kind.as_str(),
             "retryable": self.retryable,
             "suggestions": self.suggestions,
@@ -117,6 +124,42 @@ impl McpToolError {
         let mut wrapped = Self::new(code, error.message);
         wrapped.data = error.data;
         wrapped
+    }
+}
+
+/// How a refusal leaves the call path (AD26). A refusal the caller can act on
+/// is a tool result with `isError` true whose structured content is the wire
+/// payload (code, message, kind, retry flag, suggestions, next call), so the
+/// model reads the advice in the result it already parses. `unknown_tool` is
+/// the one refusal that stays a protocol error: the name is not a tool at all.
+pub(crate) fn refusal_outcome(
+    error: McpToolError,
+) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+    if error.code == "unknown_tool" {
+        return Err(rmcp::ErrorData::from(error));
+    }
+    let payload = error.wire_payload();
+    Ok(rmcp::model::CallToolResult::structured_error(payload).into())
+}
+
+/// The same split for a refusal that already left the tool router as a
+/// protocol envelope: a `#[tool]`-style route turns its `McpToolError` into an
+/// `ErrorData` on the way out, and that envelope's `data` is the wire payload.
+/// A door envelope (it decodes and carries the advice record) becomes the
+/// result shape; a foreign envelope, and `unknown_tool`, stay protocol errors.
+pub(crate) fn envelope_outcome(
+    envelope: rmcp::ErrorData,
+) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+    let payload = envelope
+        .data
+        .as_ref()
+        .filter(|data| data.get("kind").is_some())
+        .cloned();
+    match (payload, crate::discover::RpcError::from_wire(&envelope)) {
+        (Some(payload), Some(decoded)) if decoded.code() != "unknown_tool" => {
+            Ok(rmcp::model::CallToolResult::structured_error(payload).into())
+        }
+        _ => Err(envelope),
     }
 }
 
@@ -331,6 +374,7 @@ const INPUT_CODES: &[&str] = &[
     "bad_config",
     "bad_csv",
     "bad_cursor",
+    "bad_easing",
     "bad_edit",
     "bad_epsilon",
     "bad_events",
@@ -339,9 +383,11 @@ const INPUT_CODES: &[&str] = &[
     "bad_fighters",
     "bad_floor",
     "bad_format",
+    "bad_frames",
     "bad_gap",
     "bad_graph",
     "bad_grid",
+    "bad_height_grid",
     "bad_id",
     "bad_image",
     "bad_input",
@@ -349,13 +395,16 @@ const INPUT_CODES: &[&str] = &[
     "bad_joint",
     "bad_kind",
     "bad_limit",
+    "bad_manifest",
     "bad_material",
     "bad_metric",
+    "bad_name",
     "bad_origin",
     "bad_output",
     "bad_override",
     "bad_part",
     "bad_participants",
+    "bad_path",
     "bad_pick",
     "bad_pixel",
     "bad_png",
@@ -368,21 +417,27 @@ const INPUT_CODES: &[&str] = &[
     "bad_recipe",
     "bad_record",
     "bad_relation",
+    "bad_road",
     "bad_root",
     "bad_rule",
     "bad_scene",
     "bad_scope",
+    "bad_site",
     "bad_size",
     "bad_slots",
     "bad_stat",
     "bad_tape",
+    "bad_threat",
     "bad_ticks",
+    "bad_timebase",
+    "bad_timeline",
     "bad_ttl",
     "bad_variant",
     "bad_view",
     "bad_wall",
     "bad_want",
     "bad_word",
+    "before_zero",
     "brief_too_long",
     "cook_failed",
     "corrupt_bundle",
@@ -394,6 +449,7 @@ const INPUT_CODES: &[&str] = &[
     "empty_checks",
     "empty_query",
     "injection_refused",
+    "input_required",
     "invalid_action",
     "invalid_batch",
     "invalid_config",
@@ -405,6 +461,12 @@ const INPUT_CODES: &[&str] = &[
     "no_kit",
     "not_a_root",
     "off_grid",
+    "overflow",
+    "record_bad_hash",
+    "record_bad_kind",
+    "record_bad_path",
+    "record_bad_stamp",
+    "record_empty_text",
     "rule_unsatisfiable",
     "rules_refused",
     "spatial_rejected",
@@ -413,9 +475,11 @@ const INPUT_CODES: &[&str] = &[
     "too_many_checks",
     "too_many_inputs",
     "too_many_ops",
+    "too_many_samples",
     "too_many_wants",
     "unknown_bone",
     "unknown_code",
+    "unknown_module",
     "unknown_pack",
     "unknown_path",
     "unknown_subscription",
@@ -429,6 +493,7 @@ const STATE_CODES: &[&str] = &[
     "apply_in_flight",
     "arena_view_failed",
     "audit_exhausted",
+    "bad_package",
     "black_capture",
     "bout_failed",
     "browse_failed",
@@ -453,6 +518,7 @@ const STATE_CODES: &[&str] = &[
     "no_live_bout",
     "no_perf_csv",
     "no_pose",
+    "no_project",
     "no_project_dir",
     "no_receipts",
     "no_saved_scene",
@@ -461,12 +527,17 @@ const STATE_CODES: &[&str] = &[
     "no_seat",
     "no_snapshot",
     "no_space",
+    "no_terrain",
+    "no_timeline",
+    "not_built",
     "not_served",
     "nothing_to_undo",
     "pinned_object",
     "play_refused",
     "prefab_failed",
+    "project_exists",
     "read_repeat",
+    "record_store_line",
     "scene_needs_door",
     "seat_already_open",
     "seat_closed",
@@ -476,15 +547,19 @@ const STATE_CODES: &[&str] = &[
     "seat_start_failed",
     "seat_timeout",
     "snapshot_failed",
+    "stale_package",
     "stale_policy",
     "stale_revision",
     "stale_scene_rev",
     "stale_tick",
     "subscribe_failed",
+    "tasks_bad_task",
+    "tasks_no_suite",
     "undo_mismatch",
     "undone_key",
     "unknown_actor",
     "unknown_build",
+    "unknown_camera",
     "unknown_check",
     "unknown_component",
     "unknown_graph",
@@ -503,6 +578,7 @@ const PERMISSION_CODES: &[&str] = &[
     "destructive_tier",
     "expired_approval",
     "forged_approval",
+    "memory_not_granted",
     "op_not_allowed",
     "out_of_scope",
     "reused_approval",
@@ -514,6 +590,7 @@ const BUDGET_CODES: &[&str] = &[
     "explain_over_budget",
     "graph_too_large",
     "over_budget",
+    "package_too_large",
     "scene_too_big",
     "too_big",
     "tool_budget_exceeded",
@@ -529,6 +606,7 @@ const FEATURE_CODES: &[&str] = &[
     "spawn_failed",
     "tool_missing",
     "unsupported_capture",
+    "unsupported_game",
     "unsupported_look_judge",
     "unsupported_view_source",
 ];
@@ -544,8 +622,11 @@ const INTERNAL_CODES: &[&str] = &[
     "persist_failed",
     "prefab_store",
     "read_failed",
+    "record_store_io",
+    "rome_table",
     "rules_worker_down",
     "save_failed",
+    "trace_failed",
     "unscreened_call",
     "walk_failed",
     "write_failed",
@@ -1202,5 +1283,75 @@ mod tests {
             !payload.contains_key("next"),
             "a code with no next call writes no next key: {payload:?}"
         );
+    }
+
+    fn refusal_result(error: McpToolError) -> rmcp::model::CallToolResult {
+        match refusal_outcome(error).expect("a tool refusal is a result, not a protocol error") {
+            rmcp::model::CallToolResponse::Complete(result) => result,
+            other => panic!("a refusal completes the call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refusal_advice_stale_revision_is_an_error_result_with_advice() {
+        let result = refusal_result(
+            McpToolError::new("stale_revision", "document moved under the batch")
+                .with_data(rmcp::serde_json::json!({ "revision": 7 })),
+        );
+        assert_eq!(result.is_error, Some(true), "a refusal flags isError");
+        let payload = result
+            .structured_content
+            .as_ref()
+            .and_then(rmcp::serde_json::Value::as_object)
+            .expect("the refusal carries its payload as structured content");
+        assert_eq!(payload["code"], "stale_revision");
+        assert_eq!(payload["retryable"], true, "stale revision is retryable");
+        assert_eq!(payload["kind"], "state");
+        assert_eq!(payload["data"]["revision"], 7, "the culprit rides along");
+        let verb = payload["next"]["verb"]
+            .as_str()
+            .expect("stale revision names one next call");
+        assert!(
+            crate::mcp::tool_names().contains(&verb),
+            "next call `{verb}` is a live verb"
+        );
+    }
+
+    #[test]
+    fn refusal_advice_routed_envelope_becomes_the_result_shape() {
+        let envelope = rmcp::ErrorData::from(McpToolError::new(
+            "stale_revision",
+            "document moved; re-read first",
+        ));
+        let result = match envelope_outcome(envelope).expect("a door envelope is a result") {
+            rmcp::model::CallToolResponse::Complete(result) => result,
+            other => panic!("expected a completed result, got {other:?}"),
+        };
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["code"],
+            "stale_revision"
+        );
+        let foreign = rmcp::ErrorData::invalid_params("bad json", None);
+        assert!(
+            envelope_outcome(foreign).is_err(),
+            "a foreign envelope stays an error"
+        );
+    }
+
+    #[test]
+    fn refusal_advice_unknown_tool_stays_a_protocol_error() {
+        let error = McpToolError::new("unknown_tool", "no tool named `nope`");
+        let envelope = refusal_outcome(error).expect_err("an unknown name is a protocol error");
+        assert_eq!(envelope.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn refusal_advice_same_refusal_gives_equal_bytes_twice() {
+        let first = refusal_result(McpToolError::new("bad_ticks", "ticks 0 is refused"));
+        let second = refusal_result(McpToolError::new("bad_ticks", "ticks 0 is refused"));
+        let a = rmcp::serde_json::to_string(&first).expect("result serializes");
+        let b = rmcp::serde_json::to_string(&second).expect("result serializes");
+        assert_eq!(a, b, "the same refusal is the same bytes");
     }
 }
