@@ -32,6 +32,19 @@ pub const HDR_CLEAR: wgpu::Color = wgpu::Color {
 /// `copy_texture_to_buffer` rows must be 256-byte aligned.
 const ROW_ALIGN: u32 = 256;
 
+/// HDR working-target format for one tier row (SW6): the potato and phone rows
+/// pay 4 bytes per pixel, the mid rows keep float headroom in 4 bytes, and the
+/// top row keeps [`HDR_FORMAT`]. The caller recreates the HDR target and the
+/// forward pipelines that name it together, so format and pipelines never
+/// disagree.
+pub fn tier_hdr_format(tier: crate::quality::Quality) -> wgpu::TextureFormat {
+    match crate::quality::presentation(tier).hdr_format {
+        crate::quality::HdrFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+        crate::quality::HdrFormat::Rgb10a2Unorm => wgpu::TextureFormat::Rgb10a2Unorm,
+        crate::quality::HdrFormat::Rg11B10Ufloat => wgpu::TextureFormat::Rg11b10Ufloat,
+    }
+}
+
 /// Blit shader: `shaders/blit.wgsl` with the display transform
 /// (`shaders/tonemap.wgsl`) prepended at compile time. Samples the linear
 /// HDR target into the LDR twin or surface view, composites the probe fog
@@ -67,12 +80,15 @@ mod forward_group;
 mod frame;
 mod gate;
 mod gtao_live;
+mod impostor_live;
 mod kind_table;
 mod live;
 mod look_seam;
 mod lut_upload;
 mod motion;
 mod msaa;
+mod outline_hook;
+mod pass_switch;
 mod presenter;
 mod preset;
 mod quality_apply;
@@ -101,6 +117,9 @@ pub use frame::{
 pub use msaa::{
     edge_has_intermediate, msaa_enabled, msaa_sample_count, msaa_target_desc, MsaaConfig,
     MsaaTargetDesc, MSAA_SAMPLE_COUNT,
+};
+pub use pass_switch::{
+    sun_shadow_view_proj, PassSwitch, PassSwitchError, RenderFacts, SunShadowFacts, PASS_NAMES,
 };
 pub use presenter::Presenter;
 #[cfg(feature = "window")]
@@ -156,6 +175,43 @@ mod root_wiring_tests {
                 got > 0.0 && got < 0.1,
                 "clear {name} stays dim linear radiance, got {got}"
             );
+        }
+    }
+
+    /// SW6: the per-tier HDR format reaches the GPU as a real wgpu format, and
+    /// the top row is the shipped [`HDR_FORMAT`], so every existing pipeline and
+    /// capture keeps its bytes. Bytes per tier agree with the quality knob.
+    #[test]
+    fn hdr_format_follows_the_tier_through_the_gpu_handle() {
+        use crate::quality::Quality;
+        assert_eq!(
+            tier_hdr_format(Quality::High),
+            HDR_FORMAT,
+            "the top row keeps the shipped half-float target"
+        );
+        assert_eq!(
+            tier_hdr_format(Quality::Potato),
+            wgpu::TextureFormat::Rgb10a2Unorm,
+            "the potato row gets the packed unorm target"
+        );
+        assert_eq!(
+            tier_hdr_format(Quality::Web),
+            wgpu::TextureFormat::Rg11b10Ufloat,
+            "the mid row gets the packed float target"
+        );
+        for tier in Quality::ALL {
+            let format = tier_hdr_format(tier);
+            assert!(
+                matches!(
+                    format,
+                    wgpu::TextureFormat::Rgba16Float
+                        | wgpu::TextureFormat::Rgb10a2Unorm
+                        | wgpu::TextureFormat::Rg11b10Ufloat
+                ),
+                "{tier:?} maps to an HDR format"
+            );
+            assert_ne!(format, OUTPUT_FORMAT, "{tier:?} HDR is not LDR");
+            assert_ne!(format, DEPTH_FORMAT, "{tier:?} colour is not depth");
         }
     }
 

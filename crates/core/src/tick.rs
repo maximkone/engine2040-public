@@ -80,6 +80,17 @@ mod tests {
     use super::*;
     use crate::alloc_probe::measure;
     #[test]
+    fn fold_hash_folds_the_step_word_and_the_tick_bytes() {
+        assert_eq!(fold_hash(2040, 0, 0), 9_129_898_113_532_447_248);
+        assert_eq!(fold_hash(0, 5, 7), 2_034_519_569_013_766_940);
+        assert_ne!(
+            fold_hash(2040, 1, 0),
+            fold_hash(2040, 0, 0),
+            "the tick index is folded"
+        );
+    }
+
+    #[test]
     fn fixed_60hz_consts() {
         assert_eq!(TICK_HZ, 60);
         assert_eq!(MAX_STEPS, 5);

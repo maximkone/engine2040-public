@@ -1,0 +1,12 @@
+/* designs/O-042/tokens.css: web tokens of the Engine2040 UI-1 kit sheet. Same colors as kits/game-ui/tokens.css (--gui-*) and as tokens.json "colors" (the engine reads tokens.json). */
+:root {
+  --bg: #14161f;
+  --panel: #1f2333;
+  --ink: #f4f1e8;
+  --muted: #a8aec2;
+  --accent: #ffb325;
+  --on-accent: #1a1206;
+  --line: #333a52;
+  --font-gui: "DS Pixel 5x7", Consolas, monospace;
+  --font-body: "Segoe UI", system-ui, sans-serif;
+}
