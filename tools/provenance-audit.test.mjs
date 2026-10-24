@@ -91,15 +91,25 @@ test("CT52: a seeded 50-record bundle names each seeded gap and nothing else, th
   assert.equal(auditBody(), auditBody());
 });
 
-test("CT74: every cooked KTX2 map carries URL, CC0, author and SHA of its ambientCG set", () => {
+test("CT74: every cooked KTX2 map carries URL, CC0, author and SHA of its source set", () => {
   const cooked = auditRecords().filter((r) => r.rec.name.startsWith("content/arena/cooked/"));
   const receipt = readJson(join(REPO, "content", "arena", "cooked", "cook.json")).maps.map((m) => `content/arena/cooked/${m.file}`);
   assert.deepEqual(cooked.map((r) => r.rec.name).sort(), receipt.sort(), "one record per cooked map in the receipt");
-  assert.equal(cooked.length, 15);
-  const sets = ["Bricks097", "Ground093C", "Metal046B", "PavingStones150", "Planks039"].map((id) => `https://ambientcg.com/a/${id}`);
+  assert.equal(cooked.length, 24);
+  const sets = [
+    "https://ambientcg.com/a/Bricks097",
+    "https://ambientcg.com/a/Ground093C",
+    "https://ambientcg.com/a/Metal046B",
+    "https://ambientcg.com/a/PavingStones150",
+    "https://ambientcg.com/a/Planks039",
+    "https://polyhaven.com/a/dense_sand",
+    "https://polyhaven.com/a/marble_01",
+    "https://polyhaven.com/a/marble_tiles",
+  ];
   assert.deepEqual([...new Set(cooked.map((r) => r.rec.url))].sort(), sets);
   for (const r of cooked) {
-    assert.deepEqual([r.rec.author, r.rec.spdx, r.disk, refusal(r.rec)], ["ambientCG", "CC0-1.0", "match", null], r.rec.name);
+    const author = /polyhaven\.com/.test(r.rec.url) ? "Poly Haven" : "ambientCG";
+    assert.deepEqual([r.rec.author, r.rec.spdx, r.disk, refusal(r.rec)], [author, "CC0-1.0", "match", null], r.rec.name);
     assert.equal(r.rec.sha, fileDigest(join(REPO, r.rec.name)).sha256);
   }
   assert.ok(unlistedTrees().some((t) => t.tree === "content/arena/sources/" && t.owner === "CT74"));

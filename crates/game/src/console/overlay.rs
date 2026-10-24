@@ -6,7 +6,11 @@
 //! and leaves the frame as staged. Budget: rows are clipped in
 //! `console.rs`, so the fixed 128-quad ring keeps room for the HP bars.
 
-use crate::console::{DevConsole, OVERLAY_PANEL, OVERLAY_TEXT_HEIGHT, OVERLAY_TEXT_X};
+use crate::console::training_overlay::TrainingOverlay;
+use crate::console::{
+    DevConsole, OVERLAY_LINE_STEP, OVERLAY_PANEL, OVERLAY_TEXT_COLOR, OVERLAY_TEXT_HEIGHT,
+    OVERLAY_TEXT_X,
+};
 use engine_render::present::Presenter;
 use engine_ui::DuelOverlay;
 
@@ -23,6 +27,30 @@ pub fn stage_hud(
         crate::windowed::stage_hp_bars(presenter, bars);
     }
     stage_console(presenter, console);
+}
+
+/// Stage the training readout: one text row per remembered press and per
+/// exchange, from the panel top down, each row showing its age or the answer's
+/// frame advantage. A closed overlay stages nothing. Presentation only; never
+/// hashed.
+pub fn stage_training(presenter: &mut Presenter, training: &TrainingOverlay, now: u32) {
+    if !training.is_enabled() {
+        return;
+    }
+    let mut y = OVERLAY_PANEL[1] + OVERLAY_LINE_STEP;
+    for row in training.rows(now) {
+        if y > OVERLAY_PANEL[3] {
+            break;
+        }
+        let _ = presenter.push_text(
+            OVERLAY_TEXT_X,
+            y,
+            OVERLAY_TEXT_HEIGHT,
+            OVERLAY_TEXT_COLOR,
+            &row.text,
+        );
+        y += OVERLAY_LINE_STEP;
+    }
 }
 
 /// Stage the open dev console into the presenter CPU ring: one dark panel
