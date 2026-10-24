@@ -13,7 +13,10 @@
 //! buffers, so `step` performs no steady-state allocation.
 #![forbid(unsafe_code)]
 
-use super::pd::stable_gains;
+use super::pd::{
+    stable_gains, PD_BONE_ADDITIONAL_PGS, PD_MOTOR_DAMPING_NM_S, PD_MOTOR_MAX_NM,
+    PD_MOTOR_STIFFNESS_NM,
+};
 use super::ragdoll::{
     drain_narrow_contacts, insert_joints, joint_depths, normalize_quat, normalized_rotation,
     quat_conj, read_sim_transforms, rotate_vec, BoneShape,
@@ -26,8 +29,9 @@ use super::servo::{self, Rig, Servo, ServoTuning};
 use engine_anim::contract::{validate_pose, validate_skeleton, AnimError, LocalPose, Skeleton};
 use engine_core::{quat_mul, Fnv64};
 use rapier3d::dynamics::{
-    CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
-    RigidBodyBuilder, RigidBodyHandle, RigidBodySet, SoftBodySet,
+    CCDSolver, ImpulseJointHandle, ImpulseJointSet, IntegrationParameters, IslandManager,
+    JointAxis, MotorModel, MultibodyJointSet, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
+    SoftBodySet,
 };
 use rapier3d::geometry::{BroadPhaseBvh, ColliderBuilder, ColliderSet, NarrowPhase};
 use rapier3d::math::{Rotation, Vector};
@@ -264,6 +268,9 @@ pub struct PoweredRagdoll {
     ccd: CCDSolver,
     /// Body handles in skeleton order; fixes iteration/hash order.
     order: Vec<RigidBodyHandle>,
+    /// PX46: the impulse joint each non-root bone owns, skeleton order (`None`
+    /// on the root). A freed bone's motor is switched off through this table.
+    motor_joints: Vec<Option<ImpulseJointHandle>>,
     /// Owned skeleton: joint parents drive the sim-local conversion.
     skeleton: Skeleton,
     /// Latest animated driver pose from the caller.
@@ -346,6 +353,9 @@ impl PoweredRagdoll {
             // axis-angle (which needs `acos` to derive), so this avoids trig.
             if let Some(b) = bodies.get_mut(handle) {
                 b.set_rotation(normalized_rotation(r), false);
+                // PX46: a powered bone island gets the extra PGS visits the
+                // joint motors need, so four base passes hold the stand.
+                b.set_additional_solver_iterations(PD_BONE_ADDITIONAL_PGS);
             }
             // The density carries the bone's share of the body mass.
             let density = params
@@ -368,6 +378,33 @@ impl PoweredRagdoll {
             &order,
             &mut impulse_joints,
         );
+        // PX46: every powered joint carries a PD position motor on its three
+        // swing axes, holding the angle the joint was built at (target 0). The
+        // velocity servo above keeps the bones tracking the animated pose; the
+        // motor is what holds a stand at four solver passes.
+        let handles: Vec<ImpulseJointHandle> = impulse_joints.iter().map(|(h, _)| h).collect();
+        let mut motor_joints = vec![None; skeleton.len()];
+        let mut seen = 0usize;
+        for (i, joint) in skeleton.joints.iter().enumerate() {
+            if joint.parent.is_none() {
+                continue;
+            }
+            if let Some(handle) = handles.get(seen) {
+                motor_joints[i] = Some(*handle);
+            }
+            seen += 1;
+        }
+        for handle in handles {
+            let Some(joint) = impulse_joints.get_mut(handle, true) else {
+                continue;
+            };
+            for axis in [JointAxis::AngX, JointAxis::AngY, JointAxis::AngZ] {
+                let data = &mut joint.data;
+                data.set_motor_model(axis, MotorModel::ForceBased);
+                data.set_motor_position(axis, 0.0, PD_MOTOR_STIFFNESS_NM, PD_MOTOR_DAMPING_NM_S);
+                data.set_motor_max_force(axis, PD_MOTOR_MAX_NM);
+            }
+        }
         let n = skeleton.len();
         Ok(Self {
             pipeline: PhysicsPipeline::new(),
@@ -383,6 +420,7 @@ impl PoweredRagdoll {
             soft_bodies: SoftBodySet::new(),
             ccd: CCDSolver::new(),
             order,
+            motor_joints,
             skeleton: skeleton.clone(),
             animated: pose.clone(),
             drives: drives.to_vec(),
@@ -461,7 +499,49 @@ impl PoweredRagdoll {
         self.mask.copy_from_slice(mask);
         self.mode = derive_mode(&self.mask);
         self.getup_remaining = 0;
+        self.sync_motors();
         Ok(())
+    }
+
+    /// PX46: a driven bone keeps its joint motor; a freed bone (mask `true`) and
+    /// a full ragdoll (`RagdollMode::Full`) lose it, so a hit still frees its
+    /// subtree and a full body falls like the passive build. Event-time only —
+    /// a hit, a mask write, a get-up start — so `step` pays and allocates nothing.
+    fn sync_motors(&mut self) {
+        let full = self.mode == RagdollMode::Full;
+        let joints = &mut self.impulse_joints;
+        for (bone, handle) in self.motor_joints.iter().enumerate() {
+            let Some(handle) = *handle else {
+                continue;
+            };
+            let force = if full || self.mask[bone] {
+                0.0
+            } else {
+                PD_MOTOR_MAX_NM
+            };
+            let Some(joint) = joints.get_mut(handle, false) else {
+                continue;
+            };
+            for axis in [JointAxis::AngX, JointAxis::AngY, JointAxis::AngZ] {
+                joint.data.set_motor_max_force(axis, force);
+            }
+        }
+    }
+
+    /// PX46: spawn with an explicit solver pass count, so a caller (or a test)
+    /// can ask what four *base* passes hold once the bone islands carry their
+    /// extra PGS visits. Out-of-range counts clamp instead of failing.
+    pub fn spawn_with_passes(
+        skeleton: &Skeleton,
+        pose: &LocalPose,
+        capsule_dims: &[BoneShape],
+        drives: &[DriveParams],
+        solver_passes: usize,
+    ) -> Result<Self, RagdollError> {
+        let mut r = Self::spawn(skeleton, pose, capsule_dims, drives)?;
+        let passes = solver_passes.clamp(1, super::rapier::RAGDOLL_MAX_SOLVER_PASSES);
+        r.params.num_solver_iterations = passes;
+        Ok(r)
     }
 
     /// Current get-up state.
@@ -620,6 +700,9 @@ impl PoweredRagdoll {
         }
         self.mode = derive_mode(&self.mask);
         self.getup_remaining = 0;
+        // PX46: the freed subtree's joint motors go to zero force here, so the
+        // struck bone travels the way the mask says it should.
+        self.sync_motors();
         // The velocity change already carries the impulse; the counter only
         // records that a hit happened so the hash sees the event order. The
         // caller tick is arena bookkeeping, not sim state.
@@ -641,6 +724,8 @@ impl PoweredRagdoll {
         }
         self.mode = RagdollMode::GettingUp;
         self.getup_remaining = GETUP_BUDGET_TICKS;
+        // PX46: every drive re-engages, so every joint motor comes back.
+        self.sync_motors();
         Ok(())
     }
 
@@ -2070,3 +2155,7 @@ mod tests {
         assert_eq!((a, ha, xa), (b, hb, xb), "drain script must repeat");
     }
 }
+
+#[cfg(test)]
+#[path = "powered_motors.rs"]
+mod motors;

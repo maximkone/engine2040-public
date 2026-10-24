@@ -28,6 +28,20 @@ pub fn dt_valid(dt: f32) -> bool {
     dt.is_finite() && dt >= PD_DT_FLOOR
 }
 
+/// PX46: PD position-motor stiffness on a powered bone joint, N.m per radian.
+/// The motor holds the build-pose angle the velocity servo used to chase, so a
+/// stand does not need twelve solver passes.
+pub const PD_MOTOR_STIFFNESS_NM: f32 = 60.0;
+/// PX46: PD position-motor damping on a powered bone joint, N.m.s per radian.
+pub const PD_MOTOR_DAMPING_NM_S: f32 = 6.0;
+/// PX46: torque ceiling of one powered joint motor, N.m; a spear thrust still
+/// bends the joint past it instead of teleporting the bone.
+pub const PD_MOTOR_MAX_NM: f32 = 60.0;
+/// PX46: extra PGS iterations a powered bone body adds to its solver island.
+/// Four base passes plus these eight give a bone island the twelve visits the
+/// velocity servo needed; the passive ragdoll build is untouched.
+pub const PD_BONE_ADDITIONAL_PGS: usize = 8;
+
 /// Fraction of the stability edge [`stable_gains`] allows: the slowest mode then shrinks by at
 /// least a tenth every tick instead of ringing on the edge.
 pub const STABLE_MARGIN: f32 = 0.9;
