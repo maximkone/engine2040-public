@@ -27,6 +27,10 @@ pub mod discover;
 /// Audited dispatch seam: one audit record per door call, pinned by holders.
 #[cfg(feature = "mcp")]
 pub mod door_dispatch;
+/// EA6: the door's per-caller capability token, minted from the host's scope
+/// policy instead of a blanket grant.
+#[cfg(feature = "mcp")]
+pub mod door_token;
 /// DOOR7: six fixed prompts over the real door verbs, with a deterministic tape.
 #[cfg(feature = "mcp")]
 pub mod e2e_ladder;
@@ -51,6 +55,11 @@ pub mod look_host;
 pub mod mcp;
 #[cfg(all(test, feature = "mcp"))]
 mod mcp_transcript_tests;
+/// BG14: the lesson rows `tools/memory/memory.mjs` keeps, read and appended
+/// behind the door by the `e2040://memory` resource and the `memory.record`
+/// verb.
+#[cfg(feature = "mcp")]
+pub mod memory_store;
 /// Door v2 verb packs: core tools plus packs loaded on demand, one guarded
 /// registration API for every verb.
 #[cfg(feature = "mcp")]
@@ -62,6 +71,10 @@ pub mod pick;
 pub mod plan_goals;
 #[cfg(feature = "mcp")]
 pub mod play;
+/// AX28: the task-shaped `play.run` contract — the tasks capability, the slice
+/// size, the task answer and its reader. Play handles only, never the scene.
+#[cfg(feature = "mcp")]
+pub mod play_task;
 pub mod receipts;
 /// BRP-shaped loopback shim over the verb table (in-process, no socket).
 #[cfg(feature = "mcp")]
