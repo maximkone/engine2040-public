@@ -23,6 +23,9 @@
 
 #[cfg(feature = "app")]
 pub mod overlay;
+/// Training readout: the last presses, the exchanges and their frame
+/// advantage behind a toggle key, never hashed.
+pub mod training_overlay;
 
 use core::fmt;
 

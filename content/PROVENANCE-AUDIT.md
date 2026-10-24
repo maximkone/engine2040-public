@@ -13,7 +13,7 @@ record then runs through a JS mirror of the gate's `check_record`. Sources: the 
 the fighters are the OpenGameArt System G6 CC0 pack. Floor of the CT46 row is 50 assets; the matrix lists every shipped one.
 
 <!-- gen:audit-matrix -->
-75 records, all hand-made chain (no AI generator rows yet; CT71 adds them with generator + model + prompt digest). Disk column: `match` SHA equals the file, `DRIFT` it does not, `off-tree` the file is not in the tracked tree.
+84 records, all hand-made chain (no AI generator rows yet; CT71 adds them with generator + model + prompt digest). Disk column: `match` SHA equals the file, `DRIFT` it does not, `off-tree` the file is not in the tracked tree.
 
 | # | gate name | URL | SPDX | author | SHA-256 | disk |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -34,7 +34,7 @@ the fighters are the OpenGameArt System G6 CC0 pack. Floor of the CT46 row is 50
 | 15 | content/arena/hdri/arena_day.hdr | https://polyhaven.com/a/goegap | CC0-1.0 | Greg Zaal | c3ddb9860a308449718f1187bf988638f09eb155ad1eed45ac7ab6607eda47c0 | match |
 | 16 | content/arena/hdri/arena_sunset.hdr | https://polyhaven.com/a/venice_sunset | CC0-1.0 | Greg Zaal | f243a060f84df1437705d2e50bbdbcce66aa55ddb2d913c18eb3f87873213b10 | off-tree |
 | 17 | content/arena/hdri/arena_night.hdr | https://polyhaven.com/a/moonlit_golf | CC0-1.0 | Greg Zaal | 66452c13b77cd8dbdd44b8ff9837d304c64d5d095ef3c93b31465024a2fb0d07 | off-tree |
-| 18 | content/arena/placement.json | https://github.com/maximkone/engine2040-public/blob/master/content/arena/tools/gen.mjs | CC0-1.0 | engine2040 CT8 lane | e2fe86589f5d78a3d73a9bcef844a28aab76ba2b60b8d7486c3fff158411bc60 | match |
+| 18 | content/arena/placement.json | https://github.com/maximkone/engine2040-public/blob/master/content/arena/tools/gen.mjs | CC0-1.0 | engine2040 CT8 lane | 571256b59337219b6c5e8b06bacb0048d79e44e3ea3ec55729a33f60059d5fbb | match |
 | 19 | content/arena/textures/sand_albedo_2k.jpg | https://polyhaven.com/a/aerial_beach_01 | CC0-1.0 | Rob Tuytel | 1803d7e2861b304bea6d2e124dcd4c657fcb93843b84c17bb2db98ce48a87e4e | match |
 | 20 | content/arena/textures/sand_normal_2k.jpg | https://polyhaven.com/a/aerial_beach_01 | CC0-1.0 | Rob Tuytel | 0f35185b7225fe2027897bb7e4586c7deb048817524f1ed104fdae7ce80bdc06 | match |
 | 21 | content/arena/textures/sand_roughness_2k.jpg | https://polyhaven.com/a/aerial_beach_01 | CC0-1.0 | Rob Tuytel | 318b440c109de7411f9e7443f38ae3cf873f34e90afd762c931bae3b23426da2 | match |
@@ -66,32 +66,41 @@ the fighters are the OpenGameArt System G6 CC0 pack. Floor of the CT46 row is 50
 | 47 | content/arena/cooked/floor_base.ktx2 | https://ambientcg.com/a/PavingStones150 | CC0-1.0 | ambientCG | c014382ed08e7c14b8526928f17978bf21f076be1ded37fac9cb550d17b06284 | match |
 | 48 | content/arena/cooked/floor_normal.ktx2 | https://ambientcg.com/a/PavingStones150 | CC0-1.0 | ambientCG | 729b946c04ed80c74e143333e4d16f22936cd36b4c54046e77de581d47470a05 | match |
 | 49 | content/arena/cooked/floor_orm.ktx2 | https://ambientcg.com/a/PavingStones150 | CC0-1.0 | ambientCG | 5941670432e48dc09295d585a4117e83cf89ca1f7bf8152e4f5dad1048facbeb | match |
-| 50 | content/incoming/studio_small_09_1k.hdr | https://polyhaven.com/a/studio_small_09 | CC0-1.0 | Sergej Majboroda | e7cfda5f4e98e623db12b8bfd0184e048488e4855d9c83e2751fb44a32e80c45 | match |
-| 51 | content/arena/hdri/polyhaven-studio-small-09-1k.hdr | https://polyhaven.com/a/studio_small_09 | CC0-1.0 | Sergej Majboroda | e7cfda5f4e98e623db12b8bfd0184e048488e4855d9c83e2751fb44a32e80c45 | match |
-| 52 | content/fighters/incoming/modular_rpg_characters.7z | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | ef53003c6b29798a634fb27a3f9fc3181a2c02b217689744f2944fc5fcc0fd99 | off-tree |
-| 53 | content/fighters/incoming/modular_rpg_characters_ik_rig_for_animating.7z | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 5e97fcbb17c23c6d84e085a54ea32c8a4fe0ee471a1d9b41bff9dead40e75aaf | off-tree |
-| 54 | content/fighters/incoming/staged/hero.blend | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma), staged by engine2040 CT19 lane, re-grafted by CT21 lane | bc73a5a7fd46c8170a06c80eef5d210b68648666d5924d76c5774fb489d6a3fa | off-tree |
-| 55 | content/fighters/incoming/staged/hero.blend1 | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma), staged by engine2040 CT19 lane | 24de66d628562a961ec249c35158fe728e7d00ffd7c4da1fed325d47d5ca69d4 | off-tree |
-| 56 | content/fighters/incoming/staged/hero.parts.json | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | engine2040 CT19 lane (part list over System G6 parts) | 3d29b13820cb1305f77aeff7307a309064b447e24d6b27350fcdadec082c2ce2 | off-tree |
-| 57 | content/fighters/incoming/staged/hero.weapon.json | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | engine2040 CT21 lane (cook report over System G6 parts) | c8c0a9c303d513035e23f51b32026e8e45e074a6f92291657861ecf5c329d14c | off-tree |
-| 58 | content/fighters/glb/hero_body.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 4bdc600a7acb1fa057f33e5c680bff9f74d047f5d2de22df6a8addc1e94bbbd5 | match |
-| 59 | content/fighters/glb/opp_male_light_body.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 9f4d71e67365af68d85ad2e17541ca22a87956e7a235171e27953c32a04a7ce1 | match |
-| 60 | content/fighters/glb/opp_female_medium_body.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 08427dd6aaef4bdb9a317c023306778555503c1ea16d82747aaea9ef84cb6886 | match |
-| 61 | content/fighters/glb/opp_female_light_body.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | ef908b0fa2b4af5e9880dc87ccbd77002178c64bae4dfebec06b78e5e6595bd2 | match |
-| 62 | content/fighters/glb/clips/human_male_idle.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | a2b0cfa670722e2e8283830e9f5c73873405833172ba94065c61b8cdbd902a39 | match |
-| 63 | content/fighters/glb/clips/human_male_run.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | d70d936ef077de8d8308902de7730013e329902a1225663a20ccdd2a44b25df3 | match |
-| 64 | content/fighters/glb/clips/human_male_jump.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 616bae7ea3976f225c17718161f0c17ca4bdf1d157312b6090929ff29e9fec6c | match |
-| 65 | content/fighters/glb/clips/human_male_death.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 1893e5cb2e2494901ac7900897279b7f73c2ca90e6e93f58ca02a0ac868149d6 | match |
-| 66 | content/fighters/glb/clips/human_male_idle_combat_main_hand_melee.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | a936e4a6d12961ea8efa6da863917e0b7c87a2b5974aef9db113c06f0b05a773 | match |
-| 67 | content/fighters/glb/clips/human_male_idle_combat_unarmed.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 36f6c97144f8a47e3482b7db489710b290a7f0e0aea1396db0bf8e63c80e01e4 | match |
-| 68 | content/fighters/glb/clips/human_male_cast_main_hand_melee.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 29afa8abbb1a8f13ebdc7a6f32f7a64bb4cc210dbeb3bbba47cfa1cb86e18c3e | match |
-| 69 | content/fighters/glb/clips/human_male_cast_main_hand_melee_2.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 54283fa8fd025e2b22829e23a0add18cdb3b01a3e53dbe04832c4c7b77515118 | match |
-| 70 | content/fighters/glb/clips/human_male_cast_main_hand_melee_3.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | ccc80face7b028b29b0724b4d1124ed1ccfc672663c11456600a7c7c6d374dd4 | match |
-| 71 | content/fighters/glb/clips/human_male_cast_two_handed_melee.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | e157db55608e079748bf4f4032e3132acc508a81487535d60812e0374707c2b8 | match |
-| 72 | content/fighters/glb/clips/human_male_cast_two_handed_melee_2.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | d3a5d5c287b4ce6ec768a00f783914500a7a705a4bea6f44568fa46f9c9bb6c5 | match |
-| 73 | content/fighters/glb/clips/human_male_cast_off_hand_shield.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 9c356f894fc8047a4399c07a75fc5fd0458720be8de055a641fdd547d01a0c22 | match |
-| 74 | content/fighters/glb/clips/human_male_cast_dual_wield_melee.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 0f5eea98b4ea71ca8c48168536ee6fd19ab65ad26a15abe8de249bb38dbc254b | match |
-| 75 | content/fighters/glb/clips/human_male_power_up.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | e58392df622087402161eef0775f0625eae89fdd77693e9ec74515ce543be793 | match |
+| 50 | content/arena/cooked/marble_base.ktx2 | https://polyhaven.com/a/marble_01 | CC0-1.0 | Poly Haven | f3be862d4763f422a2d4c3f20b1fb39b9776c6a473a66f90a18239bcfa66258b | match |
+| 51 | content/arena/cooked/marble_normal.ktx2 | https://polyhaven.com/a/marble_01 | CC0-1.0 | Poly Haven | 40de17df38e9659d382dc21a2c602c4a4270535f6ee78c423187f62c1edc59ef | match |
+| 52 | content/arena/cooked/marble_orm.ktx2 | https://polyhaven.com/a/marble_01 | CC0-1.0 | Poly Haven | febc7c1ed2d9cc1bf21be2f81584434dd17f0e27226bb9762903b522f80cff3e | match |
+| 53 | content/arena/cooked/marble_tiles_base.ktx2 | https://polyhaven.com/a/marble_tiles | CC0-1.0 | Poly Haven | fc24397531f0ac86100b57b6a110df56deab18c333faf12d40501f855748885b | match |
+| 54 | content/arena/cooked/marble_tiles_normal.ktx2 | https://polyhaven.com/a/marble_tiles | CC0-1.0 | Poly Haven | 192eb0edf19e51bddd2d311fd9eb29f2898aaf5d844418e3b3498f4d22820c1d | match |
+| 55 | content/arena/cooked/marble_tiles_orm.ktx2 | https://polyhaven.com/a/marble_tiles | CC0-1.0 | Poly Haven | d95756e1384d76e6af15796199369c7d3fd7c0ed396c2d37e8efc1fd8a730cc7 | match |
+| 56 | content/arena/cooked/sand_dense_base.ktx2 | https://polyhaven.com/a/dense_sand | CC0-1.0 | Poly Haven | 86071f43d130011ac24dddc9b39ce95c1f72c5b56d1c3631e4f178307eef6c05 | match |
+| 57 | content/arena/cooked/sand_dense_normal.ktx2 | https://polyhaven.com/a/dense_sand | CC0-1.0 | Poly Haven | fe1fcf6019af221854ae39ad23f221c5e67b7a19b8b35951b24ba7205d59d9cb | match |
+| 58 | content/arena/cooked/sand_dense_orm.ktx2 | https://polyhaven.com/a/dense_sand | CC0-1.0 | Poly Haven | 729e24da02dcd09f62a9a1c31475aea6889f6f4707c7cca6c29dd928b345b5c5 | match |
+| 59 | content/incoming/studio_small_09_1k.hdr | https://polyhaven.com/a/studio_small_09 | CC0-1.0 | Sergej Majboroda | e7cfda5f4e98e623db12b8bfd0184e048488e4855d9c83e2751fb44a32e80c45 | match |
+| 60 | content/arena/hdri/polyhaven-studio-small-09-1k.hdr | https://polyhaven.com/a/studio_small_09 | CC0-1.0 | Sergej Majboroda | e7cfda5f4e98e623db12b8bfd0184e048488e4855d9c83e2751fb44a32e80c45 | match |
+| 61 | content/fighters/incoming/modular_rpg_characters.7z | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | ef53003c6b29798a634fb27a3f9fc3181a2c02b217689744f2944fc5fcc0fd99 | off-tree |
+| 62 | content/fighters/incoming/modular_rpg_characters_ik_rig_for_animating.7z | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 5e97fcbb17c23c6d84e085a54ea32c8a4fe0ee471a1d9b41bff9dead40e75aaf | off-tree |
+| 63 | content/fighters/incoming/staged/hero.blend | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma), staged by engine2040 CT19 lane, re-grafted by CT21 lane | bc73a5a7fd46c8170a06c80eef5d210b68648666d5924d76c5774fb489d6a3fa | off-tree |
+| 64 | content/fighters/incoming/staged/hero.blend1 | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma), staged by engine2040 CT19 lane | 24de66d628562a961ec249c35158fe728e7d00ffd7c4da1fed325d47d5ca69d4 | off-tree |
+| 65 | content/fighters/incoming/staged/hero.parts.json | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | engine2040 CT19 lane (part list over System G6 parts) | 3d29b13820cb1305f77aeff7307a309064b447e24d6b27350fcdadec082c2ce2 | off-tree |
+| 66 | content/fighters/incoming/staged/hero.weapon.json | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | engine2040 CT21 lane (cook report over System G6 parts) | c8c0a9c303d513035e23f51b32026e8e45e074a6f92291657861ecf5c329d14c | off-tree |
+| 67 | content/fighters/glb/hero_body.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 4bdc600a7acb1fa057f33e5c680bff9f74d047f5d2de22df6a8addc1e94bbbd5 | match |
+| 68 | content/fighters/glb/opp_male_light_body.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 9f4d71e67365af68d85ad2e17541ca22a87956e7a235171e27953c32a04a7ce1 | match |
+| 69 | content/fighters/glb/opp_female_medium_body.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 08427dd6aaef4bdb9a317c023306778555503c1ea16d82747aaea9ef84cb6886 | match |
+| 70 | content/fighters/glb/opp_female_light_body.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | ef908b0fa2b4af5e9880dc87ccbd77002178c64bae4dfebec06b78e5e6595bd2 | match |
+| 71 | content/fighters/glb/clips/human_male_idle.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | a2b0cfa670722e2e8283830e9f5c73873405833172ba94065c61b8cdbd902a39 | match |
+| 72 | content/fighters/glb/clips/human_male_run.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | d70d936ef077de8d8308902de7730013e329902a1225663a20ccdd2a44b25df3 | match |
+| 73 | content/fighters/glb/clips/human_male_jump.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 616bae7ea3976f225c17718161f0c17ca4bdf1d157312b6090929ff29e9fec6c | match |
+| 74 | content/fighters/glb/clips/human_male_death.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 1893e5cb2e2494901ac7900897279b7f73c2ca90e6e93f58ca02a0ac868149d6 | match |
+| 75 | content/fighters/glb/clips/human_male_idle_combat_main_hand_melee.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | a936e4a6d12961ea8efa6da863917e0b7c87a2b5974aef9db113c06f0b05a773 | match |
+| 76 | content/fighters/glb/clips/human_male_idle_combat_unarmed.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 36f6c97144f8a47e3482b7db489710b290a7f0e0aea1396db0bf8e63c80e01e4 | match |
+| 77 | content/fighters/glb/clips/human_male_cast_main_hand_melee.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 29afa8abbb1a8f13ebdc7a6f32f7a64bb4cc210dbeb3bbba47cfa1cb86e18c3e | match |
+| 78 | content/fighters/glb/clips/human_male_cast_main_hand_melee_2.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 54283fa8fd025e2b22829e23a0add18cdb3b01a3e53dbe04832c4c7b77515118 | match |
+| 79 | content/fighters/glb/clips/human_male_cast_main_hand_melee_3.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | ccc80face7b028b29b0724b4d1124ed1ccfc672663c11456600a7c7c6d374dd4 | match |
+| 80 | content/fighters/glb/clips/human_male_cast_two_handed_melee.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | e157db55608e079748bf4f4032e3132acc508a81487535d60812e0374707c2b8 | match |
+| 81 | content/fighters/glb/clips/human_male_cast_two_handed_melee_2.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | d3a5d5c287b4ce6ec768a00f783914500a7a705a4bea6f44568fa46f9c9bb6c5 | match |
+| 82 | content/fighters/glb/clips/human_male_cast_off_hand_shield.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 9c356f894fc8047a4399c07a75fc5fd0458720be8de055a641fdd547d01a0c22 | match |
+| 83 | content/fighters/glb/clips/human_male_cast_dual_wield_melee.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | 0f5eea98b4ea71ca8c48168536ee6fd19ab65ad26a15abe8de249bb38dbc254b | match |
+| 84 | content/fighters/glb/clips/human_male_power_up.glb | https://opengameart.org/content/modular-rpg-characters | CC0-1.0 | System G6 (aka Qoma) | e58392df622087402161eef0775f0625eae89fdd77693e9ec74515ce543be793 | match |
 
 Release-refusal dry-run: 3 refusals.
 

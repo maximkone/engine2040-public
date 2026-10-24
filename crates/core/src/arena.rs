@@ -216,6 +216,26 @@ mod tests {
     }
 
     #[test]
+    fn alloc_zeroes_its_words_and_refuses_one_past_capacity() {
+        let mut arena = SliceArena::with_capacity_words(4);
+        assert_eq!(arena.alloc(3).expect("three fit"), &[0, 0, 0]);
+        assert_eq!(arena.used_words(), 3);
+        arena.reset();
+        let exact = arena.alloc(4).expect("an exact fit is not an overflow");
+        assert_eq!(exact, &[0, 0, 0, 0]);
+        assert_eq!(arena.used_words(), 4);
+        arena.reset();
+        assert_eq!(
+            arena.alloc(5).expect_err("five words cannot fit four"),
+            ArenaError::Overflow {
+                needed_words: 5,
+                capacity_words: 4,
+            }
+        );
+        assert_eq!(arena.used_words(), 0, "a refused alloc moves no cursor");
+    }
+
+    #[test]
     fn staged_slices_round_trip() {
         let mut arena = SliceArena::with_capacity_words(16);
         let staged = arena.push_slice(&[10u32, 20, 30]).expect("fits");
