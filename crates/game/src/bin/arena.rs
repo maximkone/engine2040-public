@@ -483,10 +483,10 @@ fn cheap_frame_list(
 }
 
 /// Presentation threading for the EG45 balance look: folds one tick's cues
-/// into swings through the look, accepting the authoritative `Sim` when the
-/// live poll exposes it. `None` until the later row owns that edge (the look
-/// mirrors the same integer verdicts from cues today, so the same blows lean
-/// the same roots). Presentation only, never hashed.
+/// into swings through the look. The landing rows are the authority's own
+/// (`LiveMatch::landings` copied into the tick scratch), so no `Sim` handle is
+/// needed here; the look mirrors the same integer verdicts from cues, so the
+/// same blows lean the same roots. Presentation only, never hashed.
 fn observe_tick_with_sim(
     look: &mut FighterLook,
     tick: u32,
@@ -494,7 +494,6 @@ fn observe_tick_with_sim(
     hp: &[u16],
     cues: &[FightCue],
     lands: &[engine_arena::FallLanding],
-    _sim: Option<&engine_arena::Sim>,
 ) {
     // FEEL7: the views are the tick's pre-step positions, so the authority's
     // landing row starts the squash on the very tick the fall table charged;
@@ -2732,9 +2731,9 @@ impl ArenaApp {
                 ));
                 presenter.set_probe_every(LOOK_PROBE_EVERY);
                 presenter.set_fog_every(LIVE_FOG_EVERY);
-                // EG13: 4x MSAA stays off unless this run asks for it
-                // (`E2040_MSAA=1`), so the default window frame keeps the
-                // 1x path the look captures were taken with.
+                // EG13/LF5d: 4x MSAA ships on (the calmer sand-edge pick);
+                // `E2040_MSAA=0` is the explicit 1x opt-out and `1` repeats
+                // the default.
                 let msaa_on = msaa_setting(std::env::var(MSAA_ENV).ok().as_deref());
                 presenter.set_msaa_enabled(msaa_on);
                 // EG13: the perf run says which sample count it measured, so a

@@ -484,7 +484,6 @@ impl ArenaApp {
             hp,
             &self.tick_scratch.cues,
             &self.tick_scratch.lands,
-            None,
         );
         if let Some(scene) = self.spear.scene.as_mut() {
             scene.observe_tick(look, self.app.live_match(), views);
