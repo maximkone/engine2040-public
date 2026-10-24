@@ -207,6 +207,35 @@ pub struct CallRecord {
     pub chain: [u8; 32],
 }
 
+impl CallRecord {
+    /// The canonical entry bytes this record seals (little-endian integers,
+    /// length-prefixed tool text). Same call, same bytes: a plain call's
+    /// serialized bytes are unchanged from the pre-ledger log.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        entry_bytes(
+            self.session,
+            &self.tool,
+            self.revision,
+            self.outcome,
+            self.detail,
+            self.seq,
+        )
+    }
+
+    /// Lowercase hex of [`Self::canonical_bytes`], for a pinned test byte row.
+    #[must_use]
+    pub fn canonical_hex(&self) -> String {
+        use std::fmt::Write as _;
+        let bytes = self.canonical_bytes();
+        let mut text = String::with_capacity(bytes.len().saturating_mul(2));
+        for byte in bytes {
+            let _ = write!(text, "{byte:02x}");
+        }
+        text
+    }
+}
+
 /// One agent-loop call: the chain record plus the args that drove it, and the
 /// document revision on both sides of the call. Replaying [`Self::args`] in
 /// order on a fresh door reproduces the same writes at the same revisions;
@@ -233,6 +262,79 @@ pub fn args_digest(args: &str) -> u64 {
     let mut hasher = Fnv64::new();
     hasher.write(args.as_bytes());
     hasher.finish()
+}
+
+/// One round's outcome in the ledger: the two sealed outcomes plus the ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerOutcome {
+    /// The last round landed or answered with nothing pending.
+    Ok,
+    /// The last round was refused.
+    Refused,
+    /// The last round asked the client for input and has not been retried.
+    InputRequired,
+}
+
+impl LedgerOutcome {
+    /// Stable word for the ledger row.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Refused => "refused",
+            Self::InputRequired => "input_required",
+        }
+    }
+
+    /// The ledger outcome a sealed record carries.
+    fn from_audit(outcome: AuditOutcome) -> Self {
+        match outcome {
+            AuditOutcome::Ok => Self::Ok,
+            AuditOutcome::Refused => Self::Refused,
+        }
+    }
+}
+
+/// What a retried call carries about the ask it answers (MCP31): the
+/// `requestState` the ask named and the answer the retry gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundNote {
+    /// Opaque state the asking result handed back; the retry echoes it.
+    pub request_state: String,
+    /// What the retry answered, when it answered the ask this note names.
+    pub answer: Option<String>,
+}
+
+/// One logical call in the ledger: how many rounds it took, the outcome of the
+/// last round and what a retry answered. A plain call is one round; a call
+/// that asked for input and was retried folds both rounds into one entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerEntry {
+    /// Rounds folded into this entry: 1, or 2 once a retry joined the ask.
+    pub rounds: u32,
+    /// Outcome of the newest round.
+    pub outcome: LedgerOutcome,
+    /// Sequence of the newest round's record in the chain.
+    pub seq: u64,
+    /// `requestState` the ask named, when the call asked.
+    pub request_state: Option<String>,
+    /// What the retry answered, recorded on the round that carried it.
+    pub answer: Option<String>,
+}
+
+impl LedgerEntry {
+    /// One deterministic text row (`seq rounds outcome answer state`), so the
+    /// same call reads back the same bytes twice.
+    #[must_use]
+    pub fn row(&self) -> String {
+        format!(
+            "{} {} {} {} {}",
+            self.seq,
+            self.rounds,
+            self.outcome.as_str(),
+            self.answer.as_deref().unwrap_or("-"),
+            self.request_state.as_deref().unwrap_or("-")
+        )
+    }
 }
 
 /// Refuse args over [`MAX_ARGS_BYTES`] before anything runs, so the bound has
@@ -286,6 +388,10 @@ pub struct DoorAudit {
     /// Agent-loop calls beside the chain: the args plus the revisions on both
     /// sides, kept under the same cap as the records.
     calls: VecDeque<LoopCall>,
+    /// MCP31: one entry per logical call, folding the rounds an ask takes.
+    /// Derived from the records, never chained: the entry index points at the
+    /// newest round's `seq`, so the sealed bytes of a record never move.
+    entries: VecDeque<LedgerEntry>,
     /// Chain digest of the newest rotated-out record (zeros while nothing
     /// rotated out): verification of the retained window starts here.
     anchor: [u8; 32],
@@ -302,6 +408,7 @@ impl DoorAudit {
         Self {
             records: VecDeque::new(),
             calls: VecDeque::new(),
+            entries: VecDeque::new(),
             anchor: [0u8; 32],
             dropped: 0,
             appended: 0,
@@ -382,6 +489,18 @@ impl DoorAudit {
             chain,
         });
         self.appended = seq;
+        // MCP31: every record starts its own one-round ledger entry; a retry
+        // folds it into the ask's entry (`mark_ask`, `note_round`).
+        if self.entries.len() >= DOOR_AUDIT_CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(LedgerEntry {
+            rounds: 1,
+            outcome: LedgerOutcome::from_audit(outcome),
+            seq,
+            request_state: None,
+            answer: None,
+        });
         self.records.back().ok_or(AuditError::SequenceExhausted)
     }
 
@@ -423,6 +542,65 @@ impl DoorAudit {
     /// Agent-loop calls retained beside the chain, oldest first.
     pub fn loop_calls(&self) -> impl Iterator<Item = &LoopCall> {
         self.calls.iter()
+    }
+
+    /// Ledger entries, oldest first: one per logical call.
+    pub fn entries(&self) -> impl Iterator<Item = &LedgerEntry> {
+        self.entries.iter()
+    }
+
+    /// Sequence of the newest retained record, when any.
+    pub fn last_seq(&self) -> Option<u64> {
+        self.records.back().map(|record| record.seq)
+    }
+
+    /// MCP31: mark the newest record's entry as an ask: it is keyed by the
+    /// `requestState` the result hands back, so the retry can find it, and its
+    /// outcome reads `input_required` until a retry lands.
+    pub fn mark_ask(&mut self, request_state: Option<&str>) -> bool {
+        let Some(state) = request_state else {
+            return false;
+        };
+        let Some(entry) = self.entries.back_mut() else {
+            return false;
+        };
+        entry.request_state = Some(state.to_owned());
+        entry.outcome = LedgerOutcome::InputRequired;
+        true
+    }
+
+    /// MCP31: fold the newest record into the entry of the call it retries.
+    /// The retry's own one-round entry is dropped and the ask's entry takes
+    /// one more round, the newest outcome and the answer the retry carried. A
+    /// retry whose ask left the window keeps its own entry and answers false.
+    pub fn note_round(&mut self, round: Option<&RoundNote>) -> bool {
+        let Some(round) = round else {
+            return false;
+        };
+        let Some((last_outcome, last_seq)) = self
+            .records
+            .back()
+            .map(|record| (record.outcome, record.seq))
+        else {
+            return false;
+        };
+        let Some(own) = self.entries.pop_back() else {
+            return false;
+        };
+        let Some(asked) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.request_state.as_deref() == Some(round.request_state.as_str()))
+        else {
+            self.entries.push_back(own);
+            return false;
+        };
+        asked.rounds = asked.rounds.saturating_add(1);
+        asked.outcome = LedgerOutcome::from_audit(last_outcome);
+        asked.seq = last_seq;
+        asked.answer = round.answer.clone();
+        true
     }
 
     /// Streaming checker positioned at the start of the retained window: feed
