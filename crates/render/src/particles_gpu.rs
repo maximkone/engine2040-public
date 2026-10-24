@@ -29,10 +29,12 @@ pub use particle_events::{BURST_EXTENT_M, MAX_BURST};
 #[path = "particle_draw_gpu.rs"]
 mod particle_draw_gpu;
 #[cfg(feature = "gpu")]
+use crate::vfx_soft::{vfx_frame_finite, vfx_pack_frame, VfxFrame};
+#[cfg(feature = "gpu")]
 use particle_draw_gpu::{
     particle_draw_atlas, particle_draw_buffer, particle_draw_layout, particle_draw_pipeline,
-    particle_pack_instance, particle_pack_uniform, PARTICLE_DRAW_MAX_INSTANCES,
-    PARTICLE_DRAW_SCENE_DEPTH_BYTES,
+    particle_pack_instance, particle_pack_uniform, PARTICLE_DEPTH_ON_ADDR,
+    PARTICLE_DRAW_MAX_INSTANCES, PARTICLE_VFX_ADDR, PARTICLE_VFX_AT,
 };
 #[cfg(feature = "gpu")]
 pub use particle_draw_gpu::{PARTICLE_DRAW_INSTANCE_BYTES, PARTICLE_DRAW_UNIFORM_BYTES};
@@ -1152,6 +1154,9 @@ pub struct DrawRecord {
     pub fade: f32,
     /// Velocity stretch factor; 1 is round, at most [`STRETCH_MAX`].
     pub stretch: f32,
+    /// Velocity in meters per second: the draw streaks sparks and blood along
+    /// its view-plane share.
+    pub vel: [f32; 3],
     /// Current tint (RGBA).
     pub tint: [f32; 4],
     /// Owner tag (`EmitterKind::index`); output runs 0, 1, 2 in order.
@@ -1196,6 +1201,7 @@ impl ParticlePool {
                     blend_b: pair.weight_b,
                     fade,
                     stretch: stretch.len,
+                    vel: p.vel,
                     tint: p.tint,
                     kind: p.kind,
                 });
@@ -1266,10 +1272,15 @@ pub struct ParticleSubmitter {
     draw: Option<ParticleDrawState>,
     /// Staged records, reused across frames (cleared, never reallocated).
     records: Vec<DrawRecord>,
+    /// The frame constants the next stage packs behind the camera.
+    vfx: VfxFrame,
+    /// Group 1: the frame's stored depth, rebuilt with the targets. Without it
+    /// the batch cannot draw (the pipeline layout asks for it).
+    depth_bind: Option<wgpu::BindGroup>,
 }
 
 /// Device state for the staged draw: the flipbook pipeline built from
-/// [`PARTICLE_DRAW_WGSL`], the 112-byte view uniform, the max-size instance
+/// [`PARTICLE_DRAW_WGSL`], the 144-byte view uniform, the max-size instance
 /// buffer, the one-texel atlas stand-in and the bind group that ties them
 /// together under the shader's group 0. Built once, on the first non-empty
 /// batch; every later batch rewrites the same buffers.
@@ -1279,7 +1290,6 @@ struct ParticleDrawState {
     bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     instances: wgpu::Buffer,
-    scene_depth: wgpu::Buffer,
     /// The one-texel white atlas stand-in the bind group samples.
     atlas: wgpu::Texture,
     /// Staged instance bytes, reused across frames (grown once).
@@ -1306,9 +1316,59 @@ impl ParticleSubmitter {
                 ],
                 [1.0, 0.0, 0.0],
                 [0.0, 1.0, 0.0],
+                &VfxFrame::default(),
             ),
             draw: None,
             records: Vec::new(),
+            vfx: VfxFrame::default(),
+            depth_bind: None,
+        }
+    }
+
+    /// Hand the batch the frame's stored depth (the presenter rebuilds this
+    /// with its targets). Cheap: one bind group.
+    pub fn bind_depth(&mut self, depth_bind: wgpu::BindGroup) {
+        self.depth_bind = Some(depth_bind);
+    }
+
+    /// True once a depth bind is in place.
+    pub fn has_depth_bind(&self) -> bool {
+        self.depth_bind.is_some()
+    }
+
+    /// The frame constants the next stage packs.
+    pub fn vfx(&self) -> VfxFrame {
+        self.vfx
+    }
+
+    /// Take the frame's depth constants and light. A non-finite block is
+    /// refused (the last good one stays). Rewrites the uniform tail in place.
+    pub fn set_vfx(&mut self, queue: &wgpu::Queue, vfx: VfxFrame) -> bool {
+        if !vfx_frame_finite(&vfx) {
+            return false;
+        }
+        self.vfx = vfx;
+        vfx_pack_frame(&vfx, &mut self.draw_view[PARTICLE_VFX_AT..]);
+        if let Some(draw) = self.draw.as_ref() {
+            queue.write_buffer(
+                &draw.uniform,
+                PARTICLE_VFX_ADDR,
+                &self.draw_view[PARTICLE_VFX_AT..],
+            );
+        }
+        true
+    }
+
+    /// Say whether the depth bind holds this frame's depth (the frame decides
+    /// at record time: the 4x path keeps none). Rewrites one word of the live
+    /// uniform; the next stage repacks the tail from the last [`Self::set_vfx`].
+    pub fn set_depth_valid(&self, queue: &wgpu::Queue, valid: bool) {
+        if let Some(draw) = self.draw.as_ref() {
+            queue.write_buffer(
+                &draw.uniform,
+                PARTICLE_DEPTH_ON_ADDR,
+                &u32::from(valid).to_le_bytes(),
+            );
         }
     }
 
@@ -1329,7 +1389,7 @@ impl ParticleSubmitter {
     /// length). Non-finite input is refused before anything reaches the
     /// device, so a bad camera never draws a wild quad. Called before the
     /// first batch it only stages the bytes, which that batch uploads.
-    /// Steady frames rewrite the same 112 bytes: no frame creates anything.
+    /// Steady frames rewrite the same 144 bytes: no frame creates anything.
     pub fn set_draw_view(
         &mut self,
         queue: &wgpu::Queue,
@@ -1347,7 +1407,7 @@ impl ParticleSubmitter {
                 "particle draw view is not finite".into(),
             ));
         }
-        let packed = particle_pack_uniform(view_proj, cam_right, cam_up);
+        let packed = particle_pack_uniform(view_proj, cam_right, cam_up, &self.vfx);
         self.draw_view = packed;
         if let Some(draw) = self.draw.as_ref() {
             queue.write_buffer(&draw.uniform, 0, &packed);
@@ -1452,20 +1512,20 @@ impl ParticleSubmitter {
     /// carry one HDR colour target and no depth attachment, the shape the
     /// pipeline declares; the caller owns it and its target, so the quads
     /// land in the frame the blit reads. This reads device state only: no
-    /// map call, no poll wait, no frame stall.
+    /// map call, no poll wait, no frame stall. The depth the soft contact reads
+    /// rides group 1 ([`Self::bind_depth`]); without it nothing draws.
     pub fn encode_draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let Some(draw) = self.draw.as_ref() else {
+        let (Some(draw), Some(depth)) = (self.draw.as_ref(), self.depth_bind.as_ref()) else {
             return;
         };
         if draw.staged == 0 {
             return;
         }
-        // The two seams the batch binds: the one-texel stand-in atlas and the
-        // zeroed depth block the shader declares until the closing slice.
+        // The one-texel stand-in atlas; the scene depth rides group 1.
         debug_assert_eq!(draw.atlas.size().width, 1);
-        debug_assert_eq!(draw.scene_depth.size(), PARTICLE_DRAW_SCENE_DEPTH_BYTES);
         pass.set_pipeline(&draw.pipeline);
         pass.set_bind_group(0, &draw.bind, &[]);
+        pass.set_bind_group(crate::vfx_soft::VFX_DEPTH_GROUP, depth, &[]);
         pass.draw(0..4, 0..draw.staged);
     }
 }
@@ -1503,15 +1563,6 @@ impl ParticleDrawState {
             })?,
             wgpu::BufferUsages::STORAGE,
         );
-        // The shader declares this seam but reads a constant zero gap until
-        // the closing slice feeds scene depth, so one zeroed block serves it.
-        let scene_depth = particle_draw_buffer(
-            device,
-            "rp2-particle-draw-scene-depth",
-            PARTICLE_DRAW_SCENE_DEPTH_BYTES,
-            wgpu::BufferUsages::STORAGE,
-        );
-        queue.write_buffer(&scene_depth, 0, &[0u8; 64]);
         let (atlas, atlas_view) = particle_draw_atlas(device, queue);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("rp2-particle-draw-sampler"),
@@ -1539,10 +1590,6 @@ impl ParticleDrawState {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: scene_depth.as_entire_binding(),
-                },
             ],
         });
         Ok(Self {
@@ -1550,7 +1597,6 @@ impl ParticleDrawState {
             bind,
             uniform,
             instances,
-            scene_depth,
             atlas,
             packed: Vec::with_capacity(PARTICLE_DRAW_MAX_INSTANCES * PARTICLE_DRAW_INSTANCE_BYTES),
             staged: 0,
@@ -1973,6 +2019,44 @@ mod tests {
                 "draw WGSL must stage {needle}"
             );
         }
+    }
+
+    #[test]
+    fn particle_draw_binds_the_scene_depth_and_fades_at_the_range() {
+        // The range is the shared 0.3 m bar: near the surface the card is
+        // whole, at the bar it is gone, and the falloff is linear between.
+        assert_eq!(SOFT_FADE_RANGE_M, 0.3, "range is the shared soft bar");
+        assert_eq!(soft_fade(0.0), 1.0, "no gap reads fully visible");
+        assert!(
+            (soft_fade(0.15) - 0.5).abs() < 1e-6,
+            "half the bar fades half: {}",
+            soft_fade(0.15)
+        );
+        assert_eq!(soft_fade(SOFT_FADE_RANGE_M), 0.0, "the bar reads gone");
+        // The shader binds the frame depth on group 1 and fades with the range.
+        assert!(
+            PARTICLE_DRAW_WGSL.contains("@group(1) @binding(0) var scene_depth"),
+            "the draw reads the frame depth at group 1"
+        );
+        assert!(
+            PARTICLE_DRAW_WGSL.contains("draw_soft_fade(gap, draw.fade_range)"),
+            "the fragment fades by gap over the range"
+        );
+        assert!(
+            !PARTICLE_DRAW_WGSL.contains("scene_gap"),
+            "the zeroed group-0 depth seam is gone"
+        );
+        // The pipeline lays group 0 (draw) plus group 1 (depth) out, and the
+        // builder no longer allocates the zeroed 64-byte block.
+        let builders = include_str!("particle_draw_gpu.rs");
+        assert!(
+            builders.contains("bind_group_layouts: &[Some(layout), Some(&depth)]"),
+            "group 1 is the vfx depth layout"
+        );
+        assert!(
+            !builders.contains("rp2-particle-draw-scene-depth"),
+            "no zeroed scene-depth block is built"
+        );
     }
 
     #[test]
@@ -2556,6 +2640,34 @@ mod tests {
             u32::try_from(staged).expect("the staged count fits u32")
         );
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rl52-particle-draw-depth"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::present::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        submitter.bind_depth(crate::vfx_soft::vfx_depth_bind(device, &depth_view));
+        assert!(submitter.has_depth_bind());
+        assert!(
+            submitter.set_vfx(
+                queue,
+                VfxFrame {
+                    depth_valid: true,
+                    ..VfxFrame::default()
+                }
+            ),
+            "a finite block is taken"
+        );
+        submitter.set_depth_valid(queue, true);
         let hdr = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rl52-particle-draw-target"),
             size: wgpu::Extent3d {
@@ -2654,5 +2766,76 @@ mod tests {
             ),
             "the same pool twice reports the same instance count"
         );
+    }
+    /// The instance image carries the velocity and the emitter kind where the
+    /// shader reads them (`vel` at 16, `kind` after the blend weight at 44).
+    #[test]
+    #[cfg(feature = "gpu")]
+    fn particle_instance_carries_velocity_and_kind() {
+        let record = DrawRecord {
+            pos: [1.0, 2.0, 3.0],
+            size_m: 0.05,
+            frame_a: 0,
+            frame_b: 0,
+            blend_a: 1.0,
+            blend_b: 0.0,
+            fade: 0.75,
+            stretch: 1.5,
+            vel: [0.5, -2.0, 4.0],
+            tint: [0.4, 0.1, 0.1, 0.9],
+            kind: 3,
+        };
+        let mut bytes = [0u8; PARTICLE_DRAW_INSTANCE_BYTES];
+        particle_pack_instance(&record, &mut bytes);
+        let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+        let u = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+        assert_eq!((f(16), f(20), f(24)), (0.5, -2.0, 4.0), "velocity");
+        assert_eq!(f(28), 0.75, "the staged fade rides the alpha slot");
+        assert_eq!(u(44), 3, "the blood kind");
+        assert_eq!(f(48), 0.4, "the tint opens the last 16 bytes");
+        let mut again = [0u8; PARTICLE_DRAW_INSTANCE_BYTES];
+        particle_pack_instance(&record, &mut again);
+        assert_eq!(bytes, again, "the same record packs the same bytes");
+    }
+
+    /// The packers write each field at the offset naga gives it, so the
+    /// uniform and the instance the shader reads are the images staged.
+    #[test]
+    #[cfg(all(feature = "gpu", feature = "shader-validate"))]
+    fn particle_layouts_match_the_packers() {
+        let (span, fields) =
+            engine_material::compile::uniform_struct_layout(PARTICLE_DRAW_WGSL, "DrawU")
+                .expect("particle.wgsl declares DrawU");
+        assert_eq!(
+            span,
+            u32::try_from(PARTICLE_DRAW_UNIFORM_BYTES).expect("small")
+        );
+        let offset = |fields: &[(String, u32)], name: &str| {
+            fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, offset)| *offset)
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        assert_eq!(offset(&fields, "soft_on"), 108);
+        let at = |bytes: usize| u32::try_from(bytes).expect("small");
+        assert_eq!(offset(&fields, "zparams"), at(PARTICLE_VFX_AT));
+        assert_eq!(offset(&fields, "depth_on"), at(PARTICLE_VFX_AT) + 8);
+        assert_eq!(offset(&fields, "light"), at(PARTICLE_VFX_AT) + 16);
+        assert_eq!(usize::try_from(PARTICLE_VFX_ADDR), Ok(PARTICLE_VFX_AT));
+        assert_eq!(
+            usize::try_from(PARTICLE_DEPTH_ON_ADDR),
+            Ok(PARTICLE_VFX_AT + 8)
+        );
+        let (span, fields) =
+            engine_material::compile::uniform_struct_layout(PARTICLE_DRAW_WGSL, "DrawP")
+                .expect("particle.wgsl declares DrawP");
+        assert_eq!(
+            span,
+            u32::try_from(PARTICLE_DRAW_INSTANCE_BYTES).expect("small")
+        );
+        assert_eq!(offset(&fields, "vel"), 16);
+        assert_eq!(offset(&fields, "kind"), 44);
+        assert_eq!(offset(&fields, "tint"), 48);
     }
 }

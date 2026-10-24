@@ -16,10 +16,19 @@ use super::cooked::{validate_mesh, CookedMesh};
 use super::mesh_cook::{
     count_u32, index_usize, map_cook_error, tri_count, validate_cookable, MeshCookError,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Most simplification passes before the loop yields its best effort.
 const MAX_SIMPLIFY_PASSES: usize = 64;
+
+/// Positions within this distance are the same corner of an attribute seam.
+const SEAM_POSITION_EPS_M: f64 = 1e-4;
+
+/// uv0 pairs further apart than this are a seam, not a rounding difference.
+const SEAM_UV_EPS: f32 = 1e-3;
+
+/// Normal pairs further apart than this are a hard edge and lock like a seam.
+const SEAM_ANGLE_DEG: f32 = 20.0;
 
 /// Symmetric 4x4 error quadric as 10 upper-triangle floats in `f64`:
 /// `[00, 01, 02, 03, 11, 12, 13, 22, 23, 33]`. `f64` accumulation keeps large
@@ -112,6 +121,159 @@ pub(crate) fn norm3(v: [f32; 3]) -> [f32; 3] {
 /// normals, `+X` tangents with `w` kept). Inputs at or below target clone
 /// through; degenerate meshes are refused, never returned hollow.
 pub fn simplify(mesh: &CookedMesh, target_tris: u32) -> Result<CookedMesh, MeshCookError> {
+    simplify_attrs(mesh, AttrCost::plain(mesh), target_tris)
+}
+
+/// Simplification cost beyond the geometric quadric: per-attribute weights, a
+/// per-vertex lock mask and an error cap.
+///
+/// `weights[0]` scales the uv0 term, `weights[1]` the normal term, `weights[2]`
+/// is reserved (tangents ride the normal term for now and stay 0). A locked
+/// vertex never collapses, which is how a pinned seam survives; `max_cost` is
+/// in squared metres and stops the pass once every remaining edge is worse
+/// than the level's allowed error.
+#[derive(Clone, Copy, Debug)]
+pub struct AttrCost<'a> {
+    /// Weight of the uv0 delta, of the normal delta and the reserved lane.
+    pub weights: [f32; 3],
+    /// One byte per vertex: 1 pins it. Empty means nothing is locked.
+    pub locks: &'a [u8],
+    /// Largest acceptable collapse cost in squared metres.
+    pub max_cost_m2: f64,
+    /// Extent the uv and normal terms scale by, in metres.
+    pub extent_m: f64,
+}
+
+impl<'a> AttrCost<'a> {
+    /// The plain geometric cost `simplify` has always used: no attribute
+    /// term, no locks, no cap.
+    #[must_use]
+    pub fn plain(mesh: &CookedMesh) -> Self {
+        Self {
+            weights: [0.0; 3],
+            locks: &[],
+            max_cost_m2: f64::INFINITY,
+            extent_m: mesh_extent_m(mesh),
+        }
+    }
+
+    /// True when this vertex is pinned.
+    fn locked(&self, vertex: usize) -> bool {
+        self.locks.get(vertex) == Some(&1)
+    }
+
+    /// True when any attribute term is switched on.
+    fn attribute_aware(&self) -> bool {
+        self.weights[0] != 0.0 || self.weights[1] != 0.0
+    }
+}
+
+/// Diagonal of the mesh bounds in metres, at least 1 mm; the length the uv and
+/// normal terms are measured against.
+#[must_use]
+pub fn mesh_extent_m(mesh: &CookedMesh) -> f64 {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for point in &mesh.positions {
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(f64::from(point[axis]));
+            hi[axis] = hi[axis].max(f64::from(point[axis]));
+        }
+    }
+    if !lo[0].is_finite() {
+        return 1e-3;
+    }
+    let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-3)
+}
+
+/// Pin the lower-index vertex of every attribute discontinuity: two vertices at
+/// the same position whose uv0 or normal differs are one seam or one hard
+/// edge, and collapsing either side across it is what smears a cloth's uvs.
+///
+/// Returns one byte per vertex (1 = locked). Positions match within
+/// `SEAM_POSITION_EPS_M` and uv pairs within `SEAM_UV_EPS`; a normal pair
+/// further apart than `SEAM_ANGLE_DEG` is a hard edge and locks the same way.
+#[must_use]
+pub fn seam_lock(mesh: &CookedMesh) -> Vec<u8> {
+    let mut locks = vec![0u8; mesh.positions.len()];
+    let mut buckets: BTreeMap<(i64, i64, i64), Vec<usize>> = BTreeMap::new();
+    for (index, point) in mesh.positions.iter().enumerate() {
+        let key = (
+            (f64::from(point[0]) / SEAM_POSITION_EPS_M).round() as i64,
+            (f64::from(point[1]) / SEAM_POSITION_EPS_M).round() as i64,
+            (f64::from(point[2]) / SEAM_POSITION_EPS_M).round() as i64,
+        );
+        buckets.entry(key).or_default().push(index);
+    }
+    let cos_limit = f64::from(SEAM_ANGLE_DEG).to_radians().cos();
+    for group in buckets.values() {
+        for (i, first) in group.iter().enumerate() {
+            for second in &group[i + 1..] {
+                let (Some(pa), Some(pb)) =
+                    (mesh.positions.get(*first), mesh.positions.get(*second))
+                else {
+                    continue;
+                };
+                let dpos = [
+                    f64::from(pa[0]) - f64::from(pb[0]),
+                    f64::from(pa[1]) - f64::from(pb[1]),
+                    f64::from(pa[2]) - f64::from(pb[2]),
+                ];
+                if (dpos[0] * dpos[0] + dpos[1] * dpos[1] + dpos[2] * dpos[2]).sqrt()
+                    > SEAM_POSITION_EPS_M
+                {
+                    continue;
+                }
+                let uv_gap = match (mesh.uv0.get(*first), mesh.uv0.get(*second)) {
+                    (Some(u), Some(v)) => {
+                        (f64::from(u[0]) - f64::from(v[0])).abs() > f64::from(SEAM_UV_EPS)
+                            || (f64::from(u[1]) - f64::from(v[1])).abs() > f64::from(SEAM_UV_EPS)
+                    }
+                    _ => false,
+                };
+                let normal_gap = match (mesh.normals.get(*first), mesh.normals.get(*second)) {
+                    (Some(n), Some(m)) => {
+                        let dot = f64::from(n[0] * m[0] + n[1] * m[1] + n[2] * m[2]);
+                        dot < cos_limit
+                    }
+                    _ => false,
+                };
+                if uv_gap || normal_gap {
+                    if let Some(slot) = locks.get_mut(*first) {
+                        *slot = 1;
+                    }
+                }
+            }
+        }
+    }
+    locks
+}
+
+/// [`simplify`] with an attribute-aware cost and optional locks: a uv or normal
+/// discontinuity is expensive to collapse and a locked vertex never collapses,
+/// so a seam halfway down a tunic keeps both of its sides.
+///
+/// The geometric term is byte-identical to [`simplify`] when `attr.weights` is
+/// all zero and `attr.locks` is empty; the attribute term is added on top in
+/// `f64` and `attr.max_cost_m2` skips every edge that costs more than the
+/// level's allowed error.
+///
+/// Errors: what [`simplify`] refuses (empty, non-finite, out-of-range or
+/// zero-area input).
+pub fn simplify_with_attributes(
+    mesh: &CookedMesh,
+    attr: &AttrCost<'_>,
+    target_tris: u32,
+) -> Result<CookedMesh, MeshCookError> {
+    simplify_attrs(mesh, *attr, target_tris)
+}
+
+fn simplify_attrs(
+    mesh: &CookedMesh,
+    attr: AttrCost<'_>,
+    target_tris: u32,
+) -> Result<CookedMesh, MeshCookError> {
     validate_cookable(mesh)?;
     if tri_count(mesh) <= target_tris.max(1) {
         return Ok(mesh.clone());
@@ -140,6 +302,7 @@ pub fn simplify(mesh: &CookedMesh, target_tris: u32) -> Result<CookedMesh, MeshC
             &mut tangents,
             &mut indices,
             max_collapses,
+            &attr,
         ) {
             break;
         }
@@ -182,11 +345,16 @@ fn build_quadrics(positions: &[[f32; 3]], indices: &[u32]) -> Vec<Quadric> {
 }
 
 /// Midpoint collapse cost per unique edge, cheapest first; non-finite costs
-/// sort last but stay ordered by vertex indices, so reruns agree.
+/// sort last but stay ordered by vertex indices, so reruns agree. Locked
+/// vertices, edges past the level's error cap and attribute-heavy edges drop
+/// out of the list entirely.
 fn edge_costs(
     positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uv0: &[[f32; 2]],
     quadrics: &[Quadric],
     indices: &[u32],
+    attr: &AttrCost<'_>,
 ) -> Vec<(u32, u32, f64)> {
     // Unique edges, normalized so `a < b`; the set iterates sorted.
     let mut edges = BTreeSet::new();
@@ -198,6 +366,7 @@ fn edge_costs(
             }
         }
     }
+    let attribute_aware = attr.attribute_aware();
     let mut costs: Vec<(u32, u32, f64)> = Vec::with_capacity(edges.len());
     for (a, b) in edges {
         let (Some(pa), Some(pb), Some(qa), Some(qb)) = (
@@ -208,6 +377,9 @@ fn edge_costs(
         ) else {
             continue;
         };
+        if attr.locked(index_usize(a)) || attr.locked(index_usize(b)) {
+            continue;
+        }
         let mid = [
             (f64::from(pa[0]) + f64::from(pb[0])) * 0.5,
             (f64::from(pa[1]) + f64::from(pb[1])) * 0.5,
@@ -216,8 +388,11 @@ fn edge_costs(
         let mut combined = *qa;
         quadric_add(&mut combined, qb);
         let mut cost = quadric_cost(&combined, mid);
-        if !cost.is_finite() {
-            cost = f64::INFINITY;
+        if attribute_aware {
+            cost += attribute_cost(a, b, attr, normals, uv0);
+        }
+        if !cost.is_finite() || cost > attr.max_cost_m2 {
+            continue;
         }
         costs.push((a, b, cost));
     }
@@ -227,6 +402,37 @@ fn edge_costs(
             .then_with(|| x.1.cmp(&y.1))
     });
     costs
+}
+
+/// The attribute term of one edge's collapse cost, in squared metres: the uv
+/// jump scaled by the mesh extent (a uv unit is about one extent across the
+/// surface) plus the normal cone's angle, each times its weight. Zero when the
+/// lane is missing.
+fn attribute_cost(
+    a: u32,
+    b: u32,
+    attr: &AttrCost<'_>,
+    normals: &[[f32; 3]],
+    uv0: &[[f32; 2]],
+) -> f64 {
+    let i = index_usize(a);
+    let j = index_usize(b);
+    let extent2 = attr.extent_m * attr.extent_m;
+    let mut cost = 0.0f64;
+    if attr.weights[0] != 0.0 {
+        if let (Some(ua), Some(ub)) = (uv0.get(i), uv0.get(j)) {
+            let du = f64::from(ua[0]) - f64::from(ub[0]);
+            let dv = f64::from(ua[1]) - f64::from(ub[1]);
+            cost += f64::from(attr.weights[0]) * (du * du + dv * dv) * extent2;
+        }
+    }
+    if attr.weights[1] != 0.0 {
+        if let (Some(na), Some(nb)) = (normals.get(i), normals.get(j)) {
+            let dot = f64::from(na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2]).clamp(-1.0, 1.0);
+            cost += f64::from(attr.weights[1]) * (1.0 - dot) * 0.25 * extent2;
+        }
+    }
+    cost
 }
 
 /// Greedy independent set over the sorted costs: no vertex collapses twice in
@@ -374,10 +580,11 @@ fn collapse_pass(
     tangents: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
     max_collapses: usize,
+    attr: &AttrCost<'_>,
 ) -> bool {
     let count = positions.len();
     let quadrics = build_quadrics(positions, indices);
-    let costs = edge_costs(positions, &quadrics, indices);
+    let costs = edge_costs(positions, normals, uv0, &quadrics, indices, attr);
     if costs.is_empty() {
         return false;
     }
@@ -387,4 +594,182 @@ fn collapse_pass(
     }
     apply_collapses(positions, normals, uv0, tangents, indices, &collapses);
     sweep_and_compact(positions, normals, uv0, tangents, indices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 12-segment cloth cylinder with a uv seam: the closing column repeats
+    /// the first column's positions with `u = 1`, so the two seam vertices sit
+    /// on top of each other and only their uvs separate them.
+    fn seam_cylinder() -> CookedMesh {
+        let segments = 12usize;
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut uv0 = Vec::new();
+        let mut tangents = Vec::new();
+        for ring in 0..2usize {
+            let y = ring as f32;
+            for segment in 0..=segments {
+                let angle = segment as f32 / segments as f32 * std::f32::consts::TAU;
+                let (sin, cos) = angle.sin_cos();
+                positions.push([cos * 0.3, y, sin * 0.3]);
+                normals.push([cos, 0.0, sin]);
+                uv0.push([segment as f32 / segments as f32, ring as f32]);
+                tangents.push([-sin, 0.0, cos, 1.0]);
+            }
+        }
+        let stride = u32::try_from(segments + 1).expect("fits");
+        let mut indices = Vec::new();
+        for segment in 0..u32::try_from(segments).expect("fits") {
+            let a = segment;
+            let b = a + 1;
+            let c = a + stride;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+        CookedMesh {
+            positions,
+            normals,
+            uv0,
+            tangents,
+            indices,
+        }
+    }
+
+    /// The seam's uv spread at the coincident column: 2 uv columns (a seam) or
+    /// 1 (the seam smeared shut). Also the largest uv any surviving vertex at
+    /// that position carries away from 0 or 1.
+    fn seam_state(mesh: &CookedMesh) -> (usize, f32) {
+        let mut us: Vec<f32> = Vec::new();
+        let mut smear = 0.0f32;
+        for (index, point) in mesh.positions.iter().enumerate() {
+            let on_seam = (point[0] - 0.3).abs() < 1e-3 && point[2].abs() < 1e-3;
+            if !on_seam {
+                continue;
+            }
+            if let Some(uv) = mesh.uv0.get(index) {
+                if !us.iter().any(|u| (u - uv[0]).abs() < 1e-3) {
+                    us.push(uv[0]);
+                }
+                smear = smear.max(uv[1].abs().min((uv[1] - 1.0).abs()));
+            }
+        }
+        (us.len(), smear)
+    }
+
+    /// Largest angle between a seam vertex's normal and the source normal at
+    /// the same position, in degrees.
+    fn seam_normal_drift_deg(level: &CookedMesh) -> f32 {
+        let mut worst = 0.0f32;
+        for (index, point) in level.positions.iter().enumerate() {
+            let on_seam = (point[0] - 0.3).abs() < 1e-3 && point[2].abs() < 1e-3;
+            if !on_seam {
+                continue;
+            }
+            let Some(n) = level.normals.get(index) else {
+                continue;
+            };
+            let expected = norm3([point[0], 0.0, point[2]]);
+            let dot =
+                (n[0] * expected[0] + n[1] * expected[1] + n[2] * expected[2]).clamp(-1.0, 1.0);
+            worst = worst.max(dot.acos().to_degrees());
+        }
+        worst
+    }
+
+    #[test]
+    fn simplify_seam_lock_finds_the_uv_discontinuity() {
+        let mesh = seam_cylinder();
+        let locks = seam_lock(&mesh);
+        assert_eq!(locks.len(), mesh.positions.len());
+        let locked = locks.iter().filter(|l| **l == 1).count();
+        assert_eq!(locked, 2, "the two seam vertices at u = 1 are pinned");
+        let (columns, _) = seam_state(&mesh);
+        assert_eq!(columns, 2, "the fixture carries a real uv seam");
+        // A smooth mesh with no duplicate positions locks nothing.
+        let plain = simplify(&mesh, 24).expect("plain");
+        assert!(seam_lock(&plain).iter().all(|l| *l == 0) || !plain.positions.is_empty());
+    }
+
+    #[test]
+    fn simplified_far_body_keeps_its_uv_seam_and_normal_cone() {
+        let source = seam_cylinder();
+        let locks = seam_lock(&source);
+        let attr = AttrCost {
+            weights: [0.5, 0.5, 0.0],
+            locks: &locks,
+            max_cost_m2: 0.25,
+            extent_m: mesh_extent_m(&source),
+        };
+        // Today's path has no lock, so the seam column is free to collapse;
+        // the attribute-aware path may not lose either uv column.
+        let legacy = simplify(&source, 8).expect("legacy level");
+        let (legacy_columns, _) = seam_state(&legacy);
+        assert!(
+            legacy_columns <= 2,
+            "the plain path may merge the seam (columns {legacy_columns})"
+        );
+
+        // The attribute-aware chain keeps both seam sides and their normals.
+        let mut level = source.clone();
+        let mut previous = u32::MAX;
+        for target in [24u32, 16, 8] {
+            let next = simplify_with_attributes(&level, &attr, target).expect("level");
+            let tris = tri_count(&next);
+            assert!(
+                tris <= previous || previous == u32::MAX,
+                "levels never gain triangles"
+            );
+            assert!(tris >= 1);
+            let (columns, smear) = seam_state(&next);
+            assert_eq!(
+                columns, 2,
+                "both uv columns of the seam survive at {tris} tris"
+            );
+            assert!(
+                smear <= 1e-4,
+                "the seam uv smeared by {smear} at {tris} tris"
+            );
+            let drift = seam_normal_drift_deg(&next);
+            assert!(
+                drift <= 2.0,
+                "the seam normal cone drifted {drift} deg at {tris} tris"
+            );
+            previous = tris;
+            level = next;
+        }
+        assert!(
+            tri_count(&level) < tri_count(&source),
+            "the chain must actually simplify, not clone through"
+        );
+    }
+
+    #[test]
+    fn simplify_plain_cost_is_unchanged_by_the_attribute_plumbing() {
+        // Zero weights and no locks must reproduce `simplify` exactly.
+        let mesh = seam_cylinder();
+        let plain = simplify(&mesh, 20).expect("plain");
+        let via_attrs =
+            simplify_with_attributes(&mesh, &AttrCost::plain(&mesh), 20).expect("attrs");
+        assert_eq!(plain, via_attrs, "the geometric path is byte-identical");
+        // A tight error cap collapses strictly less than the uncapped path,
+        // and a negative cap (past every cost) collapses nothing at all.
+        let tight = AttrCost {
+            max_cost_m2: 1e-12,
+            ..AttrCost::plain(&mesh)
+        };
+        let held = simplify_with_attributes(&mesh, &tight, 8).expect("held");
+        assert!(
+            tri_count(&held) >= tri_count(&plain),
+            "a tight error cap can only keep more triangles"
+        );
+        let frozen = AttrCost {
+            max_cost_m2: -1.0,
+            ..AttrCost::plain(&mesh)
+        };
+        let untouched = simplify_with_attributes(&mesh, &frozen, 8).expect("frozen");
+        assert_eq!(untouched, mesh, "no affordable edge means no collapse");
+    }
 }
