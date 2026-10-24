@@ -175,6 +175,54 @@
       "vx": 0,
       "vz": 0,
       "yaw": 0
+    },
+    {
+      "id": 12,
+      "name": "machine_ballista",
+      "asset": "machine_ballista",
+      "x": -8,
+      "y": 0.6,
+      "z": 4,
+      "sx": 2.6,
+      "sy": 1.2,
+      "sz": 1.1,
+      "parent": null,
+      "physical": false,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 13,
+      "name": "machine_crane",
+      "asset": "machine_crane",
+      "x": -8,
+      "y": 1.2,
+      "z": -4,
+      "sx": 1.6,
+      "sy": 2.4,
+      "sz": 1,
+      "parent": null,
+      "physical": false,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 14,
+      "name": "machine_cart",
+      "asset": "machine_cart",
+      "x": 6,
+      "y": 0.6,
+      "z": -6,
+      "sx": 2.2,
+      "sy": 1.2,
+      "sz": 1.5,
+      "parent": null,
+      "physical": false,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
     }
   ]
 }
