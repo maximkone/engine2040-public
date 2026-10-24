@@ -63,6 +63,7 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 | `desync-diff.mjs` | Desync report over canonical bytes | `desync-diff.test.mjs` | 1 divergence, 2 usage or error |
 | `replay-to-mp4.mjs` | Tape to MP4 through ffmpeg | `replay-to-mp4.test.mjs` | 2 no ffmpeg or bad call, 1 failure, 0 ok |
 | `showcase.mjs` | PNG sequence to MP4 and GIF | `showcase.test.mjs` | see code |
+| `frame-audit.mjs` | Per frame, per law verdict on a capture dir: shadow, material, scale, attach (reads the picture, not boxes) | `frame-audit.test.mjs` | 0 ok, 1 a law failed, 2 usage or no frames |
 | `frame-moved.mjs` | Did the look move between captures | `frame-moved.test.mjs` | 2 on error, else see code |
 | `frame-triage.mjs` | Fighter-pixel triage of showcase frames | `frame-triage.test.mjs` | 1 triage fail, else see code |
 | `frame-v2v3.mjs` | Sky and motion heuristics on orbit captures | `frame-v2v3.test.mjs` | see code |
@@ -372,6 +373,25 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 - Stitches a PNG sequence into MP4 and GIF. Input `target/showcase/<date>/<clip>/` with `frame*.png` and `manifest.json`.
 - Run: `node tools/showcase.mjs --clip <dir> [--fps 30] [--width 640]`; `node tools/showcase.mjs <clipDir>`; `--help`.
 
+### frame-audit.mjs
+
+- Run this on every capture you are about to call good. The window's `view=ok` judges bodies as boxes; on 2026-10-24 it said `view=ok` on a frame with no shadows under any body, a black sword and shield, and a spear standing up out of a lying body. `frame-audit` reads the pixels under the posed truth and names the law, the frame and the subject.
+- Run: `node tools/frame-audit.mjs <capture-dir> [--json] [--frame N] [--quiet]`. Needs `<capture-dir>/view-audit.jsonl`, which arena.exe writes beside the PNGs on every `--capture-dir` run (one row per captured frame: camera, every body part's world bounds, true length, material factors and surface points, the palm and weapon-socket joints, every spear with its holder or victim). A capture from an older exe has none: the tool then reads the pixels alone (`audit=...(material only)`: the largest near-black blob outside the HUD fails as `black_slab@x,y`; shadow, scale and attach read `n/a`), and says to capture again with the current arena.exe. `fighter.mjs --prove` runs it after `view=ok` and prints `FIGHTER audit:`. Failing frames past the eighth print one line each; `--frame N` explains one.
+- Output, one line per frame, the reasons under each failing one, then the verdict line:
+  `frame 2: shadow=FAIL(slot0,slot1) material=FAIL(gladius_blade@0,scutum_board@0) scale=ok attach=FAIL(spear@1)`
+  `  attach spear@1: held by slot 1 that is down; the spear stands 84 deg up out of it`
+  `audit=FAIL(shadow,material,attach) frames=3 failed_frames=3`
+  A law reads `ok`, `n/a` (nothing to judge: no body big enough, floor hidden) or `FAIL(<subjects>)`. Subjects are `slotN`, `<material name>@<slot>`, `spear@<thrower slot>`.
+- Laws (thresholds in `T` and `KIT` of `tools/frame-audit-laws.mjs`; `frame-audit.test.mjs` draws a small scene for each and goes red without the law):
+  - `shadow`: the floor around each body is cut into 10 cm cells and read from the picture (never under a body box or the HUD). A cell is shadowed under 0.9 of the floor luma further than 3.5 m out; a body has a shadow when 20 or more shadowed cells join its feet (through the cells its own body hides), 4 or more of them dark (under 0.72). The sun is low, so the shadow may fall metres from the feet; a faint ambient blob alone is not a shadow. A body under 10% of the picture height, or with its feet out of the picture, is `n/a`.
+  - `material`: two reads. Named parts: each part's surface points are read as 5x5 patches; a patch with median luma under 0.2 and nothing above 0.24 is near-black and flat; a part with 60% of its samples like that fails, and the reason says whether a texture was bound (bound and flat = the texture never took). Black slab: inside each body's screen box, black pixels (luma under 0.06) with black on all four sides; 400 or more and 1.5% of the box fail `slotN:black_slab` (a sword or shield drawn with no material, even when the part has no name: the CT7 hero carries both inside a body quadrant).
+  - `scale`: blade, grip, shield and spear length against the kit's real range and as a share of the body's stature; stature 1.4 to 2.2 m.
+  - `attach`: the blade's box within 0.35 m of the right-hand socket, every other `gladius_*` part within 0.2 m of the blade, the shield within 0.3 m of the left-hand socket; a held spear needs a living upright holder and its shaft within 0.15 m of that holder's palm; a stuck spear needs its tip inside the victim's bounds (0.3 m pad) at under 70 degrees of elevation.
+- It is `audit=`, not `view=`. The window's `view=` stays as it was: the laws are tuned on real frames (shadow: the 2026-10-24 build with sun shadows passes, a body moved onto empty floor fails; spear and sword: first-frame fallback and black slabs fail) and have no known-good set for material and attach yet, so a new red law would only be noise. Wire a law into `view=` once a capture with the right sword and shield passes it. Treat `audit=FAIL` as a bug to read, then open the PNG and see it.
+- Not covered yet: a crowd of flat boxes (the stands crowd is an instanced draw with no per-figure truth), and a spear stuck in a lying body (the synthetic test covers the rule; the showcase tour has not been captured at that station).
+- A camera mismatch (the tool and the window project a body's root to different pixels) prints `camera=FAIL`: the laws cannot be trusted on that run.
+- Exit: 0 every law ok or n/a, 1 a law failed, 2 usage, a dir with no frames or an unreadable PNG.
+
 ### frame-moved.mjs
 
 - Compares two captures, says whether the look moved.
@@ -563,3 +583,55 @@ These `tools/*.test.mjs` files have no same-name module. Some import a module un
 - `docs/WORKFLOW.md` names `tools/sprint-lock.mjs`, `tools/sprint-loop.mjs`, `builder` and `planner` agents. None exists in `tools/`.
 - `docs/FOCUS.md` names `tools/drift-check.mjs` and `tools/steal-next.mjs`. Neither exists in `tools/`.
 - `proof.mjs` with no flags runs cargo locally; AGENTS says cargo proofs go to `gh-check.mjs`. Mirror pushes go to `main`; this repo is `master`. 37 test files have no module (section 13). "see code" rows in the table are unverified.
+
+## 15. Machine generator and the showcase tour
+
+### 15.1 tools/blender/machine_gen.py
+
+A seeded generator for machine props: siege engines, cranes, carts and frames. The algorithm is ported from ldo/blender_spaceship_generator (MIT). The mesh maths is plain Python, and Blender is used only to write the GLB (file header).
+
+- Presets: `machine`, `ballista`, `crane` and `cart` (`PRESETS`, `tools/blender/machine_gen.py:510-555`). Each preset has a triangle budget. `cart` has 4000. Run `--list` for the others.
+- Each preset is a base box, the faces it extrudes, and the weight of each detail kind. They are data.
+- The seed is an integer or a text string. A text seed is hashed with sha256. The stream is splitmix64, so it does not depend on the Python build (`Rng`, `machine_gen.py:104`).
+- A mesh has at most three material slots: wood, iron and tarp (`SLOTS`).
+
+**Run without Blender.** The numbers run in plain Python:
+
+- `python tools/blender/machine_gen.py --stats [--preset cart] [--seed 7]` prints the summary as JSON.
+- `python tools/blender/machine_gen.py --list` prints the presets and their budgets.
+
+**Run with Blender.** This writes the GLB and a `<name>.machine.json` sidecar:
+
+- `blender -b --factory-startup --python-exit-code 1 -P tools/blender/machine_gen.py -- <out.glb> [--preset cart] [--seed 7] [--max-tris N]`
+
+A mesh over its budget is refused, not thinned. Blender's triangle count must match the mesh, or the run fails (`main`, `machine_gen.py:820-870`).
+
+**Exit codes.** 0 is ok. 2 is a usage error (`E_USAGE`). 3 is a failure (`E_MACHINE`): over budget, or a GLB write with no Blender.
+
+**Limits.**
+
+- The presets are seeded silhouettes to judge by eye. They are not reconstructions of historical engines (file header).
+- Faces are not welded, so shared edges can carry T-junctions. The file header says this is cosmetic at prop scale.
+- Not cooked into the bundle yet: the SHOW4 row (`docs/SPRINT-38-showcase.md`), and `docs/plan/content.md` says the same.
+
+**Tests.** `node --test tools/blender/machine_gen.test.mjs` runs 11 tests. They cover `--list`, the same seed twice, a different seed, text seeds, the budget of every preset, mirror symmetry, the exits for usage and budget, and a GLB write with no Blender.
+
+### 15.2 Showcase tour (SHOW1)
+
+`arena.exe --showcase`, or double-click `play-showcase.bat`, hands slot 0 to a script. The script walks the human through five stations in order: yank, carry, swing, melee and finisher (`STATIONS`, `crates/game/src/showcase.rs:77`). The rival is a training dummy that stands and faces you and never swings (`docs/plan/showcase.md`).
+
+- Each station has a caption for the window title (`Station::caption`, `showcase.rs:100`) and a grade: `ok`, `missed` or `pending`.
+- A station that does not pass within `STATION_TICKS` (1200 ticks, 20 s) is marked missed, and the tour moves on (`showcase.rs:29`).
+- At exit the receipt line prints, for example `showcase: yank=ok carry=ok swing=ok melee=ok finisher=ok` (`Showcase::receipt_line`, `showcase.rs:212`).
+- The bat file is `play-showcase.bat`. It needs `target\release\arena.exe`, and it says the build command when that file is missing. It runs `arena.exe --scene arena --fighters 2 --showcase --ticks 100000`.
+- The flag is `SHOWCASE_FLAG` (`crates/game/src/bin/arena.rs:193`).
+- The main functions are `Showcase::new` (`showcase.rs:167`), `input` (`:225`, slot 0), `rival_input` (`:330`), and `observe` (`:375`, the grades). `grades()` (`:206`), `finished()` (`:200`), `caption()` (`:193`) and `station()` (`:187`) report state.
+- A new station is one `Station` variant, its caption, its script in `input` and its grade in `observe`. `docs/plan/showcase.md` has the table of systems.
+
+**Limits.**
+
+- SHOW1 is closed (`docs/SPRINT-38-showcase.md`). The headless tour and a 4200-frame window run both printed all five `ok`, with `view=ok`.
+- SHOW2 (the rope-cut station) is open.
+- Stations for the other built systems (SHOW3 to SHOW9) are open. `docs/plan/showcase.md` lists each one.
+
+**Tests.** `node tools/gh-check.mjs cargo test -p engine-game --lib showcase` runs 4 tests. They are `the_tour_passes_every_station_against_the_dummy`, `the_same_seed_plays_the_same_tour`, `a_station_that_cannot_pass_is_missed_and_the_tour_moves_on` and `captions_name_every_station_and_the_end`.
