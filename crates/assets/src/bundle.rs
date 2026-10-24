@@ -389,7 +389,7 @@ pub fn load_bundle(bytes: &[u8]) -> Result<LoadedBundle, BundleError> {
 }
 
 /// Fixed ship manifest: prefab spawn rows the export must include; missing rows fail loudly.
-pub const SHIP_MANIFEST: [(EntryKind, &'static str); 5] = [
+pub const SHIP_MANIFEST: [(EntryKind, &str); 5] = [
     (EntryKind::Mesh, "hero"),
     (EntryKind::Material, "hero-mat"),
     (EntryKind::Texture, "hero-albedo"),
@@ -1046,7 +1046,7 @@ fn decode_vec3_track(payload: &mut Payload<'_>) -> Result<engine_anim::Track, Bu
         let time = payload.f32()?;
         let value = [payload.f32()?, payload.f32()?, payload.f32()?];
         if !time.is_finite() || value.iter().any(|v| !v.is_finite()) {
-            return Err(invalid(&entry, "non-finite clip key"));
+            return Err(invalid(entry, "non-finite clip key"));
         }
         times.push(time);
         values.push(value);
@@ -1074,7 +1074,7 @@ fn decode_quat_track(
             payload.f32()?,
         ];
         if !time.is_finite() || value.iter().any(|v| !v.is_finite()) {
-            return Err(invalid(&entry, "non-finite clip key"));
+            return Err(invalid(entry, "non-finite clip key"));
         }
         times.push(time);
         values.push(value);

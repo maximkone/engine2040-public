@@ -403,7 +403,7 @@ Slim order 2026-10-15 (free lanes first, hot lanes second; at most 8 rows a pack
 
 ## 7. Board tasks
 
-Rows from the steals (2026-10-12, board shard `../SPRINT-21-look-feel.md`, scout files `../research/steals-2026-10-12/`): RL34-RL62 (display end, shadows, light, materials, particles, crowd, fog, draw model, LOD, temporal history, debug views), GS34-GS36 (live-frame hygiene, feature ladder, override constants), OPT34, OPT35, CQ23, PF25. Row changes: RL27 folds into RL35 (camera cascades stay for the stands only); RL32 needs RL60 (a transform first); R6 FSR unparks (FSR3 is MIT, read 2026-10-12); the expired TAA and PCSS steal lines in steals.md are now RL38 and RL35; RL5 is unfrozen for the RL43 storage fix only.
+Rows from the steals (2026-10-12, board shard `../SPRINT-21-look-feel.md`, scout files `../research/steals-2026-10-12/`): RL34-RL62 (display end, shadows, light, materials, particles, crowd, fog, draw model, LOD, temporal history, debug views), RL63-RL64 (octahedral impostors: math landed, GPU bake and draw open), GS34-GS36 (live-frame hygiene, feature ladder, override constants), OPT34, OPT35, CQ23, PF25. Row changes: RL27 folds into RL35 (camera cascades stay for the stands only); RL32 needs RL60 (a transform first); R6 FSR unparks (FSR3 is MIT, read 2026-10-12); the expired TAA and PCSS steal lines in steals.md are now RL38 and RL35; RL5 is unfrozen for the RL43 storage fix only.
 
 Rows from the books (2026-10-12, board shard `../SPRINT-20-game.md`; `BOOK-GAPS-2-2026-10-12.md` 2.2): RL32 the live loop sorts and groups draws (opaque front to back by pipeline, material, mesh; blended back to front), RL33 fighter cull bounds follow the posed body (before W7 culls fighters).
 

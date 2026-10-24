@@ -1,0 +1,25 @@
+{
+  "name": "ds-pixel-5x7",
+  "license": "CC0 1.0 (authored for design-studio, no third-party font data)",
+  "image": "font-5x7.png",
+  "size": {
+    "w": 96,
+    "h": 48
+  },
+  "cell": {
+    "w": 6,
+    "h": 8
+  },
+  "glyph": {
+    "w": 5,
+    "h": 7
+  },
+  "columns": 16,
+  "rows": 6,
+  "firstCodepoint": 32,
+  "lastCodepoint": 126,
+  "advance": 6,
+  "lineHeight": 9,
+  "uv": "cell index = codepoint - 32; x = (index % 16) * 6; y = floor(index / 16) * 8; u = x / 96; v = y / 48; tint: glyph pixels are white, multiply by the text color",
+  "ttf": "ds-pixel-5x7.ttf (same glyphs as outlines, 125 units per pixel, 1000 per em)"
+}
