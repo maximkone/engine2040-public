@@ -35,6 +35,25 @@ const STILL_M: f32 = 0.001;
 const PULL_STIFFNESS: f32 = 400.0;
 /// Damping of the pull, newtons per m/s of stretching speed.
 const PULL_DAMPING: f32 = 40.0;
+/// Radius of the drawn rope, meters: what a node keeps between itself and a body it meets.
+const ROPE_R_M: f32 = 0.016;
+/// How far off a body's surface a pushed node lands, meters: clear of the next push.
+const CONTACT_EPS_M: f32 = 1.0e-3;
+/// Share of its sideways slide a node keeps when a body pushes it out: 1 slides freely, 0 sticks.
+const SLIDE_KEEP: f32 = 0.5;
+/// A free chain may span at most this share of its rest length end to end.
+const SPAN_CAP: f32 = 1.01;
+
+/// One body a rope may not pass through: a capsule from `a` to `b` of radius `r`, meters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RopeBlock {
+    /// First end of the capsule's axis.
+    pub a: [f32; 3],
+    /// Second end of the capsule's axis.
+    pub b: [f32; 3],
+    /// Radius around the axis.
+    pub r: f32,
+}
 
 /// How tight a rope is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +83,10 @@ pub(crate) struct Tether {
     /// Ticks since both ends were let go.
     loose: u32,
     sweeps: usize,
+    /// The bodies this rope may not pass through, taken once per tick by the caller.
+    blocks: Vec<RopeBlock>,
+    /// Share of its sideways motion a pushed node keeps.
+    slide: f32,
 }
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -165,13 +188,15 @@ impl Tether {
             quiet: 0,
             loose: 0,
             sweeps,
+            blocks: Vec::new(),
+            slide: SLIDE_KEEP,
         };
         if rope.state == TetherState::Slack {
             // A straight chord shorter than the rope would buckle on the first tick and throw its
             // nodes, so a slack rope starts hung in its arc and settled onto its length.
             rope.lay_sag(a, b);
             for _ in 0..SEAT_PASSES {
-                rope.satisfy(true);
+                rope.satisfy(true, &[], SLIDE_KEEP);
             }
             rope.prev.clone_from(&rope.curr);
         }
@@ -252,6 +277,30 @@ impl Tether {
 
     /// One tick: integrate the free nodes, pin the ends, satisfy the length.
     pub(crate) fn step(&mut self) {
+        // The blocks are taken out of the rope for the step so the pass can borrow the nodes
+        // mutably; the buffer keeps its capacity, so a tick allocates nothing new.
+        let blocks = std::mem::take(&mut self.blocks);
+        let slide = self.slide;
+        self.step_beside(&blocks, slide);
+        self.blocks = blocks;
+    }
+
+    /// Takes the bodies this rope may not pass through for the next step, and the share of its
+    /// sideways motion a node keeps when one pushes it out (1 slides freely, 0 sticks).
+    pub(crate) fn set_beside(&mut self, blocks: &[RopeBlock], friction: f32) {
+        self.blocks.clear();
+        self.blocks.extend_from_slice(blocks);
+        self.slide = if friction.is_finite() {
+            friction.clamp(0.0, 1.0)
+        } else {
+            SLIDE_KEEP
+        };
+    }
+
+    /// One tick with the bodies the rope may not pass through (`blocks`, taken once for the whole
+    /// tick, not per sweep) and the share of its sideways motion a pushed node keeps (`friction`,
+    /// 1 slides freely, 0 sticks). An empty slice is the plain rope.
+    pub(crate) fn step_beside(&mut self, blocks: &[RopeBlock], friction: f32) {
         if self.asleep() {
             return;
         }
@@ -289,6 +338,11 @@ impl Tether {
             if reach >= self.rest {
                 self.state = TetherState::Taut;
                 self.lay_straight(a, b);
+                // A taut rope lies straight between the ends, so no sweep runs; it still may not
+                // be drawn through a body, so the bodies push its free nodes out here.
+                if !blocks.is_empty() {
+                    self.push_out(blocks, friction);
+                }
             } else {
                 if self.state == TetherState::Taut {
                     // A taut rope that goes slack hangs in its arc at once; projecting its straight
@@ -296,10 +350,10 @@ impl Tether {
                     self.lay_sag(a, b);
                 }
                 self.state = TetherState::Slack;
-                self.satisfy(true);
+                self.satisfy(true, blocks, friction);
             }
         } else {
-            self.satisfy(false);
+            self.satisfy(false, blocks, friction);
         }
         self.settle(&before);
     }
@@ -331,11 +385,14 @@ impl Tether {
     }
 
     /// Gauss-Seidel sweeps over the segments, forward then back, each moving both nodes half the
-    /// error (a pinned end does not move).
-    fn satisfy(&mut self, pinned: bool) {
+    /// error (a pinned end does not move). Every sweep starts by capping a free chain's span, so a
+    /// stretched rope snaps back before the segments re-space it, and ends by pushing the nodes out
+    /// of the bodies it meets.
+    fn satisfy(&mut self, pinned: bool, blocks: &[RopeBlock], friction: f32) {
         let last = self.curr.len() - 1;
         let seg = self.rest / share(last, 1);
         for _ in 0..self.sweeps {
+            self.clamp_span();
             for k in 0..2 * last {
                 let i = if k < last { k } else { 2 * last - 1 - k };
                 let d = sub(self.curr[i + 1], self.curr[i]);
@@ -356,6 +413,78 @@ impl Tether {
             }
             for node in &mut self.curr {
                 node[1] = node[1].max(FLOOR_M);
+            }
+            self.push_out(blocks, friction);
+        }
+    }
+
+    /// A free chain never spans more than [`SPAN_CAP`] of its rest length: the far node is pulled
+    /// in along the chord to the cap, and the next segment pass spaces the rest out again. A rope
+    /// held at both ends is skipped: its chord is the caller's two points, which the rope cannot
+    /// shorten.
+    fn clamp_span(&mut self) {
+        if self.ends.is_some() {
+            return;
+        }
+        let last = self.curr.len() - 1;
+        let chord = sub(self.curr[last], self.curr[0]);
+        let span = len(chord);
+        let cap = self.rest * SPAN_CAP;
+        if span <= cap || span < 1.0e-6 {
+            return;
+        }
+        let k = cap / span;
+        self.curr[last] = [
+            self.curr[0][0] + chord[0] * k,
+            self.curr[0][1] + chord[1] * k,
+            self.curr[0][2] + chord[2] * k,
+        ];
+        self.prev[last] = [
+            self.prev[0][0] + (self.prev[last][0] - self.prev[0][0]) * k,
+            self.prev[0][1] + (self.prev[last][1] - self.prev[0][1]) * k,
+            self.prev[0][2] + (self.prev[last][2] - self.prev[0][2]) * k,
+        ];
+    }
+
+    /// Push every free node that sits inside a body out to the body's surface plus the rope's
+    /// radius, then keep `friction` of what is left of its motion: the sideways part slides, the
+    /// part into the body turns around. The node's last position becomes the contact point, so the
+    /// next tick reads the leftover as its velocity. A pinned end stays where the caller put it.
+    fn push_out(&mut self, blocks: &[RopeBlock], friction: f32) {
+        if blocks.is_empty() {
+            return;
+        }
+        let pinned = self.ends.is_some();
+        let keep = friction.clamp(0.0, 1.0);
+        let last = self.curr.len() - 1;
+        for i in 0..=last {
+            if pinned && (i == 0 || i == last) {
+                continue;
+            }
+            // Two passes: a node pushed out of one capsule can land in a neighbour it overlaps
+            // (a chest over a spine), and the second pass clears that one too.
+            for _ in 0..2 {
+                for block in blocks {
+                    let at = self.curr[i];
+                    let (foot, dist) = capsule_foot(block, at);
+                    let need = block.r + ROPE_R_M;
+                    if dist >= need {
+                        continue;
+                    }
+                    let normal = if dist > 1.0e-6 {
+                        sub(at, foot).map(|c| c / dist)
+                    } else {
+                        axis_normal(block)
+                    };
+                    let contact = [0, 1, 2].map(|k| foot[k] + normal[k] * (need + CONTACT_EPS_M));
+                    let v = sub(at, contact);
+                    let into = dot(v, normal);
+                    // Ball: the sideways part survives, the part toward the body is mirrored back.
+                    self.prev[i] = contact;
+                    self.curr[i] =
+                        [0, 1, 2].map(|k| contact[k] + keep * (v[k] - 2.0 * into * normal[k]));
+                    self.curr[i][1] = self.curr[i][1].max(FLOOR_M);
+                }
             }
         }
     }
@@ -385,6 +514,44 @@ impl Tether {
         } else {
             self.quiet = 0;
         }
+    }
+}
+
+/// The point of `block`'s axis closest to `p`, and `p`'s distance to it: the capsule's foot.
+fn capsule_foot(block: &RopeBlock, p: [f32; 3]) -> ([f32; 3], f32) {
+    let axis = sub(block.b, block.a);
+    let l2 = dot(axis, axis);
+    let t = if l2 < 1.0e-12 {
+        0.0
+    } else {
+        (dot(sub(p, block.a), axis) / l2).clamp(0.0, 1.0)
+    };
+    let foot = [0, 1, 2].map(|k| block.a[k] + axis[k] * t);
+    (foot, len(sub(p, foot)))
+}
+
+/// A unit vector square to `block`'s axis, for a node exactly on the axis, where the foot gives no
+/// direction. Picks the axis' own smallest component, so the same block always picks the same way.
+fn axis_normal(block: &RopeBlock) -> [f32; 3] {
+    let axis = sub(block.b, block.a);
+    let a = len(axis);
+    if a < 1.0e-6 {
+        return [0.0, 1.0, 0.0];
+    }
+    let axis = axis.map(|c| c / a);
+    let pick = [0_usize, 1, 2]
+        .into_iter()
+        .min_by(|i, j| axis[*i].abs().total_cmp(&axis[*j].abs()))
+        .unwrap_or(1);
+    let mut other = [0.0; 3];
+    other[pick] = 1.0;
+    let k = dot(other, axis);
+    let cross = [0, 1, 2].map(|i| other[i] - k * axis[i]);
+    let l = len(cross);
+    if l < 1.0e-6 {
+        [0.0, 1.0, 0.0]
+    } else {
+        cross.map(|c| c / l)
     }
 }
 

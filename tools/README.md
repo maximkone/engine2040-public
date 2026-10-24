@@ -14,12 +14,14 @@ Keep scripts small and portable; docs stay in `docs/`. The full per-tool referen
 
 Short lines; the script header is the full doc. Keep one line here per live `tools/*.mjs`.
 
+- `tools/aa-flicker.mjs` (+ `tools/aa-flicker.test.mjs`): the AA default's temporal number, measured on this GPU by the render sand-edge test and written to `target/reports/aa-flicker.json` for product-check.
 - `tools/affected.mjs` (+ `tools/affected.test.mjs`): node script; see its header.
 - `tools/agent-ladder.mjs` (+ `tools/agent-ladder.test.mjs`): run the six-rung door ladder twice and compare its tapes.
 - `tools/api-break.mjs` (+ `tools/api-break.test.mjs`): gate the public API of every engine crate against a committed baseline (rustdoc JSON); `--write` blesses a break.
 - `tools/arch-fitness.mjs` (+ `tools/arch-fitness.test.mjs`): check the crate graph stays acyclic.
 - `tools/arena-net.mjs` (+ `tools/arena-net.test.mjs`): two-process loopback proof of `arena --host`/`--join`: four scenarios twice, one final hash.
 - `tools/arena-report.mjs` (+ `tools/arena-report.test.mjs`): gate the arena manifest, PBR/HDRI VRAM caps, crate+torch receipt and soak baseline.
+- `tools/arena-run.mjs` (+ `tools/arena-run.test.mjs`): the only way to run the arena window: waits for the one window lock, runs `--exe` (or `head-build`'s) at above-normal priority, frees the lock on exit.
 - `tools/arena-shot.mjs`: the daily arena shot gate: runs the pinned capture and refuses placeholder frames; `--self-check` needs no GPU.
 - `tools/arena-sources.mjs` (+ `tools/arena-sources.test.mjs`): check the raw CC0 PBR sets in `content/arena/sources` and their PROVENANCE rows.
 - `tools/argv.mjs` (+ `tools/argv.test.mjs`): node script; see its header.
@@ -38,6 +40,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/clean.mjs` (+ `tools/clean.test.mjs`): move trash under `target/` to `C:\_quarantine\<date>\` with a `MOVES.tsv` row; never deletes, and refuses while a cargo build runs.
 - `tools/codex-check.mjs` (+ `tools/codex-check.test.mjs`): check every Rome table number against the source passage it names.
 - `tools/compile-cache.mjs` (+ `tools/compile-cache.test.mjs`): node script; see its header.
+- `tools/commit-mine.mjs` (+ `tools/commit-mine.test.mjs`): commit exactly your hunks by path on the shared tree (`--list` numbers them, `--pick`/`--whole` selects them), then push.
 - `tools/compile-cache-spike.mjs` (+ `tools/compile-cache-spike.test.mjs`): time one lane build cold, then with a warm sccache in fresh target dirs; prints KEEP/DROP, never edits a tracked file.
 - `tools/content-lib.mjs`: shared digest, image-size and generated-block helpers for the content report tools.
 - `tools/content-cross.mjs`: cross-file id checks over the faction-war content set, where each file is authored by a different agent.
@@ -47,6 +50,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/ctrf-report.mjs` (+ `tools/ctrf-report.test.mjs`): turn a nextest JUnit receipt into the CTRF report CI uploads; a pure function of the receipt bytes.
 - `tools/dep-rebuild-count.mjs` (+ `tools/dep-rebuild-count.test.mjs`): count the dependency units five lane builds rebuild (OPT8 bar) from `Compiling` lines in one target dir.
 - `tools/desync-diff.mjs` (+ `tools/desync-diff.test.mjs`): diff a desync to the first bad tick.
+- `tools/doc-pin.mjs` (+ `tools/doc-pin.test.mjs`): pin a doc that copies a source file's contract to that file's hash, so a source edit without the doc edit fails (`--write` re-pins); called from `tools/workspace-check.mjs`.
 - `tools/door-reference.mjs` (+ `tools/door-reference.test.mjs`): print every door tool and verb pack from the endpoint source into `docs/book/door-reference.md` (`--write`, `--check`).
 - `tools/docs-coverage.mjs` (+ `tools/docs-coverage.test.mjs`): ratchet per-crate missing-docs.
 - `tools/docs-links.mjs` (+ `tools/docs-links.test.mjs`): every relative link in tracked markdown outside `docs/archive/` resolves (`--json`); the CI gate.
@@ -67,14 +71,18 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/flaky-quarantine.mjs` (+ `tools/flaky-quarantine.test.mjs`): quarantine flaky tests.
 - `tools/fnv1a64.mjs` (+ `tools/fnv1a64.test.mjs`): node script; see its header.
 - `tools/frame-moved.mjs` (+ `tools/frame-moved.test.mjs`): node script; see its header.
+- `tools/frame-audit-laws.mjs` (+ `tools/frame-audit.test.mjs`): the four picture laws behind `frame-audit.mjs`, pure over an audit row and a decoded PNG.
+- `tools/frame-audit.mjs` (+ `tools/frame-audit.test.mjs`): per frame, per law verdict on a capture dir (shadow, material, scale, attach) from the window's `view-audit.jsonl` and the PNGs.
 - `tools/frame-triage.mjs` (+ `tools/frame-triage.test.mjs`): triage frame captures.
 - `tools/frame-v2v3.mjs` (+ `tools/frame-v2v3.test.mjs`): node script; see its header.
 - `tools/gate-silhouette.mjs`: compare a cooked silhouette against a golden PNG (pixelmatch/blockhash); exit 0 pass, 1 fail, 2 usage.
+- `tools/look-ab.mjs` (+ `tools/look-ab.test.mjs`): prove one look pass changes the picture — the same seed and tick captured pass off and pass on through `arena-run.mjs`, then the mean and max pixel delta and the changed-pixel share; refuses a pair whose delta is 0.
 - `tools/gh-check.mjs` (+ `tools/gh-check.test.mjs`): run one narrow cargo command on GitHub; returns at 100 s (exit 3, then `--wait`), sends GPU/window/Windows-only lines and failed runs to the PC by itself.
 - `tools/gh-search.mjs` (+ `tools/gh-search.test.mjs`): search GitHub code.
 - `tools/gltf-intake.mjs` (+ `tools/gltf-intake.test.mjs`): check a glTF file on intake.
 - `tools/golden-matrix.mjs` (+ `tools/golden-matrix.test.mjs`): compare tapes across machines.
 - `tools/gpu-farm.mjs` (+ `tools/gpu-farm.test.mjs`): run one cargo line on a Kaggle GPU kernel (T4) when the PC's GPU legs are queued.
+- `tools/head-build.mjs` (+ `tools/head-build.test.mjs`): export HEAD alone to `target/head-src` and build the release arena there, so a frame proof is of landed work and not of another writer's half-done tree.
 - `tools/hash-util.mjs` (+ `tools/hash-util.test.mjs`): hash helpers.
 - `tools/hit-list.mjs` (+ `tools/hit-list.test.mjs`): check every fight cue has a CC0 sound with provenance.
 - `tools/hooks-install.mjs` (+ `tools/hooks-install.test.mjs`): point git at the tracked `tools/hooks` via `core.hooksPath` (`--check` reports, exit 1); never copies into `.git/hooks`.
@@ -101,6 +109,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/pick-gold.mjs` (+ `tools/pick-gold.test.mjs`): write or check `fixtures/pick/gold.txt`, 100 pixel tasks answered by this file's own ray maths (EV21).
 - `tools/plan-atlas.mjs` (+ `tools/plan-atlas.test.mjs`): read the plan atlas.
 - `tools/playtest-log.mjs` (+ `tools/playtest-log.test.mjs`): check a playtest CSV log.
+- `tools/polyhaven-glb.mjs` (+ `tools/polyhaven-glb.test.mjs`): wrap a Poly Haven `.gltf` + `.bin` + textures into one self-contained `.glb` with no external URIs; same inputs, same bytes.
 - `tools/potato-check.mjs` (+ `tools/potato-check.test.mjs`): run the potato gate.
 - `tools/product-check.mjs` (+ `tools/product-check.test.mjs`): check the built game.
 - `tools/proof.mjs` (+ `tools/proof.test.mjs`): golden hash check.

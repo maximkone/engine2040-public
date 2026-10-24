@@ -611,7 +611,7 @@ fn run_clinch<S: StepSampler>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::clinch::ClinchStats;
+    use super::super::clinch::{ClinchStats, PASSES};
     use super::super::powered::GETUP_BUDGET_TICKS;
     use super::*;
     use engine_core::alloc_probe;
@@ -790,5 +790,263 @@ mod tests {
         assert_eq!(pair[0].id, 0, "the pass sorts the fighters by id");
         assert_eq!((a.state_hash(), b.state_hash()), before);
         assert_eq!(deepest_overlap(&a, &b), 0.0);
+    }
+
+    // ------------------------------------------------------------ PX18 soak
+
+    /// Fighters in the clinch soak: the row's eight, in one pile.
+    const SOAK_FIGHTERS: usize = 8;
+    /// Seeded clinch-falls the row's Accept names.
+    const SOAK_FALLS: usize = 50;
+    /// Fixed steps per soak fall: the pile lands inside ~30 ticks and the shoves
+    /// then drive it together for the rest.
+    const SOAK_STEPS: u32 = 60;
+    /// Bones per soak chain, matching the tape fixture.
+    const SOAK_BONES: usize = 4;
+    /// Spawn height of a soak chain root, meters: one meter of airtime, so the
+    /// fighters land inside the fall instead of still falling at its end.
+    const SOAK_ROOT_HEIGHT_M: f32 = 1.2;
+    /// Spawn spacing, meters: neighbours start touching or a few centimeters
+    /// inside each other (a capsule pair spans 0.30 m) and the seeded hits
+    /// drive the pile together; the parting pass has to open it again.
+    const SOAK_SPACING_M: f32 = 0.30;
+    /// Deepest capsule overlap allowed after the parting pass, meters: the row's 1 cm.
+    const SOAK_OVERLAP_CAP_M: f32 = 0.01;
+    /// No bone may carry more than this, meters per second: the soak never explodes.
+    const SOAK_SPEED_CAP_M_S: f32 = 30.0;
+    /// Deepest overlap a 4-bone chain pair can read, meters: the fixture's own span,
+    /// so a per-event reading past it would mean a broken bone capsule.
+    const SOAK_DEEPEST_CAP_M: f32 = 2.0;
+    /// Fighter pairs in one soak pass.
+    const SOAK_PAIRS: usize = SOAK_FIGHTERS * (SOAK_FIGHTERS - 1) / 2;
+    /// Bone pairs one pass may part, summed: the pass's own work bound
+    /// (`PASSES * fighter pairs * bone pairs`), so a per-event count past it is impossible
+    /// by construction and the reading posts the headroom instead.
+    const SOAK_PARTED_CAP: usize = PASSES * SOAK_PAIRS * SOAK_BONES * SOAK_BONES;
+
+    /// One soak fall's readings: end hashes plus every bound the row names.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct SoakFall {
+        /// Digest over the eight end hashes.
+        digest: u64,
+        /// Deepest capsule overlap across all pairs, read after the parting pass.
+        overlap_max: f32,
+        /// Deepest floor penetration, meters.
+        floor_max: f32,
+        /// Fastest bone, meters per second.
+        speed_max: f32,
+        /// Bone pairs the pass parted, summed over the fall.
+        parted: usize,
+        /// Most bone pairs any single pass parted: the per-event work bound.
+        parted_max: u32,
+        /// Deepest single-pass overlap the pass met.
+        deepest_m: f32,
+        /// Hit events that landed in the fall.
+        hits: u32,
+        /// Every bone position and velocity stayed finite.
+        finite: bool,
+    }
+
+    /// Fastest bone in one ragdoll, meters per second; `0.0` when it carries nothing.
+    fn max_bone_speed(ragdoll: &Ragdoll) -> f32 {
+        let mut fastest = 0.0f32;
+        for i in 0..ragdoll.bone_count() {
+            if let Some(v) = ragdoll.bone_linvel(i) {
+                fastest = fastest.max((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt());
+            }
+        }
+        fastest
+    }
+
+    /// Every bone position and velocity of one ragdoll is finite.
+    fn all_finite(ragdoll: &Ragdoll) -> bool {
+        (0..ragdoll.bone_count()).all(|i| {
+            let pos = ragdoll
+                .bone_position(i)
+                .is_some_and(|p| p.iter().all(|c| c.is_finite()));
+            let vel = ragdoll
+                .bone_linvel(i)
+                .is_some_and(|v| v.iter().all(|c| c.is_finite()));
+            pos && vel
+        })
+    }
+
+    /// One seeded eight-fighter clinch fall: fighters spawn just clear in a
+    /// 4x2 grid, each takes one seeded shove at its own tick (destruction events
+    /// landing through the clinch), every tick steps all eight in id order and
+    /// then runs the parting pass, and the readings fold the bounds the row names.
+    /// `part` off is the control: the same fall without the pass.
+    fn run_soak_fall(event: usize, part: bool) -> SoakFall {
+        let stream = u64::try_from(event).unwrap_or(u64::MAX);
+        let mut rng = Rng::new(TAPE_SEED).fork_named("soak").fork(stream);
+        let mut fighters: Vec<Ragdoll> = Vec::with_capacity(SOAK_FIGHTERS);
+        let mut roots = Vec::with_capacity(SOAK_FIGHTERS);
+        for i in 0..SOAK_FIGHTERS {
+            // `i` is below `SOAK_FIGHTERS`, so both lanes fit a `u16`.
+            let lane = f32::from(u16::try_from(i % 4).unwrap_or(0));
+            let row = f32::from(u16::try_from(i / 4).unwrap_or(0));
+            let jitter = |rng: &mut Rng| unit(rng.next_u64()) * 0.1 - 0.05;
+            let root = [
+                (lane - 1.5) * SOAK_SPACING_M + jitter(&mut rng),
+                SOAK_ROOT_HEIGHT_M,
+                (row - 0.5) * SOAK_SPACING_M + jitter(&mut rng),
+            ];
+            roots.push(root);
+            fighters.push(spawn_on_floor(root).expect("soak fighter spawns"));
+        }
+        // One seeded shove per fighter, each driving it at the pile centre so the
+        // clinch closes from the clear spawn (destruction events land through it).
+        let mut hits = Vec::with_capacity(SOAK_FIGHTERS);
+        for root in &roots {
+            let tick = u32::try_from(rng.next_u64() % u64::from(SOAK_STEPS)).unwrap_or(0);
+            let bone = usize::try_from(rng.next_u64() % u64::try_from(SOAK_BONES).unwrap_or(1))
+                .unwrap_or(0);
+            let shove = 0.03 + unit(rng.next_u64()) * 0.05;
+            // The grid never puts a root on the centre, but keep the direction total.
+            let reach = (root[0] * root[0] + root[2] * root[2]).sqrt().max(1.0e-6);
+            let impulse = [
+                -root[0] / reach * shove,
+                (unit(rng.next_u64()) * 2.0 - 1.0) * 0.02,
+                -root[2] / reach * shove,
+            ];
+            hits.push((tick, bone, impulse));
+        }
+        let (mut overlap_max, mut floor_max, mut speed_max) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut parted, mut parted_max, mut deepest_m, mut landed, mut finite) =
+            (0usize, 0u32, 0.0f32, 0u32, true);
+        for t in 0..SOAK_STEPS {
+            for (i, fighter) in fighters.iter_mut().enumerate() {
+                let (tick, bone, impulse) = hits[i];
+                if tick == t {
+                    fighter
+                        .apply_hit(bone, impulse, u64::from(t))
+                        .expect("soak hit lands");
+                    landed += 1;
+                }
+                fighter.step(FIXED_DT).expect("soak step runs");
+                floor_max = floor_max.max(penetration(fighter));
+                speed_max = speed_max.max(max_bone_speed(fighter));
+                finite &= all_finite(fighter);
+            }
+            if part {
+                let stats = {
+                    let mut members: Vec<Member<'_>> = fighters
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(i, ragdoll)| Member {
+                            id: u8::try_from(i).unwrap_or(0),
+                            ragdoll,
+                        })
+                        .collect();
+                    part_members(&mut members)
+                };
+                parted = parted.saturating_add(usize::try_from(stats.parted).unwrap_or(0));
+                parted_max = parted_max.max(stats.parted);
+                deepest_m = deepest_m.max(stats.deepest_m);
+            }
+            // Axis-aware overlap over every pair, read after the pass (or instead of it).
+            for low in 0..SOAK_FIGHTERS {
+                for high in low + 1..SOAK_FIGHTERS {
+                    let (head, tail) = fighters.split_at(high);
+                    overlap_max = overlap_max.max(deepest_overlap(&head[low], &tail[0]));
+                }
+            }
+        }
+        let hashes: Vec<u64> = fighters.iter().map(Ragdoll::state_hash).collect();
+        SoakFall {
+            digest: Rng::digest(&hashes),
+            overlap_max,
+            floor_max,
+            speed_max,
+            parted,
+            parted_max,
+            deepest_m,
+            hits: landed,
+            finite,
+        }
+    }
+
+    /// PX18 acceptance: eight fighters clinch in one pile with seeded destruction
+    /// hits landing through them, over [`SOAK_FALLS`] seeded falls. The soak
+    /// repeats bit for bit (hash x2), every pair separates to under 1 cm of
+    /// capsule overlap after the parting pass, no bone leaves the floor cap or the
+    /// speed cap, no position or velocity goes non-finite, and the pass's per-event
+    /// work stays inside its own bound. The control fall without the pass sinks
+    /// deeper than 1 cm, so the bound has teeth.
+    #[test]
+    fn clinch_soak_eight_fighters_hash_x2_caps_held() {
+        let first: Vec<SoakFall> = (0..SOAK_FALLS).map(|e| run_soak_fall(e, true)).collect();
+        let second: Vec<SoakFall> = (0..SOAK_FALLS).map(|e| run_soak_fall(e, true)).collect();
+        assert_eq!(first, second, "the eight-fighter soak must repeat exactly");
+        let digest = Rng::digest(&first.iter().map(|f| f.digest).collect::<Vec<_>>());
+        assert_eq!(
+            digest,
+            Rng::digest(&second.iter().map(|f| f.digest).collect::<Vec<_>>()),
+            "hash x2"
+        );
+        let (mut parted, mut deepest, mut hits, mut overlap, mut floor, mut speed) =
+            (0usize, 0.0f32, 0u32, 0.0f32, 0.0f32, 0.0f32);
+        for (event, fall) in first.iter().enumerate() {
+            assert!(fall.finite, "event {event}: a bone went non-finite");
+            assert!(
+                fall.overlap_max < SOAK_OVERLAP_CAP_M,
+                "event {event}: fighters sank {} m into each other",
+                fall.overlap_max
+            );
+            assert!(
+                (0.0..PENETRATION_CAP_M).contains(&fall.floor_max),
+                "event {event}: floor penetration {} m out of bounds",
+                fall.floor_max
+            );
+            assert!(
+                fall.speed_max <= SOAK_SPEED_CAP_M_S,
+                "event {event}: a bone carries {} m/s, past the cap",
+                fall.speed_max
+            );
+            assert!(
+                usize::try_from(fall.parted_max).unwrap_or(usize::MAX) <= SOAK_PARTED_CAP,
+                "event {event}: one pass parted {} pairs past the bound {SOAK_PARTED_CAP}",
+                fall.parted_max
+            );
+            assert!(
+                fall.hits <= u32::try_from(SOAK_FIGHTERS).unwrap_or(u32::MAX),
+                "event {event}: {} hits past the one-per-fighter event cap",
+                fall.hits
+            );
+            assert!(
+                (0.0..SOAK_DEEPEST_CAP_M).contains(&fall.deepest_m),
+                "event {event}: deepest overlap {} m past the fixture span",
+                fall.deepest_m
+            );
+            parted = parted.saturating_add(fall.parted);
+            deepest = deepest.max(fall.deepest_m);
+            hits = hits.saturating_add(fall.hits);
+            overlap = overlap.max(fall.overlap_max);
+            floor = floor.max(fall.floor_max);
+            speed = speed.max(fall.speed_max);
+        }
+        // The soak must actually clinch: the shoves close the spawn gap and the
+        // pass parts bone pairs every fall.
+        assert!(parted > 0, "the soak never clinched");
+        assert_eq!(
+            hits,
+            u32::try_from(SOAK_FALLS * SOAK_FIGHTERS).unwrap_or(u32::MAX),
+            "every fighter takes exactly one seeded hit"
+        );
+        // Control: the same eight fighters and hits without the pass sink past the
+        // 1 cm limit on the first fall, so the bound above has teeth.
+        let free = run_soak_fall(0, false);
+        assert!(
+            free.overlap_max > SOAK_OVERLAP_CAP_M,
+            "the control must interpenetrate: {} m",
+            free.overlap_max
+        );
+        assert_eq!(free.parted, 0, "the control runs no pass");
+        println!(
+            "PX18 soak: falls={SOAK_FALLS} fighters={SOAK_FIGHTERS} digest={digest:016x} \
+             overlap_max={overlap:.4}m floor_max={floor:.4}m speed_max={speed:.2}m/s \
+             parted={parted} deepest={deepest:.4}m control_overlap={:.4}m",
+            free.overlap_max
+        );
     }
 }

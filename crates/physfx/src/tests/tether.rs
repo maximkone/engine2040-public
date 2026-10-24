@@ -2,7 +2,7 @@
 //! slack, never explodes, sleeps, falls when released and pulls like a spring and a damper.
 
 use super::*;
-use crate::tether::Tether;
+use crate::tether::{RopeBlock, Tether};
 use engine_core::laws;
 
 /// The rope's lowest allowed node height, meters (the module's own constant is private).
@@ -375,4 +375,129 @@ fn a_rope_replayed_with_the_same_ends_is_the_same_rope() {
         t.step();
     })
     .expect("two runs of one rope match every tick");
+}
+
+/// How far `p` is from a block's axis: the capsule's own distance test.
+fn off_block(block: &RopeBlock, p: [f32; 3]) -> f32 {
+    let axis = [0, 1, 2].map(|k| block.b[k] - block.a[k]);
+    let l2 = axis.iter().map(|c| c * c).sum::<f32>();
+    let along = if l2 < 1.0e-12 {
+        0.0
+    } else {
+        ((0..3).map(|k| (p[k] - block.a[k]) * axis[k]).sum::<f32>() / l2).clamp(0.0, 1.0)
+    };
+    let foot = [0, 1, 2].map(|k| block.a[k] + axis[k] * along);
+    (0..3)
+        .map(|k| (p[k] - foot[k]) * (p[k] - foot[k]))
+        .sum::<f32>()
+        .sqrt()
+}
+
+/// A shoulder the rope hangs over: a capsule standing across the middle of the span, at chest
+/// height, wide enough that the sagging rope crosses it.
+fn shoulder() -> RopeBlock {
+    RopeBlock {
+        a: [2.5, 0.6, 0.0],
+        b: [2.5, 1.3, 0.0],
+        r: 0.35,
+    }
+}
+
+#[test]
+fn a_rope_never_leaves_a_node_inside_a_body() {
+    // A rope hung between two hands at 1.5 m sags through a capsule at chest height. The body
+    // pushes every node out to its surface plus the rope's radius, sweep after sweep, so the rope
+    // goes round it instead of through it.
+    let mut rope = Tether::new(1, A, end(5.0), 5.2, 20, 16);
+    let block = shoulder();
+    for tick in 0..60 {
+        rope.set_ends(A, end(5.0));
+        rope.step_beside(&[block], 0.5);
+        for node in rope.nodes(1.0) {
+            assert!(
+                node.iter().all(|c| c.is_finite()),
+                "tick {tick} went non-finite: {node:?}"
+            );
+            let gap = off_block(&block, node);
+            assert!(
+                gap >= block.r,
+                "tick {tick}: a node sits {gap} m from the body's axis, inside its {} m",
+                block.r
+            );
+        }
+    }
+    // The plain rope hangs through the body, so it is the block list that lifts this one: the
+    // same ends with no body leave nodes inside the capsule.
+    let mut plain = Tether::new(2, A, end(5.0), 5.2, 20, 16);
+    for _ in 0..60 {
+        plain.set_ends(A, end(5.0));
+        plain.step();
+    }
+    let through = plain
+        .nodes(1.0)
+        .iter()
+        .filter(|node| off_block(&block, **node) < block.r)
+        .count();
+    assert!(
+        through > 0,
+        "the plain rope must hang through the body for this test to mean anything"
+    );
+}
+
+#[test]
+fn a_stretched_rope_never_spans_past_its_rest_length() {
+    // A taut rope reeled down to 2 m while its ends stay 5 m apart is drawn stretched; let go of
+    // both ends, and its span comes back to its length inside the first tick.
+    let mut rope = Tether::new(1, A, end(5.0), 4.0, 12, 8);
+    rope.set_rest(2.0);
+    rope.set_ends(A, end(5.0));
+    rope.step();
+    let cap = 2.0 * 1.01;
+    rope.release();
+    for tick in 0..60 {
+        rope.step_beside(&[], 0.5);
+        let nodes = rope.nodes(1.0);
+        let last = nodes.len() - 1;
+        let span = (0..3)
+            .map(|k| (nodes[last][k] - nodes[0][k]) * (nodes[last][k] - nodes[0][k]))
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            span <= cap + 1.0e-3,
+            "tick {tick}: a {cap} m rope spans {span} m"
+        );
+    }
+}
+
+#[test]
+fn no_blocks_keeps_the_old_rope_bytes() {
+    // An empty block list is the rope exactly as HEAD drew it: the existing tests pin its sag
+    // depth, total length, taut line and pull, and the new call must reproduce them bit for bit.
+    let run = |beside: bool| {
+        let mut rope = Tether::new(4, A, end(3.0), 4.0, 20, 16);
+        for tick in 0..200 {
+            let phase = f32::from(u16::try_from(tick).unwrap_or(u16::MAX)) * 0.07;
+            rope.set_ends(A, end(3.0 + 1.5 * phase.sin()));
+            if beside {
+                rope.step_beside(&[], 0.5);
+            } else {
+                rope.step();
+            }
+        }
+        (rope.nodes(0.0), rope.nodes(1.0))
+    };
+    assert_eq!(run(false), run(true));
+}
+
+#[test]
+fn the_same_body_gives_the_same_rope_twice() {
+    let run = || {
+        let mut rope = Tether::new(7, A, end(5.0), 6.0, 20, 16);
+        for _ in 0..120 {
+            rope.set_ends(A, end(5.0));
+            rope.step_beside(&[shoulder()], 0.35);
+        }
+        rope.nodes(1.0)
+    };
+    assert_eq!(run(), run());
 }
