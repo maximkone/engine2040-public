@@ -133,13 +133,29 @@ pub(super) const GPU_CULL_ENV: &str = "E2040_GPU_CULL";
 /// The flag as a bool, from the raw env value. Named so a test reads the
 /// parse without touching the process environment.
 pub(super) fn gpu_cull_flag_value(value: Option<&str>) -> bool {
-    matches!(value, Some("1") | Some("true"))
+    matches!(value, Some("1" | "true"))
 }
 
-/// Is the GPU cull plan asked for this frame? Read once per submit.
+/// The flag as the frame reads it: a plain bool, set once when a presenter is
+/// built. `env::var` builds a `String` on every call, so asking the
+/// environment per frame allocated one string per frame (cq7
+/// `steady_120_frames_read_zero_allocs`, 120 allocs in 120 frames). Relaxed
+/// ordering suffices: the store happens before the first frame and no other
+/// state rides on it.
+static GPU_CULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Read the environment once and store the flag; call it when a presenter is
+/// built, never per frame. This is the only place that touches the
+/// environment for this knob, so the frame path allocates nothing.
+pub(super) fn set_gpu_cull_from_env() {
+    let on = gpu_cull_flag_value(std::env::var(GPU_CULL_ENV).ok().as_deref());
+    GPU_CULL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Is the GPU cull plan asked for this frame? A relaxed atomic load: no
+/// allocation, no environment lookup, and the same answer every frame.
 pub(super) fn gpu_cull_requested() -> bool {
-    let raw = std::env::var(GPU_CULL_ENV).ok();
-    gpu_cull_flag_value(raw.as_deref())
+    GPU_CULL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// One frame's GPU-rule cull plan: the same pipeline-grouped order plus the
@@ -223,9 +239,8 @@ pub(super) fn gpu_submit_order(
     if slots == 0 {
         return None;
     }
-    for slot in 0..slots {
-        let draw = sorted[slot];
-        plan.spheres[slot] = bounds.spheres.get(draw).copied().unwrap_or([0.0; 4]);
+    for (slot, draw) in sorted.iter().enumerate().take(slots) {
+        plan.spheres[slot] = bounds.spheres.get(*draw).copied().unwrap_or([0.0; 4]);
         plan.flags[slot] = 0;
     }
     let packed =
@@ -233,8 +248,8 @@ pub(super) fn gpu_submit_order(
     if packed != slots {
         return None;
     }
-    for slot in 0..slots {
-        if !bounds.cullable.get(sorted[slot]).copied().unwrap_or(false) {
+    for (slot, draw) in sorted.iter().enumerate().take(slots) {
+        if !bounds.cullable.get(*draw).copied().unwrap_or(false) {
             plan.flags[slot] = 1;
         }
     }
@@ -242,9 +257,9 @@ pub(super) fn gpu_submit_order(
     plan.args = crate::draw::indirect_args_5(count);
     plan.packed = slots;
     plan.submitted = 0;
-    for slot in 0..slots {
+    for (slot, draw) in sorted.iter().enumerate().take(slots) {
         if plan.flags[slot] == 1 {
-            plan.order[plan.submitted] = sorted[slot];
+            plan.order[plan.submitted] = *draw;
             plan.submitted += 1;
         }
     }
@@ -569,5 +584,28 @@ mod tests {
         assert!(gpu_cull_flag_value(Some("1")), "1 asks for the plan");
         assert!(gpu_cull_flag_value(Some("true")), "true asks for the plan");
         assert_eq!(GPU_CULL_ENV, "E2040_GPU_CULL", "the flag names its env var");
+    }
+
+    #[test]
+    fn gpu_cull_flag_reads_the_env_once_per_process() {
+        // cq7: a steady frame allocated one `String` because `env::var` ran per
+        // frame. The environment is read when a presenter is built (or here, by
+        // the same entry); 120 frames after that must not allocate at all and
+        // must keep the same answer.
+        set_gpu_cull_from_env();
+        let first = gpu_cull_requested();
+        let ((), probe) = engine_core::alloc_probe::measure(|| {
+            for _ in 0..120u32 {
+                assert_eq!(gpu_cull_requested(), first, "the flag is stable");
+            }
+        });
+        assert_eq!(probe.calls, 0, "no allocation on a steady frame");
+        // The knob still follows the environment text it parses.
+        let raw = std::env::var(GPU_CULL_ENV).ok();
+        assert_eq!(
+            first,
+            gpu_cull_flag_value(raw.as_deref()),
+            "the frame reads the flag the environment set"
+        );
     }
 }
