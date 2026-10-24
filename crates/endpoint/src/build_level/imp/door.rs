@@ -200,6 +200,12 @@ pub(super) fn build_level_on_state(
             .map_err(|error| cap_error(&error, &granted, &state.doc))?;
             // A landed level is a watch event: move the session cache.
             state.refresh_watch();
+            // AD20: the door answers `scene.query reachable` from the level it
+            // just built, so bake the landed level's own nav tiles and hand
+            // them to the session.
+            let mut level_actors = room_shell();
+            level_actors.extend(snapshot_live(&state.doc));
+            state.hand_level_nav(&bake_nav(&level_actors, LIVE_BASE));
             let placements: Vec<PlacedDto> = ids
                 .iter()
                 .zip(edit.report.placements.iter())

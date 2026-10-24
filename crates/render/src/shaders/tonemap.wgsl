@@ -85,6 +85,10 @@ fn analytic_one(x: f32) -> f32 {
 }
 // Pipeline-selectable branch: false keeps the default hue-keeping path.
 override DISPLAY_ANALYTIC: bool = false;
+// Pipeline-selectable curve: true swaps the ACES fit for Khronos PBR Neutral
+// (below), the same exposure, knee and drain after it, so a capture pair
+// differs in the curve alone. false keeps the ACES fit.
+override DISPLAY_NEUTRAL: bool = false;
 // The one tone map of the crate: hue-keeping by construction. The neutral
 // fit is evaluated at the peak of the frame, the white point normalises it,
 // and the result is a single scale applied to all three channels. A per
@@ -116,12 +120,88 @@ fn analytic_display(color: vec3<f32>) -> vec3<f32> {
     let toned_peak = analytic_one(peak * DISPLAY_EXPOSURE) / white;
     return capped * (toned_peak / max(peak, 1e-6));
 }
+// Khronos PBR Neutral (the commerce neutral curve): a subtractive black
+// offset, then a highlight shoulder from NEUTRAL_START that eases the peak
+// toward display white and desaturates it toward white. The offset is the same
+// for every channel and the shoulder is one scale, so the hue survives below
+// the shoulder. Output stays in 0..1 for any finite input.
+const NEUTRAL_START: f32 = 0.76;
+const NEUTRAL_DESAT: f32 = 0.15;
+fn pbr_neutral(color: vec3<f32>) -> vec3<f32> {
+    let x = min(color.x, min(color.y, color.z));
+    var offset = 0.04;
+    if (x < 0.08) {
+        offset = x - 6.25 * x * x;
+    }
+    var c = color - vec3<f32>(offset);
+    let peak = max(c.x, max(c.y, c.z));
+    if (peak < NEUTRAL_START) {
+        return c;
+    }
+    let d = 1.0 - NEUTRAL_START;
+    let new_peak = 1.0 - d * d / (peak + d - NEUTRAL_START);
+    c = c * (new_peak / peak);
+    let g = 1.0 - 1.0 / (NEUTRAL_DESAT * (peak - new_peak) + 1.0);
+    return mix(c, vec3<f32>(new_peak), g);
+}
+// The Neutral option at the display's own exposure, the ACES fit's twin.
+fn neutral_display(color: vec3<f32>) -> vec3<f32> {
+    let safe = max(color, vec3<f32>(0.0));
+    let capped = min(safe, vec3<f32>(1e6));
+    return pbr_neutral(capped * DISPLAY_EXPOSURE);
+}
+// SW50: the AgX arm, beside the ACES and PBR Neutral curves. A power toe under
+// the 0.18 display crossover, then a Reinhard-like shoulder that eases the top
+// of the range toward white instead of clipping it, per channel: the sand at
+// 4.0 lands near 0.9 display and keeps more chroma than the ACES fit. The CPU
+// twin is `crate::tonemap::agx`.
+override DISPLAY_AGX: bool = false;
+const AGX_SLOPE: f32 = 5.30;
+const AGX_SHOULDER_MAX: f32 = 0.1815;
+const AGX_CROSSOVER: f32 = 0.18;
+const AGX_TOE_POWER: f32 = 1.35;
+fn agx_curve(x: f32) -> f32 {
+    let v = max(x, 0.0);
+    if (v < AGX_CROSSOVER) {
+        return AGX_CROSSOVER * pow(v / AGX_CROSSOVER, AGX_TOE_POWER);
+    }
+    let num = AGX_SLOPE * v * (1.0 + v);
+    let den = 1.0 + AGX_SLOPE * v / AGX_SHOULDER_MAX;
+    return clamp(num / den, 0.0, 1.0);
+}
+fn agx_display(color: vec3<f32>) -> vec3<f32> {
+    let capped = min(max(color, vec3<f32>(0.0)), vec3<f32>(1e6));
+    return vec3<f32>(agx_curve(capped.x), agx_curve(capped.y), agx_curve(capped.z));
+}
+// Radial grade vignette, applied to the display value after the tone map and
+// before the grade: 1 inside GRADE_VIGNETTE_RADIUS, falling to
+// 1 - GRADE_VIGNETTE_STRENGTH at the corners. r2 is the squared distance from
+// the frame centre, scaled so a corner is 1, and the falloff is a smoothstep
+// from RADIUS^2 to 1. One multiply per pixel on all three channels; strength 0
+// is the identity. RADIUS is a fraction of the centre-to-corner distance, 0..1.
+const GRADE_VIGNETTE_STRENGTH: f32 = 0.20;
+const GRADE_VIGNETTE_RADIUS: f32 = 0.60;
+fn grade_vignette(c: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+    if (GRADE_VIGNETTE_STRENGTH <= 0.0) {
+        return c;
+    }
+    let d = uv - vec2<f32>(0.5);
+    let r2 = dot(d, d) * 2.0;
+    let t = smoothstep(GRADE_VIGNETTE_RADIUS * GRADE_VIGNETTE_RADIUS, 1.0, r2);
+    return c * (1.0 - GRADE_VIGNETTE_STRENGTH * t);
+}
 // One display source for the frame: default hue-keeping, analytic when
 // selected, then the display look (the highlight knee, then the value-gated
-// stone drain) for both branches.
+// stone drain) for every branch. DISPLAY_NEUTRAL swaps only the curve.
 fn display_tonemap(color: vec3<f32>) -> vec3<f32> {
     if (DISPLAY_ANALYTIC) {
         return stone_drain(display_knee(analytic_display(color)));
+    }
+    if (DISPLAY_NEUTRAL) {
+        return stone_drain(display_knee(neutral_display(color)));
+    }
+    if (DISPLAY_AGX) {
+        return stone_drain(display_knee(agx_display(color)));
     }
     return stone_drain(display_knee(hue_keep_display(color)));
 }
@@ -150,6 +230,26 @@ fn dither4(x: u32, y: u32) -> f32 {
         default: { m = 5u; }
     }
     return (f32(m) + 0.5) / 16.0 / 255.0 - 0.5 / 255.0;
+}
+
+// SW53: ordered screen-space dither for the 8-bit output store (Iestyn's
+// Portal 2 RGB dither, seven instructions). Added after the linear->sRGB encode
+// and before the store: zero mean over a block, so a flat sky or sand gradient
+// shows no band edge. Half a step only softens an edge, so the width is 2.5
+// steps, which splits a band into nine codes on a three-step ramp. The CPU twin
+// is `crate::dither`.
+override OUTPUT_DITHER_BITS: f32 = 8.0;
+const DITHER_FREQ: vec2<f32> = vec2<f32>(171.0, 231.0);
+const DITHER_PHASE: vec3<f32> = vec3<f32>(103.0, 71.0, 97.0);
+const DITHER_STEPS: f32 = 255.0;
+const DITHER_HALF_STEPS: f32 = 2.5;
+fn screen_space_dither(frag: vec2<f32>) -> vec3<f32> {
+    let phase = fract(vec3<f32>(dot(DITHER_FREQ, frag)) / DITHER_PHASE);
+    return (phase - vec3<f32>(0.5)) * (2.0 * DITHER_HALF_STEPS) / DITHER_STEPS;
+}
+// One call site: the present shader's encode, right before the store.
+fn dither_output(encoded: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    return clamp(encoded + screen_space_dither(frag), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 // PORT(bevyengine/bevy@v0.15.0:crates/bevy_render/src/color_operations.wgsl): inverse_gamma (sRGB EOTF).

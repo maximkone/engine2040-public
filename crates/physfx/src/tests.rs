@@ -3,6 +3,7 @@
 mod blast;
 mod body;
 mod contacts;
+mod follow;
 mod hinge;
 mod hit;
 mod impact;
